@@ -1,0 +1,24 @@
+add_executable(pathguard_core_smoke
+  unit/core_smoke_test.cpp
+)
+
+target_link_libraries(pathguard_core_smoke PRIVATE pathguard_core)
+add_test(NAME pathguard_core_smoke COMMAND pathguard_core_smoke)
+
+add_executable(pathguard_policy_test
+  unit/policy_test.cpp
+)
+
+target_link_libraries(pathguard_policy_test PRIVATE pathguard_core)
+add_test(NAME pathguard_policy_test COMMAND pathguard_policy_test)
+
+add_executable(pathguard_path_test
+  unit/path_test.cpp
+)
+
+target_link_libraries(pathguard_path_test PRIVATE pathguard_core)
+add_test(NAME pathguard_path_test COMMAND pathguard_path_test)
+
+add_executable(pathguard_binary_test unit/binary_test.cpp)
+target_link_libraries(pathguard_binary_test PRIVATE pathguard_core)
+add_test(NAME pathguard_binary_test COMMAND pathguard_binary_test)
