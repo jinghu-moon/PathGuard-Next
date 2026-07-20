@@ -15,6 +15,7 @@ The architecture baseline and performance plan are documented in:
 - [Architecture design](docs/00-architecture-design.md)
 - [Reference projects](docs/01-reference-projects.md)
 - [Performance audit and optimization plan](docs/02-performance-audit-and-optimization-plan.md)
+- [Redirect subsystem design](docs/03-redirect-subsystem-design.md)
 
 ## License
 

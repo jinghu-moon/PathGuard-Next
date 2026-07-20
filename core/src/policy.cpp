@@ -1,8 +1,8 @@
 #include "pathguard/policy.h"
 
-#include <algorithm>
 #include <charconv>
 #include <cctype>
+#include <unordered_set>
 
 namespace pathguard {
 namespace {
@@ -87,6 +87,8 @@ bool ParseRulesIni(std::string_view text, PolicyDocument* document, ParseError* 
     }
     *document = {};
     AppPolicy* current = nullptr;
+    std::unordered_set<std::string> package_names;
+    std::unordered_set<std::string> current_rule_keys;
     bool saw_schema = false;
     std::size_t line_number = 0;
     std::size_t offset = 0;
@@ -111,12 +113,13 @@ bool ParseRulesIni(std::string_view text, PolicyDocument* document, ParseError* 
             if (package.empty() || package.find_first_of(" \t=\r\n") != std::string::npos) {
                 return SetError(error, line_number, "invalid package section");
             }
-            if (std::any_of(document->apps.begin(), document->apps.end(), [&](const AppPolicy& app) { return app.package == package; })) {
+            if (!package_names.insert(package).second) {
                 return SetError(error, line_number, "duplicate package section");
             }
             document->apps.push_back({});
             current = &document->apps.back();
             current->package = package;
+            current_rule_keys.clear();
             continue;
         }
         if (line[0] == '-' || line.find("->") != std::string::npos) {
@@ -140,9 +143,13 @@ bool ParseRulesIni(std::string_view text, PolicyDocument* document, ParseError* 
                     return SetError(error, line_number, "invalid redirect paths");
                 }
             }
-            if (std::any_of(current->rules.begin(), current->rules.end(), [&](const Rule& existing) {
-                    return existing.action == rule.action && existing.source == rule.source && existing.target == rule.target;
-                })) {
+            std::string rule_key;
+            rule_key.reserve(rule.source.size() + rule.target.size() + 2);
+            rule_key.push_back(rule.action == RuleAction::kDeny ? 'D' : 'R');
+            rule_key.append(rule.source);
+            rule_key.push_back('\0');
+            rule_key.append(rule.target);
+            if (!current_rule_keys.insert(std::move(rule_key)).second) {
                 return SetError(error, line_number, "duplicate rule");
             }
             current->rules.push_back(std::move(rule));
@@ -171,6 +178,10 @@ bool ParseRulesIni(std::string_view text, PolicyDocument* document, ParseError* 
             if (value == "true") current->enabled = true;
             else if (value == "false") current->enabled = false;
             else return SetError(error, line_number, "invalid enabled value");
+        } else if (key == "media_compat") {
+            if (value == "off") current->media_compat = MediaCompat::kOff;
+            else if (value == "query_filter") current->media_compat = MediaCompat::kQueryFilter;
+            else return SetError(error, line_number, "invalid media_compat value");
         } else if (key == "users") {
             if (!ParseList(value, &current->users)) return SetError(error, line_number, "invalid users list");
         } else if (key == "processes") {

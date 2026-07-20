@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +27,47 @@
 
 namespace fs = std::filesystem;
 
+using PerfClock = std::chrono::steady_clock;
+
+static std::uint64_t NowNs() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        PerfClock::now().time_since_epoch()).count());
+}
+
+static std::uint64_t ElapsedNs(std::uint64_t start) {
+    const std::uint64_t now = NowNs();
+    return now >= start ? now - start : 0;
+}
+
+static std::uint64_t NsToUs(std::uint64_t value) { return value / 1000ULL; }
+
+struct CompilePerf {
+    std::uint64_t parse_ns = 0;
+    std::uint64_t validate_ns = 0;
+    std::uint64_t encode_ns = 0;
+    std::uint64_t compare_ns = 0;
+    std::uint64_t publish_ns = 0;
+    bool unchanged = false;
+    bool published = false;
+};
+
+static void LogCompilePerf(const char* phase, std::uint64_t read_ns,
+                           std::uint64_t debounce_ns, std::uint64_t stable_read_ns,
+                           const CompilePerf& perf) {
+    std::cout << "perf compile phase=" << phase
+              << " read_us=" << NsToUs(read_ns)
+              << " debounce_us=" << NsToUs(debounce_ns)
+              << " stable_read_us=" << NsToUs(stable_read_ns)
+              << " parse_us=" << NsToUs(perf.parse_ns)
+              << " validate_us=" << NsToUs(perf.validate_ns)
+              << " encode_us=" << NsToUs(perf.encode_ns)
+              << " compare_us=" << NsToUs(perf.compare_ns)
+              << " publish_us=" << NsToUs(perf.publish_ns)
+              << " unchanged=" << (perf.unchanged ? 1 : 0)
+              << " published=" << (perf.published ? 1 : 0)
+              << '\n' << std::flush;
+}
+
 static bool ReadAll(const fs::path& path, std::string* output) {
     std::ifstream input(path, std::ios::binary);
     if (!input) return false;
@@ -34,69 +76,107 @@ static bool ReadAll(const fs::path& path, std::string* output) {
 }
 
 static bool CompileText(const std::string& text, const fs::path& output,
-                        bool* published, std::string* error) {
-    *published = false;
+                        CompilePerf* perf, std::string* error) {
+    if (perf == nullptr) return false;
+    *perf = {};
     pathguard::PolicyDocument document;
     pathguard::ParseError parse_error;
-    if (!pathguard::ParseRulesIni(text, &document, &parse_error)) { *error = "line " + std::to_string(parse_error.line) + ": " + parse_error.message; return false; }
-    for (auto& app : document.apps) {
-        if (!pathguard::ValidatePolicy(&app, &parse_error)) { *error = "line " + std::to_string(parse_error.line) + ": " + parse_error.message; return false; }
+    const std::uint64_t parse_started = NowNs();
+    if (!pathguard::ParseRulesIni(text, &document, &parse_error)) {
+        perf->parse_ns = ElapsedNs(parse_started);
+        *error = "line " + std::to_string(parse_error.line) + ": " + parse_error.message;
+        return false;
     }
+    perf->parse_ns = ElapsedNs(parse_started);
+    const std::uint64_t validate_started = NowNs();
+    for (auto& app : document.apps) {
+        if (!pathguard::ValidatePolicy(&app, &parse_error)) {
+            perf->validate_ns = ElapsedNs(validate_started);
+            *error = "line " + std::to_string(parse_error.line) + ": " + parse_error.message;
+            return false;
+        }
+    }
+    perf->validate_ns = ElapsedNs(validate_started);
     std::vector<std::uint8_t> bytes;
-    if (!pathguard::EncodePolicy(document, 1, &bytes, &parse_error)) { *error = parse_error.message; return false; }
+    const std::uint64_t encode_started = NowNs();
+    if (!pathguard::EncodePolicy(document, 1, &bytes, &parse_error)) {
+        perf->encode_ns = ElapsedNs(encode_started);
+        *error = parse_error.message;
+        return false;
+    }
+    perf->encode_ns = ElapsedNs(encode_started);
+    const std::uint64_t compare_started = NowNs();
     std::string current;
     if (ReadAll(output, &current)
         && current.size() == bytes.size()
         && std::memcmp(current.data(), bytes.data(), bytes.size()) == 0) {
+        perf->compare_ns = ElapsedNs(compare_started);
+        perf->unchanged = true;
         return true;
     }
+    perf->compare_ns = ElapsedNs(compare_started);
+    const std::uint64_t publish_started = NowNs();
     fs::create_directories(output.parent_path());
     const fs::path temporary = output.string() + ".tmp";
-    { std::ofstream file(temporary, std::ios::binary | std::ios::trunc); if (!file) { *error = "cannot create policy.bin.tmp"; return false; } file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())); }
+    { std::ofstream file(temporary, std::ios::binary | std::ios::trunc); if (!file) { perf->publish_ns = ElapsedNs(publish_started); *error = "cannot create policy.bin.tmp"; return false; } file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())); }
     std::error_code ec;
     fs::rename(temporary, output, ec);
     if (ec) { fs::remove(output, ec); fs::rename(temporary, output, ec); }
+    perf->publish_ns = ElapsedNs(publish_started);
     if (ec) { *error = "cannot publish policy.bin: " + ec.message(); return false; }
-    *published = true;
+    perf->published = true;
     return true;
 }
 
 static bool CompileFile(const fs::path& config, const fs::path& output,
+                        CompilePerf* perf, std::uint64_t* read_ns,
                         std::string* error) {
+    const std::uint64_t read_started = NowNs();
     std::string text;
     if (!ReadAll(config, &text)) {
+        if (read_ns != nullptr) *read_ns = ElapsedNs(read_started);
         *error = "cannot read rules.ini";
         return false;
     }
-    bool published = false;
-    return CompileText(text, output, &published, error);
+    if (read_ns != nullptr) *read_ns = ElapsedNs(read_started);
+    return CompileText(text, output, perf, error);
 }
 
 static void ReloadIfChanged(const fs::path& config, const fs::path& policy,
                             std::string* active_config,
                             std::string* rejected_config) {
+    const std::uint64_t reload_started = NowNs();
+    const std::uint64_t candidate_read_started = NowNs();
     std::string candidate;
     if (!ReadAll(config, &candidate)
         || candidate == *active_config
         || candidate == *rejected_config) {
         return;
     }
+    const std::uint64_t candidate_read_ns = ElapsedNs(candidate_read_started);
 
+    const std::uint64_t debounce_started = NowNs();
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    const std::uint64_t debounce_ns = ElapsedNs(debounce_started);
+    const std::uint64_t stable_read_started = NowNs();
     std::string stable_candidate;
     if (!ReadAll(config, &stable_candidate) || stable_candidate != candidate) {
         return;
     }
+    const std::uint64_t stable_read_ns = ElapsedNs(stable_read_started);
 
     std::string error;
-    bool published = false;
-    if (CompileText(stable_candidate, policy, &published, &error)) {
+    CompilePerf perf;
+    if (CompileText(stable_candidate, policy, &perf, &error)) {
         *active_config = std::move(stable_candidate);
         rejected_config->clear();
-        std::cout << (published ? "policy reloaded\n" : "policy unchanged\n")
-                  << std::flush;
+        LogCompilePerf("reload", candidate_read_ns, debounce_ns, stable_read_ns, perf);
+        std::cout << (perf.published ? "policy reloaded\n" : "policy unchanged\n")
+                  << "perf reload_total_us=" << NsToUs(ElapsedNs(reload_started))
+                  << '\n' << std::flush;
     } else {
         *rejected_config = std::move(stable_candidate);
+        LogCompilePerf("reload_failed", candidate_read_ns, debounce_ns, stable_read_ns, perf);
         std::cerr << "policy reload failed: " << error << '\n' << std::flush;
     }
 }
@@ -191,7 +271,10 @@ int main(int argc, char** argv) {
     const fs::path policy = module_dir / "run" / "policy.bin";
     if (compile || self_check) {
         std::string error;
-        const bool ok = CompileFile(config, policy, &error);
+        CompilePerf perf;
+        std::uint64_t read_ns = 0;
+        const bool ok = CompileFile(config, policy, &perf, &read_ns, &error);
+        LogCompilePerf(self_check ? "self_check" : "compile", read_ns, 0, 0, perf);
         if (!ok) { std::cerr << error << '\n'; return 1; }
         std::cout << (self_check ? "ok" : "compiled") << '\n';
         return 0;
@@ -203,11 +286,12 @@ int main(int argc, char** argv) {
     }
     {
         std::string error;
-        bool published = false;
-        if (!CompileText(active_config, policy, &published, &error)) {
+        CompilePerf perf;
+        if (!CompileText(active_config, policy, &perf, &error)) {
             std::cerr << "initial compile failed: " << error << '\n';
             return 1;
         }
+        LogCompilePerf("initial", 0, 0, 0, perf);
     }
     std::cout << "pathguardd ready; module-dir=" << module_dir.string() << '\n'
               << std::flush;

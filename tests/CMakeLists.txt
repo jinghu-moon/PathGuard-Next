@@ -19,6 +19,13 @@ add_executable(pathguard_path_test
 target_link_libraries(pathguard_path_test PRIVATE pathguard_core)
 add_test(NAME pathguard_path_test COMMAND pathguard_path_test)
 
+add_executable(pathguard_validation_test unit/validation_test.cpp)
+target_link_libraries(pathguard_validation_test PRIVATE pathguard_core)
+add_test(NAME pathguard_validation_test COMMAND pathguard_validation_test)
+
 add_executable(pathguard_binary_test unit/binary_test.cpp)
 target_link_libraries(pathguard_binary_test PRIVATE pathguard_core)
 add_test(NAME pathguard_binary_test COMMAND pathguard_binary_test)
+
+add_executable(pathguard_policy_benchmark perf/policy_benchmark.cpp)
+target_link_libraries(pathguard_policy_benchmark PRIVATE pathguard_core)

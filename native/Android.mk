@@ -26,6 +26,10 @@ LOCAL_MODULE := pathguard_zygisk
 LOCAL_SRC_FILES := \
     ../zygisk/src/module_entry.cpp \
     ../zygisk/src/media_query_hook.cpp
-LOCAL_C_INCLUDES := $(ROOT_PATH)/zygisk/include
+LOCAL_C_INCLUDES := $(ROOT_PATH)/zygisk/include $(ROOT_PATH)/core/include
+LOCAL_CPPFLAGS := -fno-threadsafe-statics
 LOCAL_LDLIBS := -llog
+ifneq ($(strip $(PATHGUARD_TEST_MOUNT_DELAY_MS)),)
+LOCAL_CPPFLAGS += -DPATHGUARD_TEST_MOUNT_DELAY_MS=$(PATHGUARD_TEST_MOUNT_DELAY_MS)
+endif
 include $(BUILD_SHARED_LIBRARY)

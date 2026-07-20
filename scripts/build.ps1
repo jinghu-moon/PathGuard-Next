@@ -1,7 +1,9 @@
 param(
     [string[]]$Abi = @('arm64-v8a'),
     [switch]$AllowMissingNative,
-    [switch]$SkipNative
+    [switch]$SkipNative,
+    [ValidateRange(0, 10000)]
+    [int]$ZygiskTestMountDelayMs = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,7 +16,8 @@ ctest --test-dir (Join-Path $root 'build') -C Release --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw "Host tests failed with exit code $LASTEXITCODE" }
 
 if (-not $SkipNative) {
-    & (Join-Path $root 'scripts/build-native.ps1') -Abi $Abi
+    & (Join-Path $root 'scripts/build-native.ps1') -Abi $Abi `
+        -ZygiskTestMountDelayMs $ZygiskTestMountDelayMs
 }
 
 & (Join-Path $root 'scripts/package.ps1') -Abi $Abi -AllowMissingNative:$AllowMissingNative

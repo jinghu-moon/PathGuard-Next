@@ -1,9 +1,9 @@
-#include <cassert>
 #include <string>
 
 #include "pathguard/path.h"
 #include "pathguard/policy.h"
 #include "pathguard/validation.h"
+#include "test_assert.h"
 
 int main() {
     std::string output;

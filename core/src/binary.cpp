@@ -1,16 +1,19 @@
 #include "pathguard/binary.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
+
+#include "pathguard/policy_format.h"
 
 namespace pathguard {
 namespace {
 
-constexpr std::uint32_t kMagic = 0x424E4750;  // P G N B, little endian
-constexpr std::uint16_t kFormatVersion = 1;
-constexpr std::size_t kHeaderSize = 40;
-constexpr std::size_t kPackageSize = 24;
-constexpr std::size_t kRuleSize = 20;
+constexpr std::uint32_t kMagic = binary_format::kMagic;
+constexpr std::uint16_t kFormatVersion = binary_format::kFormatVersion;
+constexpr std::size_t kHeaderSize = binary_format::kHeaderSize;
+constexpr std::size_t kPackageSize = binary_format::kPackageSize;
+constexpr std::size_t kRuleSize = binary_format::kRuleSize;
 
 void Put16(std::vector<std::uint8_t>* out, std::uint16_t value) {
     out->push_back(static_cast<std::uint8_t>(value));
@@ -35,9 +38,7 @@ bool Get64(const std::vector<std::uint8_t>& in, std::size_t* p, std::uint64_t* v
     *value = 0; for (int i = 0; i < 8; ++i) *value |= static_cast<std::uint64_t>(in[*p + i]) << (i * 8); *p += 8; return true;
 }
 std::uint32_t Hash(const std::vector<std::uint8_t>& input, std::size_t begin) {
-    std::uint32_t hash = 2166136261u;
-    for (std::size_t i = begin; i < input.size(); ++i) { hash ^= input[i]; hash *= 16777619u; }
-    return hash;
+    return binary_format::Fnv1a32(input.data() + begin, input.size() - begin);
 }
 bool ReadString(const std::vector<std::uint8_t>& in, std::uint32_t offset, std::string* out) {
     if (offset >= in.size()) return false;
@@ -78,8 +79,19 @@ bool EncodePolicy(const PolicyDocument& document, std::uint64_t generation,
     packages.reserve(kHeaderSize + document.apps.size() * kPackageSize);
     rules.reserve(static_cast<std::size_t>(total_rules) * kRuleSize);
     strings.reserve(string_capacity);
+    std::vector<const AppPolicy*> sorted_apps;
+    sorted_apps.reserve(document.apps.size());
+    for (const AppPolicy& app : document.apps) sorted_apps.push_back(&app);
+    std::sort(sorted_apps.begin(), sorted_apps.end(), [](const AppPolicy* lhs, const AppPolicy* rhs) {
+        const std::uint32_t lhs_hash = binary_format::PackageNameHash(
+            lhs->package.data(), lhs->package.size());
+        const std::uint32_t rhs_hash = binary_format::PackageNameHash(
+            rhs->package.data(), rhs->package.size());
+        return lhs_hash != rhs_hash ? lhs_hash < rhs_hash : lhs->package < rhs->package;
+    });
     total_rules = 0;
-    for (const AppPolicy& app : document.apps) {
+    for (const AppPolicy* app_ptr : sorted_apps) {
+        const AppPolicy& app = *app_ptr;
         const std::uint32_t package_offset = static_cast<std::uint32_t>(strings.size());
         strings.insert(strings.end(), app.package.begin(), app.package.end()); strings.push_back(0);
         const std::uint32_t users_offset = static_cast<std::uint32_t>(strings.size()); const std::string users = Join(app.users); strings.insert(strings.end(), users.begin(), users.end()); strings.push_back(0);
@@ -92,7 +104,11 @@ bool EncodePolicy(const PolicyDocument& document, std::uint64_t generation,
             if (rule.action == RuleAction::kRedirect) { strings.insert(strings.end(), rule.target.begin(), rule.target.end()); strings.push_back(0); }
             Put32(&rules, rule.action == RuleAction::kDeny ? 0u : 1u); Put32(&rules, source); Put32(&rules, target); Put64(&rules, rule.line); ++total_rules;
         }
-        Put32(&packages, package_offset); Put32(&packages, users_offset); Put32(&packages, processes_offset); Put32(&packages, first_rule); Put32(&packages, total_rules - first_rule); Put32(&packages, app.enabled ? 1u : 0u);
+        Put32(&packages, binary_format::PackageNameHash(app.package.data(), app.package.size()));
+        Put32(&packages, package_offset); Put32(&packages, users_offset); Put32(&packages, processes_offset);
+        Put32(&packages, first_rule); Put32(&packages, total_rules - first_rule);
+        Put32(&packages, app.enabled ? 1u : 0u);
+        Put32(&packages, app.media_compat == MediaCompat::kQueryFilter ? 1u : 0u);
     }
     const std::uint32_t package_offset = static_cast<std::uint32_t>(packages.size() - document.apps.size() * kPackageSize);
     const std::uint32_t rule_offset = static_cast<std::uint32_t>(packages.size());
@@ -113,10 +129,20 @@ bool DecodePolicy(const std::vector<std::uint8_t>& input, PolicyDocument* docume
     if (magic != kMagic || format != kFormatVersion || schema != 1 || file_size != input.size() || package_offset < kHeaderSize || rule_offset < package_offset || string_offset < rule_offset || string_offset > input.size()) return Fail(error,"invalid policy header");
     if (package_count > (rule_offset - package_offset) / kPackageSize || Hash(input, string_offset) != checksum) return Fail(error,"invalid policy bounds or checksum");
     document->schema = schema; document->failure_mode = "fail_open_with_alert"; document->apps.clear();
+    std::uint32_t previous_hash = 0;
+    std::string previous_package;
     for (std::uint32_t i=0;i<package_count;++i) {
-        std::size_t q = package_offset + i*kPackageSize; std::uint32_t package_string, users_string, processes_string, first, count, enabled; std::string users, processes;
-        if (!Get32(input,&q,&package_string)||!Get32(input,&q,&users_string)||!Get32(input,&q,&processes_string)||!Get32(input,&q,&first)||!Get32(input,&q,&count)||!Get32(input,&q,&enabled)||!ReadString(input, string_offset+package_string, &document->apps.emplace_back().package)||!ReadString(input, string_offset+users_string, &users)||!ReadString(input, string_offset+processes_string, &processes)) return Fail(error,"invalid package entry");
-        AppPolicy& app = document->apps.back(); app.enabled = enabled != 0; if (!users.empty()) Split(users, &app.users); if (!processes.empty()) Split(processes, &app.processes);
+        std::size_t q = package_offset + i*kPackageSize; std::uint32_t package_hash, package_string, users_string, processes_string, first, count, enabled, media_compat; std::string users, processes;
+        if (!Get32(input,&q,&package_hash)||!Get32(input,&q,&package_string)||!Get32(input,&q,&users_string)||!Get32(input,&q,&processes_string)||!Get32(input,&q,&first)||!Get32(input,&q,&count)||!Get32(input,&q,&enabled)||!Get32(input,&q,&media_compat)||!ReadString(input, string_offset+package_string, &document->apps.emplace_back().package)||!ReadString(input, string_offset+users_string, &users)||!ReadString(input, string_offset+processes_string, &processes)) return Fail(error,"invalid package entry");
+        if (media_compat > 1) return Fail(error, "invalid media compat mode");
+        AppPolicy& app = document->apps.back(); app.enabled = enabled != 0; app.media_compat = media_compat == 1 ? MediaCompat::kQueryFilter : MediaCompat::kOff; if (!users.empty()) Split(users, &app.users); if (!processes.empty()) Split(processes, &app.processes);
+        if (binary_format::PackageNameHash(app.package.data(), app.package.size()) != package_hash
+            || (i > 0 && (package_hash < previous_hash
+                || (package_hash == previous_hash && app.package < previous_package)))) {
+            return Fail(error, "invalid package index");
+        }
+        previous_hash = package_hash;
+        previous_package = app.package;
         if (first > (string_offset-rule_offset)/kRuleSize || count > (string_offset-rule_offset)/kRuleSize-first) return Fail(error,"invalid rule range");
         for (std::uint32_t j=0;j<count;++j) { std::size_t r=rule_offset+(first+j)*kRuleSize; std::uint32_t action,source,target; std::uint64_t line; if(!Get32(input,&r,&action)||!Get32(input,&r,&source)||!Get32(input,&r,&target)||!Get64(input,&r,&line)) return Fail(error,"invalid rule entry"); Rule rule{action==0?RuleAction::kDeny:RuleAction::kRedirect,"","",static_cast<std::size_t>(line)}; if(!ReadString(input,string_offset+source,&rule.source)||(action!=0&&!ReadString(input,string_offset+target,&rule.target))) return Fail(error,"invalid rule string"); app.rules.push_back(std::move(rule)); }
     }

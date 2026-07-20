@@ -2,12 +2,12 @@
 
 #include <android/log.h>
 
-#include <atomic>
-#include <cstddef>
-#include <cstdio>
-#include <cstring>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
 #include <limits.h>
 
+#include "pathguard/perf_clock.hpp"
 #include "zygisk.hpp"
 
 namespace pathguard::media_query {
@@ -19,8 +19,8 @@ constexpr char kMediaAuthority[] = "media";
 constexpr char kStorageRootPrefix[] = "/storage/emulated/";
 constexpr char kSelectionKey[] = "android:query-arg-sql-selection";
 constexpr char kSelectionArgsKey[] = "android:query-arg-sql-selection-args";
-constexpr std::size_t kMaxDenyPaths = 8;
-constexpr std::size_t kMaxSelectionSize = 8192;
+constexpr size_t kMaxDenyPaths = 8;
+constexpr size_t kMaxSelectionSize = 8192;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kLogTag, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kLogTag, __VA_ARGS__)
@@ -30,9 +30,15 @@ using TransactNative = jboolean (*)(JNIEnv*, jobject, jint, jobject, jobject, ji
 TransactNative g_original_transact = nullptr;
 constexpr jint kQueryTransaction = 1;
 char g_deny_paths[kMaxDenyPaths][PATH_MAX]{};
-std::size_t g_deny_path_count = 0;
+size_t g_deny_path_count = 0;
 unsigned g_user_id = 0;
-std::atomic_uint g_rewrite_log_count{0};
+uint32_t g_rewrite_log_count = 0;
+uint64_t g_query_total = 0;
+uint64_t g_query_non_media = 0;
+uint64_t g_query_media = 0;
+uint64_t g_query_rewrite = 0;
+uint64_t g_query_fallback = 0;
+uint64_t g_query_cpu_ns = 0;
 
 jclass g_string_class = nullptr;
 jclass g_parcel_class = nullptr;
@@ -42,6 +48,7 @@ jobject g_attribution_source_creator = nullptr;
 jstring g_provider_descriptor = nullptr;
 jstring g_selection_key = nullptr;
 jstring g_selection_args_key = nullptr;
+jobject g_cached_descriptor_binder = nullptr;
 
 jmethodID g_binder_get_interface_descriptor = nullptr;
 jmethodID g_parcel_obtain = nullptr;
@@ -67,22 +74,83 @@ jmethodID g_bundle_put_string = nullptr;
 jmethodID g_bundle_get_string_array = nullptr;
 jmethodID g_bundle_put_string_array = nullptr;
 
+enum class QueryOutcome {
+    kNonMedia,
+    kMediaFallback,
+    kMediaRewrite,
+    kFallback,
+};
+
+void RecordQueryPerf(QueryOutcome outcome, uint64_t elapsed_ns) {
+    const uint64_t total = __atomic_add_fetch(&g_query_total, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_query_cpu_ns, elapsed_ns, __ATOMIC_RELAXED);
+    switch (outcome) {
+        case QueryOutcome::kNonMedia:
+            __atomic_add_fetch(&g_query_non_media, 1, __ATOMIC_RELAXED);
+            break;
+        case QueryOutcome::kMediaFallback:
+            __atomic_add_fetch(&g_query_media, 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_query_fallback, 1, __ATOMIC_RELAXED);
+            break;
+        case QueryOutcome::kMediaRewrite:
+            __atomic_add_fetch(&g_query_media, 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_query_rewrite, 1, __ATOMIC_RELAXED);
+            break;
+        case QueryOutcome::kFallback:
+            __atomic_add_fetch(&g_query_fallback, 1, __ATOMIC_RELAXED);
+            break;
+    }
+
+    if (total != 1 && total != 16 && total % 128 != 0) return;
+    LOGI("perf media_query query_total=%llu query_non_media=%llu query_media=%llu "
+         "query_rewrite=%llu query_fallback=%llu hook_cpu_us=%llu",
+         static_cast<unsigned long long>(total),
+          static_cast<unsigned long long>(__atomic_load_n(&g_query_non_media, __ATOMIC_RELAXED)),
+          static_cast<unsigned long long>(__atomic_load_n(&g_query_media, __ATOMIC_RELAXED)),
+          static_cast<unsigned long long>(__atomic_load_n(&g_query_rewrite, __ATOMIC_RELAXED)),
+          static_cast<unsigned long long>(__atomic_load_n(&g_query_fallback, __ATOMIC_RELAXED)),
+          static_cast<unsigned long long>(pathguard::perf::NsToUs(
+              __atomic_load_n(&g_query_cpu_ns, __ATOMIC_RELAXED))));
+}
+
+class QueryPerfScope final {
+public:
+    QueryPerfScope() : started_ns_(pathguard::perf::NowNs()) {}
+    ~QueryPerfScope() {
+        if (!finished_) RecordQueryPerf(outcome_, pathguard::perf::ElapsedNs(started_ns_));
+    }
+
+    void SetOutcome(QueryOutcome outcome) { outcome_ = outcome; }
+
+    void Finish(QueryOutcome outcome) {
+        if (finished_) return;
+        outcome_ = outcome;
+        finished_ = true;
+        RecordQueryPerf(outcome_, pathguard::perf::ElapsedNs(started_ns_));
+    }
+
+private:
+    uint64_t started_ns_;
+    QueryOutcome outcome_ = QueryOutcome::kNonMedia;
+    bool finished_ = false;
+};
+
 bool ClearException(JNIEnv* env) {
     if (!env->ExceptionCheck()) return false;
     env->ExceptionClear();
     return true;
 }
 
-bool Append(char* output, std::size_t capacity, const char* value) {
-    const std::size_t current = strlen(output);
-    const std::size_t addition = strlen(value);
+bool Append(char* output, size_t capacity, const char* value) {
+    const size_t current = strlen(output);
+    const size_t addition = strlen(value);
     if (current + addition + 1 > capacity) return false;
     memcpy(output + current, value, addition + 1);
     return true;
 }
 
-bool BuildFilter(char* selection, std::size_t selection_capacity,
-                 char arguments[][PATH_MAX + 4], std::size_t* argument_count) {
+bool BuildFilter(char* selection, size_t selection_capacity,
+                 char arguments[][PATH_MAX + 4], size_t* argument_count) {
     selection[0] = '\0';
     *argument_count = 0;
     constexpr char kClause[] = "(_data IS NULL OR _data NOT LIKE ?)";
@@ -92,7 +160,7 @@ bool BuildFilter(char* selection, std::size_t selection_capacity,
                  g_user_id) <= 0) {
         return false;
     }
-    for (std::size_t index = 0; index < g_deny_path_count; ++index) {
+    for (size_t index = 0; index < g_deny_path_count; ++index) {
         const char* path = g_deny_paths[index];
         if (strncmp(path, storage_prefix, strlen(storage_prefix)) != 0) return false;
         if (index > 0 && !Append(selection, selection_capacity, " AND ")) return false;
@@ -117,7 +185,7 @@ bool IsMediaUri(JNIEnv* env, jobject uri) {
 }
 
 jobjectArray MergeArguments(JNIEnv* env, jobjectArray original,
-                            char extra[][PATH_MAX + 4], std::size_t extra_count) {
+                            char extra[][PATH_MAX + 4], size_t extra_count) {
     const jsize original_count = original == nullptr ? 0 : env->GetArrayLength(original);
     auto merged = env->NewObjectArray(
         original_count + static_cast<jsize>(extra_count), g_string_class, nullptr);
@@ -128,7 +196,7 @@ jobjectArray MergeArguments(JNIEnv* env, jobjectArray original,
         env->SetObjectArrayElement(merged, index, value);
         if (value != nullptr) env->DeleteLocalRef(value);
     }
-    for (std::size_t index = 0; index < extra_count; ++index) {
+    for (size_t index = 0; index < extra_count; ++index) {
         jstring value = env->NewStringUTF(extra[index]);
         if (value == nullptr || ClearException(env)) {
             if (value != nullptr) env->DeleteLocalRef(value);
@@ -149,7 +217,7 @@ jobjectArray MergeArguments(JNIEnv* env, jobjectArray original,
 bool ApplyFilterToBundle(JNIEnv* env, jobject bundle) {
     char filter[kMaxSelectionSize]{};
     char extra_arguments[kMaxDenyPaths][PATH_MAX + 4]{};
-    std::size_t extra_count = 0;
+    size_t extra_count = 0;
     if (!BuildFilter(filter, sizeof(filter), extra_arguments, &extra_count)) return false;
 
     auto original_selection = static_cast<jstring>(
@@ -170,7 +238,7 @@ bool ApplyFilterToBundle(JNIEnv* env, jobject bundle) {
         const int length = snprintf(
             merged_selection, sizeof(merged_selection), "(%s) AND (%s)",
             original_text, filter);
-        if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(merged_selection)) {
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(merged_selection)) {
             env->ReleaseStringUTFChars(original_selection, original_text);
             env->DeleteLocalRef(original_selection);
             if (original_arguments != nullptr) env->DeleteLocalRef(original_arguments);
@@ -213,26 +281,51 @@ jboolean CallOriginal(JNIEnv* env, jobject binder, jint code, jobject data,
     return g_original_transact(env, binder, code, data, reply, flags);
 }
 
-jboolean TransactHook(JNIEnv* env, jobject binder, jint code, jobject data,
-                       jobject reply, jint flags) {
-    if (g_original_transact == nullptr || code != kQueryTransaction || data == nullptr) {
-        return CallOriginal(env, binder, code, data, reply, flags);
+bool IsProviderBinder(JNIEnv* env, jobject binder) {
+    jobject cached = __atomic_load_n(&g_cached_descriptor_binder, __ATOMIC_ACQUIRE);
+    if (cached != nullptr) {
+        const jboolean same = env->IsSameObject(binder, cached);
+        if (ClearException(env)) return false;
+        if (same == JNI_TRUE) return true;
     }
 
     auto descriptor = static_cast<jstring>(
         env->CallObjectMethod(binder, g_binder_get_interface_descriptor));
     if (ClearException(env) || descriptor == nullptr) {
         DeleteLocal(env, descriptor);
-        return CallOriginal(env, binder, code, data, reply, flags);
+        return false;
     }
     const char* descriptor_text = env->GetStringUTFChars(descriptor, nullptr);
     const bool is_provider = descriptor_text != nullptr
         && strcmp(descriptor_text, kProviderDescriptor) == 0;
-    if (descriptor_text != nullptr) {
-        env->ReleaseStringUTFChars(descriptor, descriptor_text);
-    }
+    if (descriptor_text != nullptr) env->ReleaseStringUTFChars(descriptor, descriptor_text);
     env->DeleteLocalRef(descriptor);
-    if (!is_provider) return CallOriginal(env, binder, code, data, reply, flags);
+
+    if (is_provider) {
+        jobject global_binder = env->NewGlobalRef(binder);
+        if (global_binder != nullptr && !ClearException(env)) {
+            jobject expected = nullptr;
+            if (!__atomic_compare_exchange_n(
+                    &g_cached_descriptor_binder, &expected, global_binder, false,
+                    __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+                env->DeleteGlobalRef(global_binder);
+            }
+        }
+    }
+    return is_provider;
+}
+
+jboolean TransactHook(JNIEnv* env, jobject binder, jint code, jobject data,
+                       jobject reply, jint flags) {
+    if (g_original_transact == nullptr || code != kQueryTransaction || data == nullptr) {
+        return CallOriginal(env, binder, code, data, reply, flags);
+    }
+    QueryPerfScope perf_scope;
+
+    if (!IsProviderBinder(env, binder)) {
+        perf_scope.Finish(QueryOutcome::kNonMedia);
+        return CallOriginal(env, binder, code, data, reply, flags);
+    }
 
     const jint original_position = env->CallIntMethod(data, g_parcel_data_position);
     env->CallVoidMethod(data, g_parcel_set_data_position, 0);
@@ -240,6 +333,21 @@ jboolean TransactHook(JNIEnv* env, jobject binder, jint code, jobject data,
     jobject attribution = env->CallObjectMethod(
         g_attribution_source_creator, g_creator_create_from_parcel, data);
     jobject uri = env->CallObjectMethod(g_uri_creator, g_creator_create_from_parcel, data);
+    if (ClearException(env)) {
+        env->CallVoidMethod(data, g_parcel_set_data_position, original_position);
+        DeleteLocal(env, attribution);
+        DeleteLocal(env, uri);
+        perf_scope.Finish(QueryOutcome::kFallback);
+        return CallOriginal(env, binder, code, data, reply, flags);
+    }
+    if (!IsMediaUri(env, uri)) {
+        env->CallVoidMethod(data, g_parcel_set_data_position, original_position);
+        DeleteLocal(env, attribution);
+        DeleteLocal(env, uri);
+        perf_scope.Finish(QueryOutcome::kNonMedia);
+        return CallOriginal(env, binder, code, data, reply, flags);
+    }
+
     auto projection = static_cast<jobjectArray>(
         env->CallObjectMethod(data, g_parcel_create_string_array));
     jobject query_args = env->CallObjectMethod(data, g_parcel_read_bundle, nullptr);
@@ -249,7 +357,8 @@ jboolean TransactHook(JNIEnv* env, jobject binder, jint code, jobject data,
     const jint data_size = env->CallIntMethod(data, g_parcel_data_size);
     env->CallVoidMethod(data, g_parcel_set_data_position, original_position);
 
-    if (ClearException(env) || consumed != data_size || !IsMediaUri(env, uri)) {
+    if (ClearException(env) || consumed != data_size) {
+        perf_scope.Finish(QueryOutcome::kFallback);
         DeleteLocal(env, attribution);
         DeleteLocal(env, uri);
         DeleteLocal(env, projection);
@@ -258,6 +367,7 @@ jboolean TransactHook(JNIEnv* env, jobject binder, jint code, jobject data,
         DeleteLocal(env, cancellation);
         return CallOriginal(env, binder, code, data, reply, flags);
     }
+    perf_scope.SetOutcome(QueryOutcome::kMediaFallback);
 
     if (query_args == nullptr) {
         query_args = env->NewObject(g_bundle_class, g_bundle_constructor);
@@ -269,6 +379,7 @@ jboolean TransactHook(JNIEnv* env, jobject binder, jint code, jobject data,
         DeleteLocal(env, query_args);
         DeleteLocal(env, observer);
         DeleteLocal(env, cancellation);
+        perf_scope.Finish(QueryOutcome::kMediaFallback);
         return CallOriginal(env, binder, code, data, reply, flags);
     }
 
@@ -281,6 +392,7 @@ jboolean TransactHook(JNIEnv* env, jobject binder, jint code, jobject data,
         DeleteLocal(env, query_args);
         DeleteLocal(env, observer);
         DeleteLocal(env, cancellation);
+        perf_scope.Finish(QueryOutcome::kMediaFallback);
         return CallOriginal(env, binder, code, data, reply, flags);
     }
 
@@ -300,12 +412,14 @@ jboolean TransactHook(JNIEnv* env, jobject binder, jint code, jobject data,
         DeleteLocal(env, query_args);
         DeleteLocal(env, observer);
         DeleteLocal(env, cancellation);
+        perf_scope.Finish(QueryOutcome::kMediaFallback);
         return CallOriginal(env, binder, code, data, reply, flags);
     }
 
-    if (g_rewrite_log_count.fetch_add(1, std::memory_order_relaxed) < 20) {
+    if (__atomic_fetch_add(&g_rewrite_log_count, 1, __ATOMIC_RELAXED) < 20) {
         LOGI("media query constrained: deny_paths=%zu", g_deny_path_count);
     }
+    perf_scope.Finish(QueryOutcome::kMediaRewrite);
     const jboolean result = CallOriginal(env, binder, code, rewritten, reply, flags);
     env->CallVoidMethod(rewritten, g_parcel_recycle);
     ClearException(env);
@@ -448,7 +562,7 @@ bool InitializeJni(JNIEnv* env) {
 }  // namespace
 
 bool Install(zygisk::Api* api, JNIEnv* env, const char* const* deny_paths,
-             std::size_t deny_path_count, int uid) {
+             size_t deny_path_count, int uid) {
     if (api == nullptr || env == nullptr || deny_paths == nullptr
         || deny_path_count == 0 || deny_path_count > kMaxDenyPaths || uid < 0) {
         LOGE("media query hook invalid arguments: paths=%zu uid=%d",
@@ -463,7 +577,7 @@ bool Install(zygisk::Api* api, JNIEnv* env, const char* const* deny_paths,
         LOGE("media query hook user prefix formatting failed");
         return false;
     }
-    for (std::size_t index = 0; index < deny_path_count; ++index) {
+    for (size_t index = 0; index < deny_path_count; ++index) {
         if (deny_paths[index] == nullptr || strlen(deny_paths[index]) >= PATH_MAX
             || strncmp(deny_paths[index], user_prefix, strlen(user_prefix)) != 0) {
             LOGE("media query hook invalid deny path: index=%zu path=%s", index,

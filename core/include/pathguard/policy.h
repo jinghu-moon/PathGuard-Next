@@ -8,6 +8,7 @@
 namespace pathguard {
 
 enum class RuleAction { kDeny, kRedirect };
+enum class MediaCompat { kOff, kQueryFilter };
 
 struct Rule {
     RuleAction action;
@@ -19,6 +20,7 @@ struct Rule {
 struct AppPolicy {
     std::string package;
     bool enabled = true;
+    MediaCompat media_compat = MediaCompat::kOff;
     std::vector<std::string> users;
     std::vector<std::string> processes;
     std::vector<Rule> rules;
