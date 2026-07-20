@@ -3,7 +3,9 @@ param(
     [switch]$AllowMissingNative,
     [switch]$SkipNative,
     [ValidateRange(0, 10000)]
-    [int]$ZygiskTestMountDelayMs = 0
+    [int]$ZygiskTestMountDelayMs = 0,
+    [ValidateRange(0, 10000)]
+    [int]$ZygiskTestPreLeaseDelayMs = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,7 +19,8 @@ if ($LASTEXITCODE -ne 0) { throw "Host tests failed with exit code $LASTEXITCODE
 
 if (-not $SkipNative) {
     & (Join-Path $root 'scripts/build-native.ps1') -Abi $Abi `
-        -ZygiskTestMountDelayMs $ZygiskTestMountDelayMs
+        -ZygiskTestMountDelayMs $ZygiskTestMountDelayMs `
+        -ZygiskTestPreLeaseDelayMs $ZygiskTestPreLeaseDelayMs
 }
 
 & (Join-Path $root 'scripts/package.ps1') -Abi $Abi -AllowMissingNative:$AllowMissingNative

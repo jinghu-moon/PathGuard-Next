@@ -23,7 +23,17 @@
 #include "pathguard/binary.h"
 #include "pathguard/path.h"
 #include "pathguard/policy.h"
+#include "pathguard/topology.h"
 #include "pathguard/validation.h"
+
+#if defined(PATHGUARD_ANDROID)
+#include <sched.h>
+#include <sys/mount.h>
+#include <unistd.h>
+#include "pathguard/capabilities.h"
+#include "pathguard/directory_resolver.h"
+#include "pathguard/mount_executor.h"
+#endif
 
 namespace fs = std::filesystem;
 
@@ -75,6 +85,137 @@ static bool ReadAll(const fs::path& path, std::string* output) {
     return true;
 }
 
+static bool ProbeStorageTopology() {
+    std::string mountinfo;
+    if (!ReadAll("/proc/self/mountinfo", &mountinfo)) {
+        std::cerr << "storage topology unsupported: cannot read mountinfo\n";
+        return false;
+    }
+    pathguard::StorageTopology topology;
+    std::string error;
+    if (!pathguard::ParseMountInfo(mountinfo, &topology, &error)) {
+        std::cerr << "storage topology unsupported: " << error << '\n';
+        return false;
+    }
+    std::cout << "storage topology ready: users=" << topology.mounts.size() << '\n';
+    for (const pathguard::StorageTopologyMount& mount : topology.mounts) {
+        std::cout << "storage topology user=" << mount.user_id
+                  << " mount_id=" << mount.mount_id
+                  << " visible=" << mount.visible_root
+                  << " backend=" << mount.backend_root
+                  << " fs=" << mount.filesystem_type
+                  << " aliases=" << mount.aliases.size() << '\n';
+    }
+    std::cout << std::flush;
+    return true;
+}
+
+#if defined(PATHGUARD_ANDROID)
+static bool ProbeProcFdMount(const char* source_root_path, const char* source_path,
+                             const char* target_root_path, const char* target_path,
+                             bool force_component_walk) {
+    pathguard::DirectoryResolveResult source_root =
+        pathguard::OpenDirectoryRoot(source_root_path);
+    pathguard::DirectoryResolveResult target_root =
+        pathguard::OpenDirectoryRoot(target_root_path);
+    if (source_root.fd < 0 || target_root.fd < 0) {
+        std::cerr << "mount probe root open failed: source_errno=" << source_root.error
+                  << " target_errno=" << target_root.error << '\n';
+        if (source_root.fd >= 0) close(source_root.fd);
+        if (target_root.fd >= 0) close(target_root.fd);
+        return false;
+    }
+    pathguard::DirectoryResolveResult source = pathguard::ResolveDirectoryBeneath(
+        source_root.fd, source_path, force_component_walk);
+    pathguard::DirectoryResolveResult target = pathguard::ResolveDirectoryBeneath(
+        target_root.fd, target_path, force_component_walk);
+    close(source_root.fd);
+    close(target_root.fd);
+    if (source.fd < 0 || target.fd < 0) {
+        std::cerr << "mount probe resolve failed: source_errno=" << source.error
+                  << " target_errno=" << target.error << '\n';
+        if (source.fd >= 0) close(source.fd);
+        if (target.fd >= 0) close(target.fd);
+        return false;
+    }
+    if (unshare(CLONE_NEWNS) != 0
+        || mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) {
+        const int error = errno;
+        close(source.fd);
+        close(target.fd);
+        std::cerr << "mount probe namespace isolation failed: errno=" << error << '\n';
+        return false;
+    }
+
+    char source_absolute[PATH_MAX]{};
+    char target_absolute[PATH_MAX]{};
+    char source_proc_fd[64]{};
+    char target_proc_fd[64]{};
+    const int source_written = snprintf(
+        source_absolute, sizeof(source_absolute), "%s/%s", source_root_path, source_path);
+    const int target_written = snprintf(
+        target_absolute, sizeof(target_absolute), "%s/%s", target_root_path, target_path);
+    const int source_fd_written = snprintf(
+        source_proc_fd, sizeof(source_proc_fd), "/proc/self/fd/%d", source.fd);
+    const int target_fd_written = snprintf(
+        target_proc_fd, sizeof(target_proc_fd), "/proc/self/fd/%d", target.fd);
+    if (source_written < 0 || static_cast<size_t>(source_written) >= sizeof(source_absolute)
+        || target_written < 0 || static_cast<size_t>(target_written) >= sizeof(target_absolute)
+        || source_fd_written < 0
+        || static_cast<size_t>(source_fd_written) >= sizeof(source_proc_fd)
+        || target_fd_written < 0
+        || static_cast<size_t>(target_fd_written) >= sizeof(target_proc_fd)) {
+        close(source.fd);
+        close(target.fd);
+        std::cerr << "mount probe path construction failed\n";
+        return false;
+    }
+
+    const auto probe_bind = [&](const char* label, const char* mount_source,
+                                const char* mount_target) {
+        const int mount_error = mount(
+            mount_source, mount_target, nullptr, MS_BIND, nullptr) == 0 ? 0 : errno;
+        const int unmount_error = mount_error == 0
+            ? (umount2(target_absolute, MNT_DETACH) == 0 ? 0 : errno)
+            : 0;
+        std::cout << "proc fd mount case=" << label
+                  << " mount_errno=" << mount_error
+                  << " unmount_errno=" << unmount_error << '\n';
+        return mount_error == 0 && unmount_error == 0;
+    };
+
+    const bool string_string = probe_bind(
+        "string_string", source_absolute, target_absolute);
+    const bool fd_string = probe_bind(
+        "fd_string", source_proc_fd, target_absolute);
+    const bool string_fd = probe_bind(
+        "string_fd", source_absolute, target_proc_fd);
+    const bool fd_fd = probe_bind(
+        "fd_fd", source_proc_fd, target_proc_fd);
+    const int move_mount_error = pathguard::MoveMountDirectoryFds(source.fd, target.fd);
+    const int move_unmount_error = move_mount_error == 0
+        ? (umount2(target_absolute, MNT_DETACH) == 0 ? 0 : errno)
+        : 0;
+    std::cout << "proc fd mount case=open_tree_move_mount"
+              << " mount_errno=" << move_mount_error
+              << " unmount_errno=" << move_unmount_error << '\n';
+    const bool open_tree_move_mount =
+        move_mount_error == 0 && move_unmount_error == 0;
+    const std::uint64_t capabilities = source.capability | target.capability
+        | (fd_fd ? pathguard::kCapabilityProcFdMount : 0)
+        | (open_tree_move_mount ? pathguard::kCapabilityOpenTreeMoveMount : 0);
+    close(source.fd);
+    close(target.fd);
+    if (!string_string || (!fd_fd && !open_tree_move_mount)) {
+        std::cerr << "mount probe compatibility incomplete: capability="
+                  << capabilities << '\n';
+        return false;
+    }
+    std::cout << "proc fd mount ready: capability=" << capabilities << '\n';
+    return true;
+}
+#endif
+
 static bool CompileText(const std::string& text, const fs::path& output,
                         CompilePerf* perf, std::string* error) {
     if (perf == nullptr) return false;
@@ -99,7 +240,7 @@ static bool CompileText(const std::string& text, const fs::path& output,
     perf->validate_ns = ElapsedNs(validate_started);
     std::vector<std::uint8_t> bytes;
     const std::uint64_t encode_started = NowNs();
-    if (!pathguard::EncodePolicy(document, 1, &bytes, &parse_error)) {
+    if (!pathguard::EncodePolicy(document, &bytes, &parse_error)) {
         perf->encode_ns = ElapsedNs(encode_started);
         *error = parse_error.message;
         return false;
@@ -261,12 +402,66 @@ int main(int argc, char** argv) {
     fs::path module_dir = ".";
     bool compile = false;
     bool self_check = false;
+    bool probe_topology = false;
+#if defined(PATHGUARD_ANDROID)
+    const char* probe_directory_root = nullptr;
+    const char* probe_directory_path = nullptr;
+    const char* probe_mount_source_root = nullptr;
+    const char* probe_mount_source_path = nullptr;
+    const char* probe_mount_target_root = nullptr;
+    const char* probe_mount_target_path = nullptr;
+    bool force_component_walk = false;
+#endif
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--module-dir" && i + 1 < argc) module_dir = argv[++i];
         else if (arg == "--compile") compile = true;
         else if (arg == "--self-check") self_check = true;
+        else if (arg == "--probe-topology") probe_topology = true;
+#if defined(PATHGUARD_ANDROID)
+        else if (arg == "--probe-directory" && i + 2 < argc) {
+            probe_directory_root = argv[++i];
+            probe_directory_path = argv[++i];
+        } else if (arg == "--probe-proc-fd-mount" && i + 4 < argc) {
+            probe_mount_source_root = argv[++i];
+            probe_mount_source_path = argv[++i];
+            probe_mount_target_root = argv[++i];
+            probe_mount_target_path = argv[++i];
+        } else if (arg == "--force-component-walk") {
+            force_component_walk = true;
+        }
+#endif
     }
+    if (probe_topology) return ProbeStorageTopology() ? 0 : 1;
+#if defined(PATHGUARD_ANDROID)
+    if (probe_mount_source_root != nullptr) {
+        return ProbeProcFdMount(
+            probe_mount_source_root, probe_mount_source_path,
+            probe_mount_target_root, probe_mount_target_path,
+            force_component_walk)
+            ? 0
+            : 1;
+    }
+    if (probe_directory_root != nullptr) {
+        pathguard::DirectoryResolveResult root =
+            pathguard::OpenDirectoryRoot(probe_directory_root);
+        if (root.fd < 0) {
+            std::cerr << "directory root open failed: errno=" << root.error << '\n';
+            return 1;
+        }
+        pathguard::DirectoryResolveResult resolved = pathguard::ResolveDirectoryBeneath(
+            root.fd, probe_directory_path, force_component_walk);
+        close(root.fd);
+        if (resolved.fd < 0) {
+            std::cerr << "directory resolve failed: errno=" << resolved.error << '\n';
+            return 1;
+        }
+        std::cout << "directory resolve ready: capability=" << resolved.capability
+                  << " fd=" << resolved.fd << '\n';
+        close(resolved.fd);
+        return 0;
+    }
+#endif
     const fs::path config = module_dir / "config" / "rules.ini";
     const fs::path policy = module_dir / "run" / "policy.bin";
     if (compile || self_check) {
@@ -293,6 +488,7 @@ int main(int argc, char** argv) {
         }
         LogCompilePerf("initial", 0, 0, 0, perf);
     }
+    ProbeStorageTopology();
     std::cout << "pathguardd ready; module-dir=" << module_dir.string() << '\n'
               << std::flush;
 #if PATHGUARD_HAS_INOTIFY

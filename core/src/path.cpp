@@ -74,6 +74,46 @@ bool ExpandPackagePlaceholder(std::string_view input, std::string_view package, 
     return output->find('{') == std::string::npos && output->find('}') == std::string::npos;
 }
 
+bool NormalizeLogicalPath(std::string_view input, std::string* output) {
+    if (output == nullptr || input.empty() || input.front() == '/') return false;
+    std::vector<std::string> parts;
+    if (!SplitAndValidate(input, &parts)) return false;
+    output->clear();
+    output->reserve(input.size());
+    for (std::size_t index = 0; index < parts.size(); ++index) {
+        if (index != 0) output->push_back('/');
+        output->append(parts[index]);
+    }
+    return true;
+}
+
+bool ExpandPathPlaceholders(std::string_view input, std::string_view package,
+                            std::string* output) {
+    if (output == nullptr || package.empty()
+        || package.find_first_of("/{} \t\r\n") != std::string_view::npos) {
+        return false;
+    }
+    output->assign(input);
+    std::size_t offset = 0;
+    while ((offset = output->find("{package}", offset)) != std::string::npos) {
+        output->replace(offset, 9, package);
+        offset += package.size();
+    }
+    offset = 0;
+    while (offset < output->size()) {
+        const std::size_t open = output->find('{', offset);
+        const std::size_t close = output->find('}', offset);
+        if (close != std::string::npos
+            && (open == std::string::npos || close < open)) {
+            return false;
+        }
+        if (open == std::string::npos) return true;
+        if (output->compare(open, 6, "{user}") != 0) return false;
+        offset = open + 6;
+    }
+    return true;
+}
+
 bool IsPathOrDescendant(std::string_view path, std::string_view directory) {
     return path == directory || (path.size() > directory.size()
         && path.rfind(std::string(directory) + "/", 0) == 0);

@@ -14,16 +14,15 @@ $stdout = Join-Path $root 'stdout.log'
 $stderr = Join-Path $root 'stderr.log'
 
 $initial = @"
-schema = 1
-failure_mode = fail_open_with_alert
+schema = 2
+failure = open
 [org.localsend.localsend_app]
-enabled = true
 users = 0
 processes = *
-- /storage/emulated/0/Pictures/Nagram
+deny Pictures/Nagram
 "@
 $comment_only = $initial + "`n# comment-only-change`n"
-$updated = $comment_only + "- /storage/emulated/0/DCIM`n"
+$updated = $comment_only + "deny DCIM`n"
 Set-Content -LiteralPath $config -Value $initial -NoNewline
 
 $process = Start-Process -FilePath $Daemon -ArgumentList '--module-dir', $root `

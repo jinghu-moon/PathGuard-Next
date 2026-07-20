@@ -27,5 +27,13 @@ add_executable(pathguard_binary_test unit/binary_test.cpp)
 target_link_libraries(pathguard_binary_test PRIVATE pathguard_core)
 add_test(NAME pathguard_binary_test COMMAND pathguard_binary_test)
 
+add_executable(pathguard_mount_transaction_test unit/mount_transaction_test.cpp)
+target_link_libraries(pathguard_mount_transaction_test PRIVATE pathguard_core)
+add_test(NAME pathguard_mount_transaction_test COMMAND pathguard_mount_transaction_test)
+
+add_executable(pathguard_topology_test unit/topology_test.cpp)
+target_link_libraries(pathguard_topology_test PRIVATE pathguard_core)
+add_test(NAME pathguard_topology_test COMMAND pathguard_topology_test)
+
 add_executable(pathguard_policy_benchmark perf/policy_benchmark.cpp)
 target_link_libraries(pathguard_policy_benchmark PRIVATE pathguard_core)

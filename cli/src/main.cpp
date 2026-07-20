@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
     if (command == "validate") { std::cout << "valid: " << document.apps.size() << " package(s)\n"; return 0; }
     if (argc < 4) { std::cerr << "missing policy.bin output\n"; return 2; }
     std::vector<std::uint8_t> bytes;
-    if (!pathguard::EncodePolicy(document, 1, &bytes, &error)) { std::cerr << error.message << '\n'; return 1; }
+    if (!pathguard::EncodePolicy(document, &bytes, &error)) { std::cerr << error.message << '\n'; return 1; }
     std::ofstream output(argv[3], std::ios::binary | std::ios::trunc);
     output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!output) { std::cerr << "cannot write policy.bin\n"; return 1; }

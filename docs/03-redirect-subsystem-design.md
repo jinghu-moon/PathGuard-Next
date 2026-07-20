@@ -1,6 +1,6 @@
 # PathGuard Next 重定向子系统设计
 
-> 状态：Draft / Phase R0 Ready
+> 状态：Draft / Phase R0 Complete
 >
 > 文档版本：0.2
 >
@@ -434,17 +434,19 @@ media = hide_denied
 
 ### Phase R0：破坏性模型重构
 
-- schema 2、format v4、content generation。
-- 冻结 content/plan hash、payload checksum 和 canonical IR 编码。
-- capability bitset 为 `FAN_REPORT_DFID_NAME`、`FAN_REPORT_PIDFD` 和完整 rename target 保留独立稳定位。
-- 完成 300ms、fail-open 与 namespace mutation lease 的事务 ADR；ADR 未完成不得进入 R1 mount executor。
-- `DenyPlan` -> `ProcessPlan`。
-- 编译器只接受真正可执行的 failure mode 和 action。
+- [x] schema 2、format v4、content generation。
+- [x] 冻结 content/plan hash、payload checksum 和 canonical IR 编码。
+- [x] capability bitset 为 `FAN_REPORT_DFID_NAME`、`FAN_REPORT_PIDFD` 和完整 rename target 保留独立稳定位。
+- [x] 完成 300ms、fail-open 与 namespace mutation lease 的事务 ADR；Host 竞争测试及 pending/applying 两个真机档位通过。
+- [x] `DenyPlan` -> `ProcessPlan`。
+- [x] 编译器只接受真正可执行的 failure mode 和 action。
 
 ### Phase R1：选择性 redirect
 
-- topology probe、backend path resolver、通用 mount executor。
-- openat2 与逐组件 FD walk 两条路径都必须以固定 FD 驱动最终 mount，并纳入独立真机档位。
+- [x] topology probe 与 backend path resolver；Alioth Android 13 真机 topology 识别 `/storage/emulated/0 -> /data/media/0`。
+- [x] openat2/逐组件 FD walk resolver 与 symlink/magic-link 拒绝；Alioth 4.19 内核走 `component_fd_walk` capability。
+- [ ] 通用 mount executor。Alioth 真机 classic `/proc/self/fd` source/target 均返回 `EINVAL`，`open_tree` 返回 `ENOSYS`，因此当前 capability 不允许启用 redirect。
+- openat2 与逐组件 FD walk 两条路径都必须以固定 FD 驱动最终 mount，并纳入独立真机档位；没有 `proc_fd_mount` 或 `open_tree_move_mount` 时 fail-open，禁止字符串 mount fallback。
 - deny + redirect 混合事务、取消和回滚。
 - 直接文件系统真机矩阵。
 

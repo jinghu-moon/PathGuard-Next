@@ -2,6 +2,6 @@
 
 namespace pathguard {
 
-constexpr int kPolicySchemaVersion = 1;
+constexpr int kPolicySchemaVersion = 2;
 
 }  // namespace pathguard

@@ -7,22 +7,26 @@
 
 int main() {
     std::string output;
-    assert(pathguard::NormalizePath("DCIM/Camera/", &output));
-    assert(output == "/storage/emulated/0/DCIM/Camera");
-    assert(pathguard::NormalizePath("/sdcard/DCIM", &output));
-    assert(output == "/storage/emulated/0/DCIM");
-    assert(!pathguard::NormalizePath("../Secret", &output));
+    assert(pathguard::NormalizeLogicalPath("DCIM/Camera", &output));
+    assert(output == "DCIM/Camera");
+    assert(!pathguard::NormalizeLogicalPath("/storage/emulated/0/DCIM", &output));
+    assert(!pathguard::NormalizeLogicalPath("../Secret", &output));
+    assert(!pathguard::NormalizeLogicalPath("DCIM//Camera", &output));
 
-    assert(pathguard::ExpandPackagePlaceholder(
-        "PathGuard/{package}/Cache", "com.example.app", &output));
-    assert(output == "PathGuard/com.example.app/Cache");
+    assert(pathguard::ExpandPathPlaceholders(
+        "PathGuard/{package}/{user}", "com.example.app", &output));
+    assert(output == "PathGuard/com.example.app/{user}");
+    assert(!pathguard::ExpandPathPlaceholders(
+        "PathGuard/{unknown}", "com.example.app", &output));
 
     pathguard::AppPolicy policy;
     policy.package = "com.example.app";
-    policy.rules = {{pathguard::RuleAction::kRedirect, "Download", "PathGuard/{package}", 4}};
+    policy.mounts = {{pathguard::MountAction::kRedirect, "Download",
+                      "PathGuard/{package}", 0, 0, 4}};
     pathguard::ParseError error;
     assert(pathguard::ValidatePolicy(&policy, &error));
-    assert(policy.rules[0].source == "/storage/emulated/0/Download");
-    assert(policy.rules[0].target == "/storage/emulated/0/PathGuard/com.example.app");
+    assert(policy.mounts[0].visible_path == "Download");
+    assert(policy.mounts[0].backing_path == "PathGuard/com.example.app");
+    assert(policy.mounts[0].depth == 1);
     return 0;
 }

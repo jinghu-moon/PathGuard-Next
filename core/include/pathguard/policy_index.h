@@ -25,6 +25,14 @@ inline uint32_t ReadLe32(const uint8_t* value) {
     return result;
 }
 
+inline uint64_t ReadLe64(const uint8_t* value) {
+    uint64_t result = 0;
+    for (int index = 0; index < 8; ++index) {
+        result |= static_cast<uint64_t>(value[index]) << (index * 8);
+    }
+    return result;
+}
+
 inline bool ValidPolicyIndex(const PolicyIndexView& view) {
     return view.data != nullptr
         && view.package_offset <= view.package_end

@@ -1,7 +1,9 @@
 param(
     [string[]]$Abi = @('arm64-v8a'),
     [ValidateRange(0, 10000)]
-    [int]$ZygiskTestMountDelayMs = 0
+    [int]$ZygiskTestMountDelayMs = 0,
+    [ValidateRange(0, 10000)]
+    [int]$ZygiskTestPreLeaseDelayMs = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,6 +38,9 @@ foreach ($item in $Abi) {
 $zygisk = @($common) + @('APP_MODULES=pathguard_zygisk', 'APP_STL=none', '-B')
 if ($ZygiskTestMountDelayMs -gt 0) {
     $zygisk += "PATHGUARD_TEST_MOUNT_DELAY_MS=$ZygiskTestMountDelayMs"
+}
+if ($ZygiskTestPreLeaseDelayMs -gt 0) {
+    $zygisk += "PATHGUARD_TEST_PRE_LEASE_DELAY_MS=$ZygiskTestPreLeaseDelayMs"
 }
 & $ndk @zygisk
 if ($LASTEXITCODE -ne 0) { throw "zygisk ndk-build failed: $LASTEXITCODE" }

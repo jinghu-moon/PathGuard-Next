@@ -30,24 +30,24 @@ std::uint64_t ElapsedNs(Clock::time_point start) {
 
 std::string BuildPolicy(std::size_t package_count, std::size_t rules_per_package,
                         bool redirect_rules) {
-    std::string text = "schema = 1\nfailure_mode = fail_open_with_alert\n\n";
+    std::string text = "schema = 2\nfailure = open\n\n";
     text.reserve(text.size() + package_count * (96 + rules_per_package * 56));
     for (std::size_t package = 0; package < package_count; ++package) {
         text += "[org.pathguard.benchmark.app" + std::to_string(package) + "]\n";
-        text += "enabled = true\nusers = 0\nprocesses = *\n";
+        text += "users = 0\nprocesses = *\n";
         for (std::size_t rule = 0; rule < rules_per_package; ++rule) {
             if (redirect_rules) {
-                text += "/storage/emulated/0/PathGuardBenchmark/source/";
+                text += "redirect PathGuardBenchmark/source/";
                 text += std::to_string(package);
                 text += "/";
                 text += std::to_string(rule);
-                text += " -> /storage/emulated/0/PathGuardBenchmark/target/";
+                text += " -> PathGuardBenchmark/target/";
                 text += std::to_string(package);
                 text += "/";
                 text += std::to_string(rule);
                 text += "\n";
             } else {
-                text += "- /storage/emulated/0/PathGuardBenchmark/";
+                text += "deny PathGuardBenchmark/";
                 text += std::to_string(package);
                 text += "/";
                 text += std::to_string(rule);
@@ -132,7 +132,7 @@ bool RunCase(std::string_view axis, std::size_t size, std::size_t package_count,
 
         const auto encode_started = Clock::now();
         std::vector<std::uint8_t> bytes;
-        if (!pathguard::EncodePolicy(document, 1, &bytes, &error)) {
+        if (!pathguard::EncodePolicy(document, &bytes, &error)) {
             std::cerr << "encode failed: " << error.message << '\n';
             return false;
         }
@@ -142,10 +142,14 @@ bool RunCase(std::string_view axis, std::size_t size, std::size_t package_count,
         const pathguard::binary_format::PolicyIndexView index{
             bytes.data(),
             bytes.size(),
-            pathguard::binary_format::ReadLe32(bytes.data() + 24),
-            pathguard::binary_format::ReadLe32(bytes.data() + 28),
-            pathguard::binary_format::ReadLe32(bytes.data() + 32),
-            pathguard::binary_format::ReadLe32(bytes.data() + 36),
+            pathguard::binary_format::ReadLe32(
+                bytes.data() + pathguard::binary_format::kPackageCountOffset),
+            pathguard::binary_format::ReadLe32(
+                bytes.data() + pathguard::binary_format::kPackageTableOffset),
+            pathguard::binary_format::ReadLe32(
+                bytes.data() + pathguard::binary_format::kMountRuleTableOffset),
+            pathguard::binary_format::ReadLe32(
+                bytes.data() + pathguard::binary_format::kStringTableOffset),
         };
         const auto lookup_started = Clock::now();
         if (pathguard::binary_format::FindPackageEntry(
@@ -184,9 +188,6 @@ int main() {
     }
     for (const std::size_t rule_count : {0U, 1U, 4U, 16U, 32U, 64U}) {
         if (!RunCase("rules", rule_count, 1, rule_count, 100)) return 1;
-    }
-    for (const std::size_t rule_count : {1U, 4U, 16U, 32U, 64U}) {
-        if (!RunCase("redirect_rules", rule_count, 1, rule_count, 100, true)) return 1;
     }
     return 0;
 }
