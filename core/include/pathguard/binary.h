@@ -14,5 +14,7 @@ bool DecodePolicy(const std::vector<std::uint8_t>& input, PolicyDocument* docume
                   std::uint64_t* content_generation, ParseError* error);
 std::uint64_t ComputeContentGeneration(const PolicyDocument& document);
 std::uint64_t ComputePlanGeneration(const AppPolicy& policy, FailureMode failure_mode);
+std::uint64_t ComputePlanGeneration(const AppPolicy& policy, FailureMode failure_mode,
+                                    bool allow_legacy_string_bind);
 
 }  // namespace pathguard

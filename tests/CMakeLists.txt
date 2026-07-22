@@ -31,6 +31,18 @@ add_executable(pathguard_mount_transaction_test unit/mount_transaction_test.cpp)
 target_link_libraries(pathguard_mount_transaction_test PRIVATE pathguard_core)
 add_test(NAME pathguard_mount_transaction_test COMMAND pathguard_mount_transaction_test)
 
+add_executable(pathguard_mount_backend_test unit/mount_backend_test.cpp)
+target_link_libraries(pathguard_mount_backend_test PRIVATE pathguard_core)
+add_test(NAME pathguard_mount_backend_test COMMAND pathguard_mount_backend_test)
+
+add_executable(pathguard_provider_path_mapper_test
+    unit/provider_path_mapper_test.cpp
+    ../zygisk/src/provider_path_mapper.cpp)
+target_include_directories(pathguard_provider_path_mapper_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../zygisk/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/unit)
+add_test(NAME pathguard_provider_path_mapper_test COMMAND pathguard_provider_path_mapper_test)
+
 add_executable(pathguard_topology_test unit/topology_test.cpp)
 target_link_libraries(pathguard_topology_test PRIVATE pathguard_core)
 add_test(NAME pathguard_topology_test COMMAND pathguard_topology_test)

@@ -150,6 +150,7 @@ bool ParseRulesIni(std::string_view text, PolicyDocument* document, ParseError* 
     std::unordered_set<std::string> package_names;
     bool saw_schema = false;
     bool saw_failure = false;
+    bool saw_legacy_bind = false;
     std::size_t line_number = 0;
     std::size_t offset = 0;
 
@@ -258,6 +259,15 @@ bool ParseRulesIni(std::string_view text, PolicyDocument* document, ParseError* 
             } else {
                 return SetError(error, line_number, "invalid failure mode");
             }
+        } else if (key == "allow_legacy_string_bind") {
+            if (current != nullptr || saw_legacy_bind) {
+                return SetError(error, line_number, "invalid legacy bind option");
+            }
+            saw_legacy_bind = true;
+            if (value == "true") document->allow_legacy_string_bind = true;
+            else if (value != "false") {
+                return SetError(error, line_number, "invalid legacy bind option");
+            }
         } else if (current == nullptr) {
             return SetError(error, line_number,
                             "global option required before package sections");
@@ -275,6 +285,13 @@ bool ParseRulesIni(std::string_view text, PolicyDocument* document, ParseError* 
                 current->media_compat = MediaCompat::kHideDenied;
             } else {
                 return SetError(error, line_number, "unsupported media mode");
+            }
+        } else if (key == "provider") {
+            if (value == "off") current->provider_compat = ProviderCompat::kOff;
+            else if (value == "virtualize") {
+                current->provider_compat = ProviderCompat::kVirtualize;
+            } else {
+                return SetError(error, line_number, "unsupported provider mode");
             }
         } else {
             return SetError(error, line_number, "unknown option");

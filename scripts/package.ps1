@@ -1,5 +1,5 @@
 param(
-    [string[]]$Abi = @('arm64-v8a'),
+    [string[]]$Abi = @('arm64-v8a', 'armeabi-v7a'),
     [switch]$AllowMissingNative
 )
 
@@ -26,20 +26,25 @@ function Add-File($archive, $path, $entry) {
     }
 }
 
-foreach ($item in $Abi) {
-    $zip = Join-Path $dist "pathguard-next-v$version-$item.zip"
-    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-    $archive = [System.IO.Compression.ZipFile]::Open($zip, 'Create')
-    try {
-        foreach ($file in @('module.prop','customize.sh','post-fs-data.sh','service.sh','boot-completed.sh','action.sh','uninstall.sh','skip_mount')) {
-            Add-File $archive (Join-Path $module $file) $file
-        }
-        Get-ChildItem -LiteralPath (Join-Path $module 'config') -File -Recurse | ForEach-Object {
-            Add-File $archive $_.FullName $_.FullName.Substring($module.Length + 1).Replace('\','/')
-        }
+if ($Abi.Count -eq 1) {
+    $archiveName = "pathguard-next-v$version-$($Abi[0]).zip"
+} else {
+    $archiveName = "pathguard-next-v$version-universal.zip"
+}
+$zip = Join-Path $dist $archiveName
+if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+$archive = [System.IO.Compression.ZipFile]::Open($zip, 'Create')
+try {
+    foreach ($file in @('module.prop','customize.sh','post-fs-data.sh','service.sh','boot-completed.sh','action.sh','uninstall.sh','skip_mount')) {
+        Add-File $archive (Join-Path $module $file) $file
+    }
+    Get-ChildItem -LiteralPath (Join-Path $module 'config') -File -Recurse | ForEach-Object {
+        Add-File $archive $_.FullName $_.FullName.Substring($module.Length + 1).Replace('\','/')
+    }
+    foreach ($item in $Abi) {
         Add-File $archive (Join-Path $module "zygisk/$item.so") "zygisk/$item.so"
         Add-File $archive (Join-Path $module "bin/$item/pathguardd") "bin/$item/pathguardd"
         Add-File $archive (Join-Path $module "bin/$item/pathguardctl") "bin/$item/pathguardctl"
-    } finally { $archive.Dispose() }
-    Write-Host "Created: $zip"
-}
+    }
+} finally { $archive.Dispose() }
+Write-Host "Created: $zip"

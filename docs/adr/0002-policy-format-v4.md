@@ -1,5 +1,8 @@
 # ADR-0002：冻结 policy format v4 与 canonical IR
 
+> 后续变更：ADR 0006 将格式升级到 v5，并使用 package entry 偏移 42 表示
+> `provider_compat`。v4 的其余布局保持不变。
+
 状态：Accepted
 
 日期：2026-07-20
@@ -27,6 +30,7 @@ canonical plan 依次编码：
 "PGPL4\0"
 failure_mode:u8
 media_compat:u8
+allow_legacy_string_bind:u8
 package:bytes
 users:vector<bytes>
 processes:vector<bytes>
@@ -44,6 +48,7 @@ canonical content 依次编码：
 "PGIR4\0"
 schema:u16
 failure_mode:u8
+allow_legacy_string_bind:u8
 package_count:u32
 按 package UTF-8 字节序排列的 (plan_size:u32 + canonical plan)
 ```
@@ -69,7 +74,10 @@ Header 固定 56 bytes：
 | 40 | mount_offset | u32 |
 | 44 | event_offset | u32 |
 | 48 | string_offset | u32 |
-| 52 | reserved=0 | u32 |
+| 52 | header_flags | u32 |
+
+`header_flags` 当前只定义 bit 0：`allow_legacy_string_bind`。未知 bit 必须拒绝；
+该字段属于 v4 预留标志位的首次使用，不改变表布局。
 
 Package entry 固定 48 bytes，MountRule 和 EventRule entry 均固定 16 bytes。具体字段 offset 由共享头定义并通过 golden vector 锁定。
 
@@ -77,12 +85,12 @@ Package entry 固定 48 bytes，MountRule 和 EventRule entry 均固定 16 bytes
 
 固定输入为 `org.localsend.localsend_app`、user `0`、process `*`、`media=hide_denied`，包含 `deny DCIM` 和 `deny Pictures/Nagram`。
 
-- content generation：`0xef7c781910967e88`
-- plan generation：`0xdba633f57989fddd`
-- payload checksum：`0x0d28599f`
+- content generation、plan generation 和 payload checksum 由当前 canonical IR
+  重新计算；向量中的 `allow_legacy_string_bind` 固定为 `false`。
 - file size：190 bytes
 
-完整二进制向量由 `tests/unit/binary_test.cpp` 断言。任何有意格式变更必须提升 format 版本并新增向量，不能静默更新 v4 期望值。
+完整二进制向量由 `tests/unit/binary_test.cpp` 断言。任何新增 header flag 必须
+更新本 ADR 与 golden vector；未知 flag 不能静默接受。
 
 ## 后果
 

@@ -30,7 +30,11 @@ include $(CLEAR_VARS)
 LOCAL_MODULE := pathguard_zygisk
 LOCAL_SRC_FILES := \
     ../zygisk/src/module_entry.cpp \
-    ../zygisk/src/media_query_hook.cpp
+    ../zygisk/src/media_query_hook.cpp \
+    ../zygisk/src/provider_redirect_hook.cpp \
+    ../zygisk/src/provider_path_mapper.cpp \
+    $(DIRECTORY_RESOLVER_SOURCE) \
+    $(MOUNT_EXECUTOR_SOURCE)
 LOCAL_C_INCLUDES := $(ROOT_PATH)/zygisk/include $(ROOT_PATH)/core/include $(ROOT_PATH)/native/include
 LOCAL_CPPFLAGS := -fno-threadsafe-statics
 LOCAL_LDLIBS := -llog

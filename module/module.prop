@@ -1,6 +1,6 @@
 id=pathguard_next
 name=PathGuard Next
-version=0.1.3-dev
-versionCode=4
+version=0.1.11-dev
+versionCode=12
 author=PathGuard contributors
-description=Per-app directory deny with mount namespace and MediaStore query filtering
+description=Per-app redirect with mount and full SAF provider path virtualization

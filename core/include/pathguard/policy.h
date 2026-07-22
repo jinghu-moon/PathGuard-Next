@@ -17,6 +17,7 @@ enum class MountAction : std::uint8_t {
 };
 enum class EventAction : std::uint8_t { kObserve = 0, kExport = 1 };
 enum class MediaCompat : std::uint8_t { kOff = 0, kHideDenied = 1 };
+enum class ProviderCompat : std::uint8_t { kOff = 0, kVirtualize = 1 };
 
 inline constexpr std::uint32_t kEventModeCopy = 0;
 inline constexpr std::uint32_t kEventModeMove = 1;
@@ -44,6 +45,7 @@ struct EventRule {
 struct AppPolicy {
     std::string package;
     MediaCompat media_compat = MediaCompat::kOff;
+    ProviderCompat provider_compat = ProviderCompat::kOff;
     std::vector<std::string> users = {"*"};
     std::vector<std::string> processes = {"*"};
     std::vector<LogicalMountRule> mounts;
@@ -53,6 +55,7 @@ struct AppPolicy {
 struct PolicyDocument {
     int schema = 0;
     FailureMode failure_mode = FailureMode::kOpen;
+    bool allow_legacy_string_bind = false;
     std::vector<AppPolicy> apps;
 };
 

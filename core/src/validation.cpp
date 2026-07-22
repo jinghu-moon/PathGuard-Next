@@ -129,6 +129,22 @@ bool ValidatePolicy(AppPolicy* policy, ParseError* error) {
         }
     }
 
+    if (policy->provider_compat == ProviderCompat::kVirtualize) {
+        if (policy->users.size() == 1 && policy->users.front() == "*") {
+            return SetError(error, 0,
+                            "provider virtualization requires explicit users");
+        }
+        const bool has_redirect = std::any_of(
+            policy->mounts.begin(), policy->mounts.end(),
+            [](const LogicalMountRule& rule) {
+                return rule.action == MountAction::kRedirect;
+            });
+        if (!has_redirect) {
+            return SetError(error, 0,
+                            "provider virtualization requires redirect rules");
+        }
+    }
+
     std::unordered_set<std::string> event_keys;
     event_keys.reserve(policy->events.size());
     for (EventRule& rule : policy->events) {

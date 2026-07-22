@@ -30,6 +30,19 @@ case "$ARCH" in
   *) abort "! Unsupported ABI: $ARCH" ;;
 esac
 
+if [ "$IS64BIT" = true ]; then
+  case "$ARCH" in
+    arm64)
+      [ -f "$MODPATH/zygisk/arm64-v8a.so" ] || abort "! Missing arm64 Zygisk library"
+      [ -f "$MODPATH/zygisk/armeabi-v7a.so" ] || abort "! Missing arm32 Zygisk library"
+      ;;
+    x64)
+      [ -f "$MODPATH/zygisk/x86_64.so" ] || abort "! Missing x64 Zygisk library"
+      [ -f "$MODPATH/zygisk/x86.so" ] || abort "! Missing x86 Zygisk library"
+      ;;
+  esac
+fi
+
 for binary in pathguardd pathguardctl; do
   source="$MODPATH/bin/$ABI/$binary"
   [ -f "$source" ] || abort "! Missing $binary for $ABI"

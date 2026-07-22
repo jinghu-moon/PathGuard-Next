@@ -6,7 +6,7 @@
 namespace pathguard::binary_format {
 
 inline constexpr uint32_t kMagic = 0x424E4750;  // PGNB, little-endian.
-inline constexpr uint16_t kFormatVersion = 4;
+inline constexpr uint16_t kFormatVersion = 5;
 inline constexpr uint16_t kSchemaVersion = 2;
 inline constexpr size_t kHeaderSize = 56;
 inline constexpr size_t kPackageSize = 48;
@@ -23,6 +23,9 @@ inline constexpr size_t kPackageTableOffset = 36;
 inline constexpr size_t kMountRuleTableOffset = 40;
 inline constexpr size_t kEventRuleTableOffset = 44;
 inline constexpr size_t kStringTableOffset = 48;
+inline constexpr size_t kHeaderFlagsOffset = 52;
+
+inline constexpr uint32_t kPolicyFlagAllowLegacyStringBind = UINT32_C(1) << 0;
 
 inline constexpr size_t kPackageHashOffset = 0;
 inline constexpr size_t kPackageNameOffset = 4;
@@ -35,6 +38,7 @@ inline constexpr size_t kPackageEventCountOffset = 28;
 inline constexpr size_t kPackagePlanGenerationOffset = 32;
 inline constexpr size_t kPackageFailureModeOffset = 40;
 inline constexpr size_t kPackageMediaCompatOffset = 41;
+inline constexpr size_t kPackageProviderCompatOffset = 42;
 
 inline constexpr size_t kMountActionOffset = 0;
 inline constexpr size_t kMountDepthOffset = 2;

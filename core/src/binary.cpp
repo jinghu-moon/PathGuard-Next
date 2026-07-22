@@ -82,10 +82,13 @@ void PutCanonicalString(std::vector<std::uint8_t>* output, std::string_view valu
 }
 
 std::vector<std::uint8_t> CanonicalPlan(const AppPolicy& policy,
-                                        FailureMode failure_mode) {
-    std::vector<std::uint8_t> bytes = {'P', 'G', 'P', 'L', '4', 0};
+                                        FailureMode failure_mode,
+                                        bool allow_legacy_string_bind) {
+    std::vector<std::uint8_t> bytes = {'P', 'G', 'P', 'L', '5', 0};
     Put8(&bytes, static_cast<std::uint8_t>(failure_mode));
     Put8(&bytes, static_cast<std::uint8_t>(policy.media_compat));
+    Put8(&bytes, static_cast<std::uint8_t>(policy.provider_compat));
+    Put8(&bytes, allow_legacy_string_bind ? 1 : 0);
     PutCanonicalString(&bytes, policy.package);
     Put32(&bytes, static_cast<std::uint32_t>(policy.users.size()));
     for (const std::string& user : policy.users) PutCanonicalString(&bytes, user);
@@ -111,8 +114,10 @@ std::vector<std::uint8_t> CanonicalPlan(const AppPolicy& policy,
     return bytes;
 }
 
-std::uint64_t PlanGeneration(const AppPolicy& policy, FailureMode failure_mode) {
-    const std::vector<std::uint8_t> bytes = CanonicalPlan(policy, failure_mode);
+std::uint64_t PlanGeneration(const AppPolicy& policy, FailureMode failure_mode,
+                             bool allow_legacy_string_bind) {
+    const std::vector<std::uint8_t> bytes = CanonicalPlan(
+        policy, failure_mode, allow_legacy_string_bind);
     return binary_format::Fnv1a64(bytes.data(), bytes.size());
 }
 
@@ -124,12 +129,14 @@ std::uint64_t ContentGeneration(const PolicyDocument& document) {
         return lhs->package < rhs->package;
     });
 
-    std::vector<std::uint8_t> bytes = {'P', 'G', 'I', 'R', '4', 0};
+    std::vector<std::uint8_t> bytes = {'P', 'G', 'I', 'R', '5', 0};
     Put16(&bytes, static_cast<std::uint16_t>(document.schema));
     Put8(&bytes, static_cast<std::uint8_t>(document.failure_mode));
+    Put8(&bytes, document.allow_legacy_string_bind ? 1 : 0);
     Put32(&bytes, static_cast<std::uint32_t>(apps.size()));
     for (const AppPolicy* app : apps) {
-        const std::vector<std::uint8_t> plan = CanonicalPlan(*app, document.failure_mode);
+        const std::vector<std::uint8_t> plan = CanonicalPlan(
+            *app, document.failure_mode, document.allow_legacy_string_bind);
         Put32(&bytes, static_cast<std::uint32_t>(plan.size()));
         bytes.insert(bytes.end(), plan.begin(), plan.end());
     }
@@ -214,14 +221,34 @@ bool CanonicalizeDocument(const PolicyDocument& input, PolicyDocument* output,
     }
     *output = input;
     std::unordered_set<std::string> packages;
+    std::unordered_map<std::string, std::string> provider_visible_to_backing;
+    std::unordered_map<std::string, std::string> provider_backing_to_visible;
     for (AppPolicy& app : output->apps) {
         if (!packages.insert(app.package).second) {
             return Fail(error, "duplicate package");
         }
         if (!ValidatePolicy(&app, error)) return false;
         for (const LogicalMountRule& rule : app.mounts) {
-            if (rule.action != MountAction::kDeny) {
-                return Fail(error, "mount action is not executable in Phase R0");
+            if (rule.action != MountAction::kRedirect) {
+                return Fail(error, "only redirect is executable in Phase R1");
+            }
+            if (app.provider_compat == ProviderCompat::kVirtualize) {
+                for (const std::string& user : app.users) {
+                    const std::string visible_key = user + '\0' + rule.visible_path;
+                    const std::string backing_key = user + '\0' + rule.backing_path;
+                    const auto visible = provider_visible_to_backing.emplace(
+                        visible_key, rule.backing_path);
+                    if (!visible.second && visible.first->second != rule.backing_path) {
+                        return Fail(error,
+                                    "ambiguous provider source across packages");
+                    }
+                    const auto backing = provider_backing_to_visible.emplace(
+                        backing_key, rule.visible_path);
+                    if (!backing.second && backing.first->second != rule.visible_path) {
+                        return Fail(error,
+                                    "ambiguous provider backing across packages");
+                    }
+                }
             }
         }
         if (!app.events.empty()) {
@@ -241,12 +268,18 @@ std::uint64_t ComputeContentGeneration(const PolicyDocument& document) {
 
 std::uint64_t ComputePlanGeneration(const AppPolicy& policy,
                                     FailureMode failure_mode) {
+    return ComputePlanGeneration(policy, failure_mode, false);
+}
+
+std::uint64_t ComputePlanGeneration(const AppPolicy& policy,
+                                    FailureMode failure_mode,
+                                    bool allow_legacy_string_bind) {
     AppPolicy canonical = policy;
     if (failure_mode != FailureMode::kOpen
         || !ValidatePolicy(&canonical, nullptr)) {
         return 0;
     }
-    return PlanGeneration(canonical, failure_mode);
+    return PlanGeneration(canonical, failure_mode, allow_legacy_string_bind);
 }
 
 bool EncodePolicy(const PolicyDocument& document, std::vector<std::uint8_t>* output,
@@ -296,10 +329,12 @@ bool EncodePolicy(const PolicyDocument& document, std::vector<std::uint8_t>* out
         Put32(&packages, static_cast<std::uint32_t>(app->mounts.size()));
         Put32(&packages, first_event);
         Put32(&packages, static_cast<std::uint32_t>(app->events.size()));
-        Put64(&packages, PlanGeneration(*app, canonical.failure_mode));
+        Put64(&packages, PlanGeneration(*app, canonical.failure_mode,
+                                        canonical.allow_legacy_string_bind));
         Put8(&packages, static_cast<std::uint8_t>(canonical.failure_mode));
         Put8(&packages, static_cast<std::uint8_t>(app->media_compat));
-        Put16(&packages, 0);
+        Put8(&packages, static_cast<std::uint8_t>(app->provider_compat));
+        Put8(&packages, 0);
         Put32(&packages, 0);
 
         for (const LogicalMountRule& rule : app->mounts) {
@@ -351,7 +386,8 @@ bool EncodePolicy(const PolicyDocument& document, std::vector<std::uint8_t>* out
     Put32(output, mount_offset);
     Put32(output, event_offset);
     Put32(output, string_offset);
-    Put32(output, 0);
+    Put32(output, canonical.allow_legacy_string_bind
+        ? binary_format::kPolicyFlagAllowLegacyStringBind : 0);
     output->insert(output->end(), packages.begin(), packages.end());
     output->insert(output->end(), mounts.begin(), mounts.end());
     output->insert(output->end(), events.begin(), events.end());
@@ -377,6 +413,8 @@ bool DecodePolicy(const std::vector<std::uint8_t>& input, PolicyDocument* docume
     const std::uint32_t mount_offset = Read32(data + binary_format::kMountRuleTableOffset);
     const std::uint32_t event_offset = Read32(data + binary_format::kEventRuleTableOffset);
     const std::uint32_t string_offset = Read32(data + binary_format::kStringTableOffset);
+    const std::uint32_t header_flags = Read32(
+        data + binary_format::kHeaderFlagsOffset);
     const std::uint64_t expected_mount_offset = kHeaderSize
         + static_cast<std::uint64_t>(package_count) * kPackageSize;
     const std::uint64_t expected_event_offset = expected_mount_offset
@@ -389,7 +427,8 @@ bool DecodePolicy(const std::vector<std::uint8_t>& input, PolicyDocument* docume
         || file_size != input.size() || package_count == 0
         || package_offset != kHeaderSize || mount_offset != expected_mount_offset
         || event_offset != expected_event_offset || string_offset != expected_string_offset
-        || string_offset >= input.size() || Read32(data + 52) != 0
+        || string_offset >= input.size()
+        || (header_flags & ~binary_format::kPolicyFlagAllowLegacyStringBind) != 0
         || binary_format::Crc32(data + kHeaderSize, input.size() - kHeaderSize)
             != checksum) {
         return Fail(error, "invalid policy header or checksum");
@@ -397,6 +436,8 @@ bool DecodePolicy(const std::vector<std::uint8_t>& input, PolicyDocument* docume
 
     PolicyDocument decoded;
     decoded.schema = binary_format::kSchemaVersion;
+    decoded.allow_legacy_string_bind =
+        (header_flags & binary_format::kPolicyFlagAllowLegacyStringBind) != 0;
     std::uint32_t previous_hash = 0;
     std::uint32_t expected_first_mount = 0;
     std::uint32_t expected_first_event = 0;
@@ -427,9 +468,11 @@ bool DecodePolicy(const std::vector<std::uint8_t>& input, PolicyDocument* docume
 
         const std::uint8_t failure = entry[binary_format::kPackageFailureModeOffset];
         const std::uint8_t media = entry[binary_format::kPackageMediaCompatOffset];
+        const std::uint8_t provider = entry[binary_format::kPackageProviderCompatOffset];
         if (failure > static_cast<std::uint8_t>(FailureMode::kClosed)
             || media > static_cast<std::uint8_t>(MediaCompat::kHideDenied)
-            || Read16(entry + 42) != 0 || Read32(entry + 44) != 0) {
+            || provider > static_cast<std::uint8_t>(ProviderCompat::kVirtualize)
+            || entry[43] != 0 || Read32(entry + 44) != 0) {
             return Fail(error, "invalid package flags");
         }
         const FailureMode package_failure = static_cast<FailureMode>(failure);
@@ -439,6 +482,7 @@ bool DecodePolicy(const std::vector<std::uint8_t>& input, PolicyDocument* docume
         }
         decoded.failure_mode = package_failure;
         app.media_compat = static_cast<MediaCompat>(media);
+        app.provider_compat = static_cast<ProviderCompat>(provider);
 
         const std::uint32_t first_mount = Read32(
             entry + binary_format::kPackageFirstMountOffset);
@@ -515,7 +559,8 @@ bool DecodePolicy(const std::vector<std::uint8_t>& input, PolicyDocument* docume
                 return Fail(error, "unordered event table");
             }
         }
-        if (PlanGeneration(app, decoded.failure_mode)
+        if (PlanGeneration(app, decoded.failure_mode,
+                           decoded.allow_legacy_string_bind)
             != Read64(entry + binary_format::kPackagePlanGenerationOffset)) {
             return Fail(error, "invalid plan generation");
         }

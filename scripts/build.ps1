@@ -1,5 +1,5 @@
 param(
-    [string[]]$Abi = @('arm64-v8a'),
+    [string[]]$Abi = @('arm64-v8a', 'armeabi-v7a'),
     [switch]$AllowMissingNative,
     [switch]$SkipNative,
     [ValidateRange(0, 10000)]

@@ -41,6 +41,11 @@ int main() {
         MountTransactionState::kComplete, MountTransactionState::kApplying));
     static_assert(!pathguard::IsMountTransitionAllowed(
         MountTransactionState::kApplying, MountTransactionState::kFailed));
+    static_assert(pathguard::IsMountTransitionAllowed(
+        MountTransactionState::kApplying,
+        MountTransactionState::kNamespaceTainted));
+    static_assert(pathguard::IsMountTransactionTerminal(
+        MountTransactionState::kNamespaceTainted));
 
     for (int iteration = 0; iteration < 10000; ++iteration) {
         std::atomic<std::uint32_t> state{Value(MountTransactionState::kPending)};
