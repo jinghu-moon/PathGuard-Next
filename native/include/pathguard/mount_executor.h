@@ -57,6 +57,19 @@ struct MountBackendProbe {
     MountBackendProbeStep legacy_string;
 };
 
+struct MountApplyTiming {
+    uint64_t verify_pinned_ns = 0;
+    uint64_t before_scan_ns = 0;
+    uint64_t apply_raw_ns = 0;
+    uint64_t verify_ns = 0;
+    // Fine-grained breakdown of the verify step to locate the cold-mountinfo
+    // cost: stat(target) vs mountinfo read (kernel seq_file generation) vs
+    // parse loop.
+    uint64_t verify_stat_ns = 0;
+    uint64_t verify_mountinfo_read_ns = 0;
+    uint64_t verify_mountinfo_parse_ns = 0;
+};
+
 int PinDirectory(const char* absolute_path, PinnedIdentity* identity);
 void ClosePinnedIdentity(PinnedIdentity* identity);
 int VerifyPinnedDirectory(const char* absolute_path,
@@ -69,7 +82,8 @@ int ApplyDirectoryMount(MountBackendKind backend,
                         const PinnedIdentity& target,
                         const CanonicalLocator& source_locator,
                         const CanonicalLocator& target_locator,
-                        AppliedMount* applied);
+                        AppliedMount* applied,
+                        MountApplyTiming* timing = nullptr);
 int RollbackDirectoryMount(const AppliedMount& applied);
 
 int BindMountDirectoryFds(int source_fd, int target_fd);

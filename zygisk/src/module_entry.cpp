@@ -966,6 +966,77 @@ void LogProbeStep(const char* name,
          static_cast<unsigned long long>(step.remaining_id), step.success);
 }
 
+// P0a: process-level capability probe cache. Per ADR-0005 the probe result
+// binds to boot identity, SELinux environment and policy flags; it does NOT
+// depend on the target namespace (ProbeDirectoryMountBackends forks its own
+// isolated unshare+MS_PRIVATE namespace). Verified on-device: probe run in the
+// companion global ns and inside an app ns produce identical primitives.
+// The cache lives in the persistent companion parent process so forked
+// per-request children inherit it via COW fork and never re-probe.
+struct ProbeCacheKey {
+    char boot_id[48];
+    int selinux_enforce;
+    uint32_t policy_flags;
+};
+
+struct ProbeCacheEntry {
+    bool valid = false;
+    ProbeCacheKey key{};
+    pathguard::MountBackendProbe probe{};
+};
+
+ProbeCacheEntry g_probe_cache;
+
+bool ReadBootId(char* output, size_t size) {
+    if (output == nullptr || size == 0) return false;
+    output[0] = '\0';
+    FILE* input = fopen("/proc/sys/kernel/random/boot_id", "re");
+    if (input == nullptr) return false;
+    const char* result = fgets(output, static_cast<int>(size), input);
+    fclose(input);
+    if (result == nullptr) return false;
+    output[strcspn(output, "\r\n")] = '\0';
+    return output[0] != '\0';
+}
+
+int ReadSelinuxEnforce() {
+    FILE* input = fopen("/sys/fs/selinux/enforce", "re");
+    if (input == nullptr) return -1;
+    int value = -1;
+    if (fscanf(input, "%d", &value) != 1) value = -1;
+    fclose(input);
+    return value;
+}
+
+bool ProbeKeyMatches(const ProbeCacheKey& a, const ProbeCacheKey& b) {
+    return a.selinux_enforce == b.selinux_enforce
+        && a.policy_flags == b.policy_flags
+        && strncmp(a.boot_id, b.boot_id, sizeof(a.boot_id)) == 0;
+}
+
+// Runs (or reuses) the isolated capability probe. Called from the persistent
+// companion parent so the result is cached across requests. source_path and
+// target_path only need to be a representative existing storage pair; the probe
+// mounts inside its own throwaway namespace and the capability outcome is path
+// independent on a given device/topology.
+const pathguard::MountBackendProbe& GetOrProbeMountBackends(
+        const char* source_path, const char* target_path,
+        uint32_t policy_flags, bool* cache_hit) {
+    ProbeCacheKey key{};
+    ReadBootId(key.boot_id, sizeof(key.boot_id));
+    key.selinux_enforce = ReadSelinuxEnforce();
+    key.policy_flags = policy_flags;
+    if (g_probe_cache.valid && ProbeKeyMatches(g_probe_cache.key, key)) {
+        if (cache_hit != nullptr) *cache_hit = true;
+        return g_probe_cache.probe;
+    }
+    g_probe_cache.probe = ProbeMountBackendsIsolated(source_path, target_path);
+    g_probe_cache.key = key;
+    g_probe_cache.valid = true;
+    if (cache_hit != nullptr) *cache_hit = false;
+    return g_probe_cache.probe;
+}
+
 bool StoragePropagationRequiresPrivate() {
     FILE* input = fopen("/proc/self/mountinfo", "re");
     if (input == nullptr) return true;
@@ -1108,8 +1179,14 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, const ProcessPlan& plan,
         perf.result = EINVAL;
         return perf;
     }
-    const pathguard::MountBackendProbe probe =
-        ProbeMountBackendsIsolated(source_path, target_path);
+    const uint64_t probe_started = pathguard::perf::NowNs();
+    bool probe_cache_hit = false;
+    const pathguard::MountBackendProbe probe = GetOrProbeMountBackends(
+        source_path, target_path, plan.policy_flags, &probe_cache_hit);
+    LOGI("perf probe_total pid=%d probe_us=%llu cached=%d", pid,
+         static_cast<unsigned long long>(pathguard::perf::NsToUs(
+             pathguard::perf::ElapsedNs(probe_started))),
+         probe_cache_hit ? 1 : 0);
     LOGI("probe_runtime uid=%u euid=%u context=%s cap_eff=%llx cap_bnd=%llx "
          "ns_before=%llu ns_after=%llu unshare_errno=%d private_errno=%d "
          "probe_errno=%d primitives=%llx source=%s target=%s",
@@ -1148,6 +1225,7 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, const ProcessPlan& plan,
         return perf;
     }
     pathguard::PinnedIdentity sources[kMaxMountRules]{};
+    const uint64_t src_pin_started = pathguard::perf::NowNs();
     for (size_t rule_index = 0; rule_index < plan.count; ++rule_index) {
         const char* backing_path = PlanPath(
             plan, plan.mounts[rule_index].backing_path);
@@ -1171,6 +1249,10 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, const ProcessPlan& plan,
             return perf;
         }
     }
+    LOGI("perf_stage source_pin_loop_us=%llu count=%u",
+         static_cast<unsigned long long>(pathguard::perf::NsToUs(
+             pathguard::perf::ElapsedNs(src_pin_started))),
+         plan.count);
     uint64_t actual_start_time = 0;
     if (!ReadProcessUid(pid, uid)
         || !ReadProcessStartTime(pid, &actual_start_time)
@@ -1239,15 +1321,32 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, const ProcessPlan& plan,
         }
         if (error == 0) {
             pathguard::PinnedIdentity target;
+            const uint64_t target_pin_started = pathguard::perf::NowNs();
             error = pathguard::PinDirectory(target_path, &target);
+            const uint64_t target_pin_ns = pathguard::perf::ElapsedNs(target_pin_started);
             if (error == 0) {
                 pathguard::CanonicalLocator source_locator;
                 pathguard::CanonicalLocator target_locator;
                 snprintf(source_locator.path, sizeof(source_locator.path), "%s", source_path);
                 snprintf(target_locator.path, sizeof(target_locator.path), "%s", target_path);
+                pathguard::MountApplyTiming apply_timing;
                 error = pathguard::ApplyDirectoryMount(
                     selection.backend, sources[rule_index], target,
-                    source_locator, target_locator, &applied[applied_count]);
+                    source_locator, target_locator, &applied[applied_count],
+                    &apply_timing);
+                LOGI("perf mount_step rule=%zu backend=%u target_pin_us=%llu "
+                     "verify_pinned_us=%llu before_scan_us=%llu apply_raw_us=%llu "
+                     "verify_us=%llu verify_stat_us=%llu verify_mi_read_us=%llu "
+                     "verify_mi_parse_us=%llu",
+                     rule_index, static_cast<uint32_t>(selection.backend),
+                     static_cast<unsigned long long>(target_pin_ns / 1000u),
+                     static_cast<unsigned long long>(apply_timing.verify_pinned_ns / 1000u),
+                     static_cast<unsigned long long>(apply_timing.before_scan_ns / 1000u),
+                     static_cast<unsigned long long>(apply_timing.apply_raw_ns / 1000u),
+                     static_cast<unsigned long long>(apply_timing.verify_ns / 1000u),
+                     static_cast<unsigned long long>(apply_timing.verify_stat_ns / 1000u),
+                     static_cast<unsigned long long>(apply_timing.verify_mountinfo_read_ns / 1000u),
+                     static_cast<unsigned long long>(apply_timing.verify_mountinfo_parse_ns / 1000u));
             }
             pathguard::ClosePinnedIdentity(&target);
         }
@@ -1714,6 +1813,33 @@ void CompanionHandler(int client) {
         return;
     }
     state->result.ready_ns = ready_ns;
+
+    // P0a: warm the capability probe cache in the persistent parent process
+    // before forking, so the per-request child inherits it (COW) and skips the
+    // ~100ms isolated probe. The probe is namespace independent (verified on
+    // device) so a representative storage path pair built from the first rule
+    // and the requesting uid is sufficient; the outcome is path independent.
+    {
+        char warm_source[PATH_MAX]{};
+        char warm_target[PATH_MAX]{};
+        const char* warm_visible = PlanPath(plan, plan.mounts[0].visible_path);
+        const char* warm_backing = PlanPath(plan, plan.mounts[0].backing_path);
+        if (warm_visible != nullptr && warm_backing != nullptr
+            && BuildUserStoragePath(warm_visible, static_cast<uid_t>(header.uid),
+                                    warm_target, sizeof(warm_target))
+            && BuildUserSourcePath(warm_backing, static_cast<uid_t>(header.uid),
+                                   warm_source, sizeof(warm_source))) {
+            bool warm_hit = false;
+            const uint64_t warm_started = pathguard::perf::NowNs();
+            GetOrProbeMountBackends(warm_source, warm_target,
+                                    plan.policy_flags, &warm_hit);
+            LOGI("perf probe_warm pid=%d warm_us=%llu cache_hit=%d",
+                 header.pid,
+                 static_cast<unsigned long long>(pathguard::perf::NsToUs(
+                     pathguard::perf::ElapsedNs(warm_started))),
+                 warm_hit ? 1 : 0);
+        }
+    }
 
     int result_sockets[2];
     MountPerfResult mount_result;
