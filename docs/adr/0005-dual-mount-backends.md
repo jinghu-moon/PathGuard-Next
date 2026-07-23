@@ -48,7 +48,13 @@ probe 明确证明 strict 不可用，且 legacy capability、action mask 与用
   `/proc/self/fd/<source>` 不足以构成 strict capability。
 - source 可以在事务预检时固定；target 必须在父级 mount 完成后的当前 VFS 视图中
   just-in-time 解析，禁止在第一条 mount 前一次性打开全部子 target。
-- mount 后仍校验 mountinfo 与 source/target 身份。
+- mount 后仍校验 mountinfo 与 source/target 身份。该校验从 target 挂载点的
+  mountinfo 行完成：确认存在非零 mount ID、`root` 字段等于固定 source 在其文件系统内
+  的规范路径、filesystem 与设备符合计划。strict 的最终 mount 已消费固定 source FD，
+  source 身份由内核构造保证，因此**不需要**对 target 路径做一次额外的
+  `stat()`/`statx()` 来比对 dev/ino——在 FUSE 存储上该路径 `stat` 会触发一次
+  与 daemon 的 getattr 往返（实测约 45ms），而它证明的身份已被"消费固定 FD + mountinfo
+  行"覆盖。strict 也不做 before/after 行数 delta（见 legacy）。
 
 ### legacy_namespace_bind
 

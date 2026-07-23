@@ -68,6 +68,13 @@ struct MountApplyTiming {
     uint64_t verify_stat_ns = 0;
     uint64_t verify_mountinfo_read_ns = 0;
     uint64_t verify_mountinfo_parse_ns = 0;
+    // Experiment (方向1/2): alternative target-identity checks measured
+    // alongside the current stat() to decide if the ~45ms FUSE getattr can be
+    // replaced. statx_dontsync_ns = statx(AT_STATX_DONT_SYNC); stat2_ns = a
+    // second stat() to see if the first call warms the dentry.
+    uint64_t verify_statx_dontsync_ns = 0;
+    uint64_t verify_stat2_ns = 0;
+    uint64_t verify_statx_mnt_id = 0;
 };
 
 int PinDirectory(const char* absolute_path, PinnedIdentity* identity);
