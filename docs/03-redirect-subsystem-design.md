@@ -1,10 +1,10 @@
 # PathGuard Next 重定向子系统设计
 
-> 状态：Draft / Phase R0.1 Safety Contract Pending
+> 状态：Draft / Phase R0.1 Core Implemented, Device Validation Pending
 >
-> 文档版本：0.2
+> 文档版本：0.3
 >
-> 日期：2026-07-20
+> 日期：2026-07-26
 >
 > 适用范围：Android 12+、Magisk Zygisk / KernelSU + ZygiskNext
 
@@ -13,10 +13,12 @@
 PathGuard Next 的同步重定向只使用 mount namespace 和 VFS。配置监控使用 inotify；文件事件监控和写后自动化使用 fanotify。三条路径必须分离：
 
 ```text
-配置面：rules.ini -> inotify -> compile/validate -> policy.bin
+配置面：rules.toml -> inotify -> compile/validate -> policy.bin
 同步数据面：policy.bin -> Zygisk -> companion -> bind mount -> VFS
 异步事件面：fanotify -> bounded queue -> audit/export/move/delete
 ```
+
+配置面的规则格式、箭头脱糖和编译语言选择分别由 `docs/04-rule-file-refactoring-design.md` 与 `docs/05-rule-arrow-desugarer-design.md` 约束。Phase D0 只会选择一个完整规则编译器；无论最终使用 Rust/`toml_edit` 还是 C++/toml++，parser、诊断和 Rust runtime（如采用）都不得进入下方 Zygisk 同步数据面。
 
 禁止使用 PLT Hook、JNI Hook 或 fanotify 写后搬运实现基础 `redirect`。Hook 只能作为用户显式启用的 provider 兼容后端，不得改变基础能力的成功状态。
 
@@ -202,13 +204,13 @@ struct ProcessPlan {
 
 字段使用 `visible_path` 和 `backing_path`，禁止继续使用含义容易颠倒的 `source`/`target` 表示 mount syscall 参数。
 
-## 6. policy.bin format v4
+## 6. policy.bin format v5
 
-format v4 是唯一受支持格式，至少包含：
+format v5 是唯一受支持格式，至少包含：
 
 ```text
 Header
-  magic, format=4, schema=2
+  magic, format=5, schema=2
   file_size
   content_generation (64-bit canonical IR content hash)
   payload_checksum
@@ -225,7 +227,7 @@ StringTable      去重 UTF-8 字符串
 
 - `content_generation` 来自整个规范化 IR 的内容哈希，不再固定为 `1`。
 - `content_generation` 表示整个快照；每个 `ProcessPlan` 另带仅覆盖该包有效计划的 `plan_generation`。无关包变化时，运行中进程可以用相同的 `plan_generation` 证明其挂载语义仍然有效。
-- R0 必须在共享格式头和 golden vectors 中冻结 content hash、plan hash、payload checksum 的算法、seed、输入字节序和 canonical IR 编码；这些参数未确定前不得把 format v4 标记为完成。
+- 共享格式头和固定 207-byte golden vector 冻结 content hash、plan hash、payload checksum 的算法、seed、输入字节序和 canonical IR 编码。
 - 64 位内容哈希碰撞属于已知且接受的低概率风险，不维护第二套哈希或定期强制全量比对，也不声称能够检测 `content_generation`/`plan_generation` 碰撞。
 - checksum 覆盖整个 payload，Zygisk reader 必须校验，不能只由 Host decoder 校验。
 - 未知 action、越界 offset、未终止字符串、无序 package index 和错误 checksum 全部 fail-open 并记录损坏状态。
@@ -285,6 +287,11 @@ source 可以在事务级预检时固定；target 不能在第一条 mount 前�
 target 必须在其父级 mount 已完成后的当前 VFS 视图中 just-in-time 解析、固定并立即
 应用，使子路径确实覆盖新的父级视图。
 
+目标 namespace 的变更前 mountinfo 以有界 snapshot 捕获一次，绑定 namespace dev/inode；
+topology、source identity、propagation 与首条 target identity 均查询该 snapshot。
+每条 mount 后捕获的 post-snapshot 完成 strict/legacy 身份验证，并成为下一条规则的
+当前 VFS 视图。snapshot 原始文本和条目数必须有硬上限，存储不得进入 Zygisk 线程栈。
+
 legacy 后端仍执行上述 FD 预检，但最终 mount 使用由规范相对路径重新生成的
 canonical string。mount 前后必须复验设备、inode 与 mount ID；该检查只能缩小
 TOCTOU，不能把 legacy 提升为 FD-safe。
@@ -294,6 +301,11 @@ mountpoint、parent mount ID、mount root、filesystem 与 major:minor 符合计
 出现额外 mount。旧内核没有 `STATX_MNT_ID` 时从 mountinfo 获取 mount ID；回滚前
 必须确认记录的 mount 仍是 canonical target 的最顶层 mount，身份不明时禁止盲目
 `umount2(path)`。
+
+mount syscall 成功后先把 canonical target 和未知 mount ID 写入 journal；post-snapshot
+取得并验证实际 ID 后回填同一 journal 项。回滚先用一个 fresh snapshot 确认全部记录仍为
+各自 target 的顶层 mount，再逆序卸载，最后用一个 snapshot 批量确认全部记录 ID 消失。
+任何阶段无法确认身份都必须 taint namespace，禁止逐路径盲目回滚。
 
 legacy 还必须固定 PID、PID start time、UID、package/process、mount namespace
 inode、namespace FD、plan generation 和 topology generation。首版只允许成员关系
@@ -521,7 +533,7 @@ media = hide_denied
 
 - schema 2 parser golden tests。
 - 所有冲突、环、父子覆盖、非法占位符和 symlink 路径测试；显式覆盖 isolate backing_path 与普通规则 visible_path 的相同、祖先和后代关系。
-- format v4 损坏、checksum、bounds fuzz；`package_hash` 碰撞必须验证完整包名比较。`content_generation`/`plan_generation` 碰撞是已接受风险，不列为可检测能力。
+- format v5 损坏、checksum、bounds fuzz；`package_hash` 碰撞必须验证完整包名比较。`content_generation`/`plan_generation` 碰撞是已接受风险，不列为可检测能力。
 - package 1/10/100/1000/10000，mount rules 0/1/4/16/32/64 基准。
 - old/new snapshot generation diff 和逐包 plan generation 稳定性测试；无关包变化不得使该包进入 `pending_restart`。
 - plan-wide backend selector：action mask 不完整、legacy 未授权、strict 运行时失败和
@@ -570,7 +582,7 @@ media = hide_denied
 
 ### Phase R0：破坏性模型重构
 
-- [x] schema 2、format v4、content generation。
+- [x] schema 2、format v5、content generation 与固定 golden vector。
 - [x] 冻结 content/plan hash、payload checksum 和 canonical IR 编码。
 - [x] capability bitset 为 `FAN_REPORT_DFID_NAME`、`FAN_REPORT_PIDFD` 和完整 rename target 保留独立稳定位。
 - [x] 完成 300ms、fail-open 与 namespace mutation lease 的事务 ADR；Host 竞争测试及 pending/applying 两个真机档位通过。
@@ -579,21 +591,23 @@ media = hide_denied
 
 ### Phase R0.1：双后端安全契约补强
 
-- [ ] ADR-0003 实现 `namespace_tainted`，完成 propagation 预检、helper FD 释放、
-  namespace member 终止和重新启动真机测试。
-- [ ] 冻结 plan-wide backend selector、action mask 和“strict 运行时失败不自动重试
+- [x] ADR-0003 已实现 `namespace_tainted`、propagation 预检、回滚失败与 worker
+  owner-death 终止路径；namespace member 终止和重新启动仍需真机测试。
+- [x] 冻结 plan-wide backend selector、action mask 和“strict 运行时失败不自动重试
   legacy”协议。
-- [ ] 冻结两阶段 topology、boot/topology generation 失效和 namespace identity
-  模型。
-- [ ] capability probe 覆盖实际 attach flags、source/target 双 FD、mountinfo delta
+- [x] companion namespace 与目标 namespace 两阶段 topology 已接入，probe cache 绑定
+  boot、SELinux policy identity 与 topology generation；daemon authoritative snapshot
+  与存储重挂载主动通知留到状态控制面后续迭代。
+- [x] capability probe 覆盖实际 attach flags、source/target 双 FD、mountinfo delta
   和 rollback，不使用 syscall 存在性代替端到端能力。
-- [ ] 完成统一事务器 + fake backend 的逐 mutation 故障注入。
+- [x] 统一事务 journal 区分 apply/verify/rollback 阶段，并提供 worker crash、rollback
+  failure 与 pending/applying delay 注入构建开关；真机矩阵待执行。
 
 ### Phase R1：选择性 redirect
 
 - [x] topology probe 与 backend path resolver；Alioth Android 13 真机 topology 识别 `/storage/emulated/0 -> /data/media/0`。
 - [x] openat2/逐组件 FD walk resolver 与 symlink/magic-link 拒绝；Alioth 4.19 内核走 `component_fd_walk` capability。
-- [ ] 基于 `PreparedMountStep`/`AppliedMount` 完成双后端通用 executor；target 在父级
+- [x] 基于 pinned identity/`AppliedMount` 完成双后端通用 executor；target 在父级
   mount 后 just-in-time 解析。
 - [ ] Alioth 完成 legacy redirect-only 垂直链路：私有 namespace probe、两阶段
   topology、mountinfo delta、PID/namespace identity 和 mount ID 保护回滚。
@@ -613,8 +627,10 @@ media = hide_denied
 ### Phase R3：实时收敛与状态
 
 - snapshot/plan generation diff、affected package、普通应用 force-stop/restart。
-- `status`/`explain`/`probe` 分别报告 enforcement、backend、transaction、security、
+- [x] companion 原子发布按 PID 的 transitional runtime status；`pathguardctl status` 与
+  `explain` 已报告 enforcement、backend、transaction、security、
   reason 和 snapshot/plan/topology generation；无关包变化后不得误报 `pending_restart`。
+- [ ] daemon UDS、状态清理、affected package diff 与 force-stop/restart 收敛仍待实现。
 
 ### Phase R4：observe/export
 

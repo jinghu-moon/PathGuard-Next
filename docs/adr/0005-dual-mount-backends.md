@@ -48,6 +48,9 @@ probe 明确证明 strict 不可用，且 legacy capability、action mask 与用
   `/proc/self/fd/<source>` 不足以构成 strict capability。
 - source 可以在事务预检时固定；target 必须在父级 mount 完成后的当前 VFS 视图中
   just-in-time 解析，禁止在第一条 mount 前一次性打开全部子 target。
+- 同一 namespace epoch 内的 topology、source、propagation 和 target identity 必须从
+  同一个有界 mountinfo snapshot 查询，禁止每个查询重新生成整张 mountinfo。每次成功
+  mount 后捕获的新 snapshot 同时用于验证当前 mount 和下一条 JIT target。
 - mount 后仍校验 mountinfo 与 source/target 身份。该校验从 target 挂载点的
   mountinfo 行完成：确认存在非零 mount ID、`root` 字段等于固定 source 在其文件系统内
   的规范路径、filesystem 与设备符合计划。strict 的最终 mount 已消费固定 source FD，
@@ -69,8 +72,12 @@ probe 明确证明 strict 不可用，且 legacy capability、action mask 与用
 - 每个成功 mount 记录 canonical target、新 mount ID 和操作前后身份，失败时逆序
   回滚。旧内核无法提供 `STATX_MNT_ID` 时，mount ID 来自 mountinfo；该 statx 字段
   是可选增强，不能成为 legacy 的硬依赖。
+- mount syscall 成功后必须先以未知 mount ID 写 journal，再读取 post-snapshot 并回填
+  mount ID；不得让 verify 期间的 worker crash 留下未记录 mutation。
 - 回滚前必须确认记录的 mount 仍是 canonical target 的最顶层 mount；无法确认时
   禁止盲目 `umount2(path)`。
+- 回滚允许用一个 fresh snapshot 先确认全部 journal 项，再逆序卸载，并用一个最终
+  snapshot 批量验证全部 mount ID 消失；任一确认、卸载或最终验证失败均 taint namespace。
 - 回滚对象无法确认时，失败作用域是 mount namespace，不是单个 PID。helper 必须
   关闭其持有的 namespace/mount FD，并使执行 `setns` 的 worker 返回原 namespace
   或退出，再终止该 namespace 的全部成员；不得让任何成员带部分挂载继续运行。
@@ -210,3 +217,14 @@ reason: capability_missing | legacy_not_authorized | unsupported_action | ...
   选择性 redirect。
 - 同一份规则在两个后端具有相同目录语义，但产品必须暴露不同安全等级。
 - legacy 后端需要额外的 mountinfo 身份验证、PID start time 复验和异常终止路径。
+
+## 实现状态（2026-07-24）
+
+- `PinnedIdentity` 同时保存 dev/inode、所属 mount ID、parent、root、filesystem、
+  major:minor 和预期 bind root；
+- strict/legacy verify 均比较 exact target mountpoint、source root、filesystem、设备与
+  target parent identity；legacy 额外保留 stat/SameObject 和全表 delta；
+- `MountApplyResult` 在 verify 失败时仍返回已发生 mutation 的 `AppliedMount`；
+- `MountRollbackResult` 区分 identity、unmount 和 post-verify 阶段，任一失败污染整个
+  namespace；
+- 当前代码与 Host/arm64 NDK 构建已通过，真机 action/capability 矩阵仍是发布门槛。

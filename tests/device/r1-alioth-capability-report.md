@@ -1,5 +1,10 @@
 # R1 Alioth capability report
 
+> 历史基线（2026-07-20，已过期）：本报告记录重构前 probe。2026-07-23 的性能记录
+> 曾观察到 `proc_fd`，但尚未用 2026-07-24 的完整 root/filesystem/device/parent identity
+> 验证路径重新采集。发布判断以 `r1-safety-validation.md` 新矩阵为准，不再引用本文件的
+> bitset 作为当前 capability。
+
 日期：2026-07-20
 
 设备：Xiaomi alioth，Android 13，Linux 4.19.157，SELinux Enforcing，Magisk 30.6。

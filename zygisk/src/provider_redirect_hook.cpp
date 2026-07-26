@@ -128,6 +128,28 @@ thread_local uint32_t g_identity_clear_depth = 0;
 uint32_t g_rewrite_log_count = 0;
 CallerMode g_caller_mode = CallerMode::kBinderUid;
 
+bool ValidLogicalRulePath(const char* path) {
+    if (path == nullptr || path[0] == '\0' || path[0] == '/'
+        || strlen(path) >= PATH_MAX || strchr(path, '{') != nullptr
+        || strchr(path, '}') != nullptr) {
+        return false;
+    }
+    const char* component = path;
+    while (*component != '\0') {
+        const char* separator = strchr(component, '/');
+        const size_t length = separator == nullptr
+            ? strlen(component) : static_cast<size_t>(separator - component);
+        if (length == 0 || length > NAME_MAX
+            || (length == 1 && component[0] == '.')
+            || (length == 2 && component[0] == '.' && component[1] == '.')) {
+            return false;
+        }
+        if (separator == nullptr) break;
+        component = separator + 1;
+    }
+    return true;
+}
+
 class HookGuard final {
 public:
     HookGuard() : outer_(!g_in_hook) { if (outer_) g_in_hook = true; }
@@ -585,7 +607,7 @@ void Register(zygisk::Api* api, const Image* images, uint32_t count,
     }
 }
 
-bool RegisterHooks(zygisk::Api* api) {
+InstallResult RegisterHooks(zygisk::Api* api) {
     Image images[kMaxImages]{};
     const uint32_t count = CollectImages(images, kMaxImages);
 #define REGISTER(symbol, hook, original) \
@@ -631,14 +653,25 @@ bool RegisterHooks(zygisk::Api* api) {
     REGISTER("_ZN7android14IPCThreadState21restoreCallingIdentityEl",
              HookedRestoreCallingIdentity, g_restore_identity);
 #undef REGISTER
-    const bool committed = api->pltHookCommit();
+    InstallResult result;
+    result.hooks_committed = api->pltHookCommit();
     const bool has_open = g_open != nullptr || g_openat != nullptr;
     const bool has_stat = g_stat != nullptr || g_stat64 != nullptr
         || g_fstatat != nullptr || g_fstatat64 != nullptr;
-    const bool required = has_open && has_stat
+    result.identity_hooks = g_clear_identity != nullptr
+        && g_restore_identity != nullptr;
+    const bool filesystem_complete = has_open && has_stat
         && g_access != nullptr && g_opendir != nullptr
         && g_mkdir != nullptr && g_remove != nullptr && g_rename != nullptr
-        && g_realpath != nullptr;
+        && g_realpath != nullptr && g_readlink != nullptr
+        && g_chmod != nullptr && g_chown != nullptr
+        && g_statvfs != nullptr && g_inotify_add_watch != nullptr;
+    const bool raw_caller_uid = g_ndk_calling_uid != nullptr
+        || (g_binder_self != nullptr && g_binder_calling_uid != nullptr);
+    const bool identity_safe = g_caller_mode == CallerMode::kSystemMedia
+        || result.identity_hooks || raw_caller_uid;
+    result.virtualization_active = result.hooks_committed
+        && filesystem_complete && identity_safe;
     uint32_t capability = 0;
     if (has_open) capability |= 1u << 0;
     if (has_stat) capability |= 1u << 1;
@@ -651,30 +684,32 @@ bool RegisterHooks(zygisk::Api* api) {
     if (g_chmod != nullptr && g_chown != nullptr) capability |= 1u << 8;
     if (g_clear_identity != nullptr && g_restore_identity != nullptr) capability |= 1u << 9;
     if (g_inotify_add_watch != nullptr) capability |= 1u << 10;
-    LOGI("provider virtual hooks: images=%u committed=%d required=%d capability=%x "
+    const unsigned identity_mode = g_caller_mode == CallerMode::kSystemMedia
+        ? 0u : result.identity_hooks ? 1u : raw_caller_uid ? 2u : 3u;
+    LOGI("provider virtual hooks: images=%u committed=%d active=%d capability=%x identity_mode=%u "
          "open=%p openat=%p stat=%p stat64=%p access=%p opendir=%p mkdir=%p "
          "remove=%p rename=%p realpath=%p",
-         count, committed ? 1 : 0, required ? 1 : 0, capability,
+         count, result.hooks_committed ? 1 : 0,
+         result.virtualization_active ? 1 : 0, capability, identity_mode,
          g_open, g_openat, g_stat, g_stat64, g_access, g_opendir, g_mkdir,
          g_remove, g_rename, g_realpath);
-    return committed && required;
+    return result;
 }
 
 }  // namespace
 
-bool Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
-             uint32_t rule_count, CallerMode caller_mode) {
+InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
+                      uint32_t rule_count, CallerMode caller_mode) {
     if (api == nullptr || rules == nullptr || rule_count == 0 || rule_count > kMaxRules) {
-        return false;
+        return {};
     }
     g_rule_count = 0;
     g_caller_mode = caller_mode;
     for (uint32_t index = 0; index < rule_count; ++index) {
         const Rule& input = rules[index];
         if (input.caller_uid < 10000
-            || input.visible_path[0] == '\0' || input.backing_path[0] == '\0'
-            || strlen(input.visible_path) >= PATH_MAX
-            || strlen(input.backing_path) >= PATH_MAX) return false;
+            || !ValidLogicalRulePath(input.visible_path)
+            || !ValidLogicalRulePath(input.backing_path)) return {};
         for (uint32_t existing = 0; existing < g_rule_count; ++existing) {
             const PathRule& current = g_rules[existing];
             const bool same_scope = caller_mode == CallerMode::kSystemMedia
@@ -685,7 +720,7 @@ bool Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
                 && strcmp(current.backing_path, input.backing_path) != 0) {
                 LOGE("provider virtual ambiguous rule: uid=%d user=%u visible=%s",
                      input.caller_uid, input.user_id, input.visible_path);
-                return false;
+                return {};
             }
         }
         PathRule& output = g_rules[g_rule_count++];
@@ -700,17 +735,19 @@ bool Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
         && g_ndk_calling_uid == nullptr
         && (g_binder_self == nullptr || g_binder_calling_uid == nullptr)) {
         LOGE("provider virtual Binder calling UID unavailable");
-        return false;
+        return {};
     }
-    const bool installed = RegisterHooks(api);
+    const InstallResult result = RegisterHooks(api);
     LOGI("provider virtual installed: rules=%u caller_mode=%u binder_ndk=%d binder_cpp=%d "
-         "identity_hooks=%d ok=%d",
+         "identity_hooks=%d committed=%d active=%d",
          g_rule_count, static_cast<unsigned>(g_caller_mode),
          g_ndk_calling_uid != nullptr ? 1 : 0,
          g_binder_self != nullptr && g_binder_calling_uid != nullptr ? 1 : 0,
-         g_clear_identity != nullptr && g_restore_identity != nullptr ? 1 : 0,
-         installed ? 1 : 0);
-    return installed;
+         result.identity_hooks ? 1 : 0,
+         result.hooks_committed ? 1 : 0,
+         result.virtualization_active ? 1 : 0);
+    if (!result.virtualization_active) g_rule_count = 0;
+    return result;
 }
 
 }  // namespace pathguard::provider_redirect

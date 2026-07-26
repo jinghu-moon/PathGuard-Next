@@ -43,8 +43,11 @@ canonical child 校验；由于 source 不存在，后续 open 尚未执行便�
 
 `realpath` 先在 backing 上做真实 canonical 校验，再把结果反向翻译成 source，避免
 Provider 对外泄露 backing document ID。嵌套规则按最长 visible path 匹配，`.`/`..`
-尾部拒绝映射。Provider 调用 `clearCallingIdentity()` 时保存当前 Binder UID，并在
-`restoreCallingIdentity()` 后清除，避免身份清除期间失去应用归属。
+尾部拒绝映射。调用方身份采用分层策略：若目标镜像同时导入
+`clearCallingIdentity()`/`restoreCallingIdentity()`，则在 identity clear 前保存当前
+Binder UID，并在 restore 后清除；若 ROM 没有可 Hook 的成对导入，则每次文件操作直接读取
+raw Binder calling UID。raw UID 只有在它是非 Provider 自身的应用 UID 时才允许匹配规则；
+identity 已清除或 UID 不可用时一律 fail-open，不猜测调用方。
 
 文件关闭后的媒体扫描在独立进程中执行，已不存在原 Binder UID。因此显式启用
 provider virtualization 时，同时向主线 MediaProvider 进程安装 source→backing 映射，
@@ -81,6 +84,12 @@ v0.1.10 的实现从 `/proc/self/maps` 收集进程内**全部已加载镜像**�
 路径上，只会重新引入卸载期悬空指针。命中白名单之外的 caller 时退化为 fail-open
 （不改写），不得崩溃。
 
+`pltHookCommit()` 是另一个不可逆边界：提交成功后，目标 GOT 已指向 PathGuard 模块代码，
+无论完整能力检查最终是否通过，都禁止请求 Zygisk 卸载模块。安装结果必须分别报告
+`hooks_committed` 与 `virtualization_active`。若 Hook 已提交但文件系统能力或调用方身份能力
+不完整，则清空规则、保持模块驻留，所有 Hook 透传原函数；只有尚未提交任何 Hook 时才允许
+卸载。这样能力探测失败仍是完整 fail-open，不会把 GOT 留成指向已卸载 `.so` 的悬空指针。
+
 ## 安全边界
 
 - 只有 `provider = virtualize` 的规则参与系统代写。
@@ -106,3 +115,11 @@ policy format 升级到 v5。package entry 偏移 42 的保留字节改为
 - Provider 重启、模块 hook 失败和未知 OEM 路径均 fail-open，不导致 Provider 崩溃。
 - create-directory、rename、delete、query、目录观察、canonical child 和媒体扫描均需通过。
 - shared UID package attribution 与 OEM 非 AOSP Provider 仍需专项矩阵，完成前保持试验状态。
+
+2026-07-24 起，激活完整虚拟目录视图还要求 open/stat/access/opendir/mkdir、
+remove/rename、realpath/readlink、chmod/chown、statvfs、inotify 能力。Binder UID 模式要求
+以下身份来源至少一种可用：成对的 `clearCallingIdentity`/`restoreCallingIdentity` 跟踪，
+或可在文件操作边界读取 raw Binder calling UID。前者可覆盖 identity clear 区间；后者在
+identity clear 后安全退化为不改写。任一文件系统能力或身份来源缺失均不发布 active 状态；
+若 Hook 已提交，则按上述规则常驻透传。规则总长度和每个组件分别受
+`PATH_MAX`/`NAME_MAX` 限制，`{user}` 在按显式 user 生成 Provider rule 时展开。

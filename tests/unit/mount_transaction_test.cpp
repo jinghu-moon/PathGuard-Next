@@ -1,6 +1,8 @@
 #include <atomic>
 #include <thread>
+#include <vector>
 
+#include "pathguard/mutation_journal.h"
 #include "pathguard/mount_transaction.h"
 #include "test_assert.h"
 
@@ -44,6 +46,12 @@ int main() {
     static_assert(pathguard::IsMountTransitionAllowed(
         MountTransactionState::kApplying,
         MountTransactionState::kNamespaceTainted));
+    static_assert(pathguard::IsMountTransitionAllowed(
+        MountTransactionState::kCancelRequested,
+        MountTransactionState::kNamespaceTainted));
+    static_assert(!pathguard::IsMountTransitionAllowed(
+        MountTransactionState::kNamespaceTainted,
+        MountTransactionState::kRollbackComplete));
     static_assert(pathguard::IsMountTransactionTerminal(
         MountTransactionState::kNamespaceTainted));
 
@@ -92,5 +100,33 @@ int main() {
                       MountTransactionState::kFailed));
     assert(pathguard::MountTransactionHasResult(
         static_cast<MountTransactionState>(preflight_failure.load())));
+
+    struct FakeMutation { int operation = -1; };
+    for (int failure = 0; failure < 4; ++failure) {
+        pathguard::MutationJournal<FakeMutation, 4> journal;
+        for (int operation = 0; operation < 4; ++operation) {
+            assert(journal.Push({operation}));
+            if (operation == failure) break;  // mount happened, verify failed.
+        }
+        std::vector<int> rolled_back;
+        FakeMutation mutation;
+        while (journal.Pop(&mutation)) rolled_back.push_back(mutation.operation);
+        assert(rolled_back.size() == static_cast<std::size_t>(failure + 1));
+        for (int index = 0; index <= failure; ++index) {
+            assert(rolled_back[index] == failure - index);
+        }
+        assert(journal.empty());
+    }
+
+    pathguard::MutationJournal<FakeMutation, 1> bounded;
+    assert(bounded.Push({1}));
+    assert(bounded.UpdateLast({7}));
+    assert(bounded.At(0) != nullptr);
+    assert(bounded.At(0)->operation == 7);
+    assert(bounded.At(1) == nullptr);
+    assert(!bounded.Push({2}));
+    bounded.Clear();
+    assert(bounded.empty());
+    assert(!bounded.UpdateLast({9}));
     return 0;
 }

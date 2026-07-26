@@ -3,7 +3,9 @@ param(
     [ValidateRange(0, 10000)]
     [int]$ZygiskTestMountDelayMs = 0,
     [ValidateRange(0, 10000)]
-    [int]$ZygiskTestPreLeaseDelayMs = 0
+    [int]$ZygiskTestPreLeaseDelayMs = 0,
+    [switch]$ZygiskTestCrashAfterMount,
+    [switch]$ZygiskTestRollbackFailure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,6 +43,12 @@ if ($ZygiskTestMountDelayMs -gt 0) {
 }
 if ($ZygiskTestPreLeaseDelayMs -gt 0) {
     $zygisk += "PATHGUARD_TEST_PRE_LEASE_DELAY_MS=$ZygiskTestPreLeaseDelayMs"
+}
+if ($ZygiskTestCrashAfterMount) {
+    $zygisk += 'PATHGUARD_TEST_CRASH_AFTER_MOUNT=1'
+}
+if ($ZygiskTestRollbackFailure) {
+    $zygisk += 'PATHGUARD_TEST_ROLLBACK_FAILURE=1'
 }
 & $ndk @zygisk
 if ($LASTEXITCODE -ne 0) { throw "zygisk ndk-build failed: $LASTEXITCODE" }

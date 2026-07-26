@@ -14,6 +14,12 @@ $known = @('armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64')
 foreach ($item in $Abi) {
     if ($known -notcontains $item) { throw "Unknown ABI: $item" }
 }
+if ($Abi -contains 'arm64-v8a' -and $Abi -notcontains 'armeabi-v7a') {
+    throw 'arm64 packages must also include armeabi-v7a for Zygote32'
+}
+if ($Abi -contains 'x86_64' -and $Abi -notcontains 'x86') {
+    throw 'x86_64 packages must also include x86 for Zygote32'
+}
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 

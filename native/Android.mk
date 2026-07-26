@@ -8,12 +8,14 @@ CORE_SOURCES := \
     ../core/src/validation.cpp \
     ../core/src/version.cpp
 DIRECTORY_RESOLVER_SOURCE := directory_resolver.cpp
+MOUNT_INFO_SNAPSHOT_SOURCE := mount_info_snapshot.cpp
 MOUNT_EXECUTOR_SOURCE := mount_executor.cpp
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := pathguardd
 LOCAL_SRC_FILES := ../daemon/src/main.cpp $(CORE_SOURCES) \
-    $(DIRECTORY_RESOLVER_SOURCE) $(MOUNT_EXECUTOR_SOURCE)
+    $(DIRECTORY_RESOLVER_SOURCE) $(MOUNT_INFO_SNAPSHOT_SOURCE) \
+    $(MOUNT_EXECUTOR_SOURCE)
 LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include $(ROOT_PATH)/native/include
 LOCAL_CPPFLAGS := -DPATHGUARD_ANDROID=1
 LOCAL_LDLIBS := -llog
@@ -30,18 +32,25 @@ include $(CLEAR_VARS)
 LOCAL_MODULE := pathguard_zygisk
 LOCAL_SRC_FILES := \
     ../zygisk/src/module_entry.cpp \
-    ../zygisk/src/media_query_hook.cpp \
     ../zygisk/src/provider_redirect_hook.cpp \
     ../zygisk/src/provider_path_mapper.cpp \
     $(DIRECTORY_RESOLVER_SOURCE) \
+    $(MOUNT_INFO_SNAPSHOT_SOURCE) \
     $(MOUNT_EXECUTOR_SOURCE)
 LOCAL_C_INCLUDES := $(ROOT_PATH)/zygisk/include $(ROOT_PATH)/core/include $(ROOT_PATH)/native/include
-LOCAL_CPPFLAGS := -fno-threadsafe-statics
+LOCAL_CPPFLAGS := -fno-threadsafe-statics \
+    -Wframe-larger-than=786432 -Werror=frame-larger-than
 LOCAL_LDLIBS := -llog
 ifneq ($(strip $(PATHGUARD_TEST_MOUNT_DELAY_MS)),)
 LOCAL_CPPFLAGS += -DPATHGUARD_TEST_MOUNT_DELAY_MS=$(PATHGUARD_TEST_MOUNT_DELAY_MS)
 endif
 ifneq ($(strip $(PATHGUARD_TEST_PRE_LEASE_DELAY_MS)),)
 LOCAL_CPPFLAGS += -DPATHGUARD_TEST_PRE_LEASE_DELAY_MS=$(PATHGUARD_TEST_PRE_LEASE_DELAY_MS)
+endif
+ifneq ($(strip $(PATHGUARD_TEST_CRASH_AFTER_MOUNT)),)
+LOCAL_CPPFLAGS += -DPATHGUARD_TEST_CRASH_AFTER_MOUNT=$(PATHGUARD_TEST_CRASH_AFTER_MOUNT)
+endif
+ifneq ($(strip $(PATHGUARD_TEST_ROLLBACK_FAILURE)),)
+LOCAL_CPPFLAGS += -DPATHGUARD_TEST_ROLLBACK_FAILURE=$(PATHGUARD_TEST_ROLLBACK_FAILURE)
 endif
 include $(BUILD_SHARED_LIBRARY)

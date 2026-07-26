@@ -4,10 +4,12 @@
 #include <fcntl.h>
 #include <linux/mount.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -23,15 +25,6 @@ uint64_t NowNsLocal() {
         + static_cast<uint64_t>(ts.tv_nsec);
 }
 
-struct MountInfoIdentity {
-    uint64_t mount_id = 0;
-    uint64_t parent_id = 0;
-    char root[PATH_MAX]{};
-    char mountpoint[PATH_MAX]{};
-    char filesystem[64]{};
-    char device[64]{};
-};
-
 int BuildProcFdPath(int fd, char* output, size_t output_size) {
     if (fd < 0 || output == nullptr || output_size == 0) return EINVAL;
     const int written = snprintf(output, output_size, "/proc/self/fd/%d", fd);
@@ -45,180 +38,31 @@ bool SameObject(const struct stat& value, const PinnedIdentity& identity) {
         && value.st_ino == identity.inode;
 }
 
-struct MountInfoReadTiming {
-    uint64_t read_ns = 0;
-    uint64_t parse_ns = 0;
-};
-
-int ReadMountInfo(const char* expected_mountpoint, MountInfoIdentity* identity,
-                  size_t* mount_count, MountInfoReadTiming* read_timing = nullptr) {
-    if (expected_mountpoint == nullptr) return EINVAL;
-    // P2: read the whole file in one pass (fd read into a growable buffer),
-    // then parse from memory. This separates the kernel seq_file generation
-    // cost (read) from the parse cost, and avoids per-line stdio overhead.
-    const uint64_t read0 = NowNsLocal();
-    const int fd = open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return errno;
-    size_t capacity = 1 << 16;
-    size_t length = 0;
-    char* buffer = static_cast<char*>(malloc(capacity));
-    if (buffer == nullptr) { close(fd); return ENOMEM; }
-    while (true) {
-        if (length + 4096 > capacity) {
-            const size_t new_capacity = capacity * 2;
-            char* grown = static_cast<char*>(realloc(buffer, new_capacity));
-            if (grown == nullptr) { free(buffer); close(fd); return ENOMEM; }
-            buffer = grown;
-            capacity = new_capacity;
-        }
-        const ssize_t got = read(fd, buffer + length, capacity - length - 1);
-        if (got < 0) {
-            if (errno == EINTR) continue;
-            free(buffer); close(fd); return errno;
-        }
-        if (got == 0) break;
-        length += static_cast<size_t>(got);
-    }
-    close(fd);
-    buffer[length] = '\0';
-    if (read_timing != nullptr) read_timing->read_ns = NowNsLocal() - read0;
-
-    const uint64_t parse0 = NowNsLocal();
-    const size_t expected_len = strlen(expected_mountpoint);
-    size_t count = 0;
-    MountInfoIdentity latest;
-    char* cursor = buffer;
-    int result = 0;
-    while (*cursor != '\0') {
-        char* line = cursor;
-        char* newline = strchr(cursor, '\n');
-        if (newline != nullptr) {
-            *newline = '\0';
-            cursor = newline + 1;
-        } else {
-            cursor = line + strlen(line);
-        }
-        ++count;
-        // Hand-rolled field scan: mountinfo fields are space separated. We only
-        // need field 1 (mount_id), 2 (parent_id), 3 (major:minor), 4 (root) and
-        // 5 (mountpoint). Field 5 is compared by pointer+length against the
-        // expected mountpoint so the common non-matching line costs a few
-        // strtoull + a pointer walk, never a 4KB %s copy. This replaces the
-        // per-line sscanf("%4095s") that dominated parse time (67ms -> µs).
-        char* p = line;
-        char* end = nullptr;
-        const unsigned long long mount_id = strtoull(p, &end, 10);
-        if (end == p) { continue; }
-        p = end;
-        while (*p == ' ') ++p;
-        const unsigned long long parent_id = strtoull(p, &end, 10);
-        if (end == p) { continue; }
-        p = end;
-        // skip field 3 (major:minor)
-        while (*p == ' ') ++p;
-        char* f3 = p;
-        while (*p != ' ' && *p != '\0') ++p;
-        if (*p == '\0') { continue; }
-        // field 4 (root)
-        while (*p == ' ') ++p;
-        char* f4 = p;
-        while (*p != ' ' && *p != '\0') ++p;
-        char* f4_end = p;
-        if (*p == '\0') { continue; }
-        // field 5 (mountpoint)
-        while (*p == ' ') ++p;
-        char* f5 = p;
-        while (*p != ' ' && *p != '\0') ++p;
-        char* f5_end = p;
-        const size_t f5_len = static_cast<size_t>(f5_end - f5);
-        if (f5_len != expected_len
-            || memcmp(f5, expected_mountpoint, f5_len) != 0) {
-            continue;
-        }
-        // Match: extract the fields we retain. Filesystem is the token after
-        // the " - " separator.
-        const char* separator = strstr(p, " - ");
-        if (separator == nullptr) { result = EBADMSG; break; }
-        const char* fs = separator + 3;
-        while (*fs == ' ') ++fs;
-        const char* fs_end = fs;
-        while (*fs_end != ' ' && *fs_end != '\0') ++fs_end;
-        const size_t fs_len = static_cast<size_t>(fs_end - fs);
-        latest.mount_id = mount_id;
-        latest.parent_id = parent_id;
-        const size_t f3_len = static_cast<size_t>(f4 - f3) - 1;
-        const size_t f4_len = static_cast<size_t>(f4_end - f4);
-        const size_t dev_copy = f3_len < sizeof(latest.device) - 1
-            ? f3_len : sizeof(latest.device) - 1;
-        memcpy(latest.device, f3, dev_copy);
-        latest.device[dev_copy] = '\0';
-        const size_t root_copy = f4_len < sizeof(latest.root) - 1
-            ? f4_len : sizeof(latest.root) - 1;
-        memcpy(latest.root, f4, root_copy);
-        latest.root[root_copy] = '\0';
-        const size_t mp_copy = f5_len < sizeof(latest.mountpoint) - 1
-            ? f5_len : sizeof(latest.mountpoint) - 1;
-        memcpy(latest.mountpoint, f5, mp_copy);
-        latest.mountpoint[mp_copy] = '\0';
-        const size_t fs_copy = fs_len < sizeof(latest.filesystem) - 1
-            ? fs_len : sizeof(latest.filesystem) - 1;
-        memcpy(latest.filesystem, fs, fs_copy);
-        latest.filesystem[fs_copy] = '\0';
-    }
-    free(buffer);
-    if (read_timing != nullptr) read_timing->parse_ns = NowNsLocal() - parse0;
-    if (result != 0) return result;
-    if (mount_count != nullptr) *mount_count = count;
-    if (identity != nullptr) *identity = latest;
-    return 0;
+bool IsPathOnMount(const char* path, const char* mountpoint) {
+    if (path == nullptr || mountpoint == nullptr || path[0] != '/') return false;
+    if (strcmp(mountpoint, "/") == 0) return true;
+    const size_t length = strlen(mountpoint);
+    return strncmp(path, mountpoint, length) == 0
+        && (path[length] == '\0' || path[length] == '/');
 }
 
-int VerifyAppliedMount(const char* target_path,
-                       const PinnedIdentity& source,
-                       size_t before_count,
-                       MountInfoIdentity* mounted,
-                       bool require_count_delta,
-                       uint64_t* stat_ns = nullptr,
-                       uint64_t* read_ns = nullptr,
-                       uint64_t* parse_ns = nullptr) {
-    // Identity verification is split by backend to avoid the ~45ms FUSE
-    // stat(target) round-trip on the hot path (measured on alioth/4.19).
-    //
-    // legacy_string bind (ADR-0005 line 60-61): no FD guarantee, so keep the
-    // full check -- stat(target) identity + exact mountinfo delta.
-    //
-    // strict proc-fd/open_tree (ADR-0005 line 51): the kernel consumed the
-    // pinned source.fd, so the mount source is guaranteed by construction. The
-    // required "mountinfo identity" is satisfied by a live target row (matching
-    // mountpoint, non-zero mount_id, non-empty root). This drops the FUSE stat
-    // entirely -- verify goes from ~45ms to <1ms. Confirmed on-device: the
-    // target row's root equals the source's canonical in-fs path.
-    if (require_count_delta) {
-        // legacy path: full stat identity + delta
-        const uint64_t stat0 = NowNsLocal();
-        struct stat target_stat {};
-        if (stat(target_path, &target_stat) != 0) return errno;
-        if (stat_ns != nullptr) *stat_ns = NowNsLocal() - stat0;
-        if (!SameObject(target_stat, source)) return EXDEV;
-        size_t after_count = 0;
-        MountInfoReadTiming rt;
-        const int error = ReadMountInfo(target_path, mounted, &after_count, &rt);
-        if (read_ns != nullptr) *read_ns = rt.read_ns;
-        if (parse_ns != nullptr) *parse_ns = rt.parse_ns;
-        if (error != 0) return error;
-        if (mounted->mount_id == 0) return EBADMSG;
-        if (after_count != before_count + 1) return EBADMSG;
-        return 0;
+int BuildExpectedBindRoot(const char* absolute_path,
+                          const char* mountpoint, const char* root,
+                          char* output, size_t capacity) {
+    if (!IsPathOnMount(absolute_path, mountpoint)) return EXDEV;
+    const char* suffix = absolute_path + strlen(mountpoint);
+    if (strcmp(mountpoint, "/") == 0) suffix = absolute_path;
+    int written = 0;
+    if (suffix[0] == '\0') {
+        written = snprintf(output, capacity, "%s", root);
+    } else if (strcmp(root, "/") == 0) {
+        written = snprintf(output, capacity, "%s", suffix);
+    } else {
+        written = snprintf(output, capacity, "%s%s%s", root,
+                           suffix[0] == '/' ? "" : "/", suffix);
     }
-    // strict path: mountinfo row identity only, no FUSE stat
-    if (stat_ns != nullptr) *stat_ns = 0;
-    MountInfoReadTiming rt;
-    const int error = ReadMountInfo(target_path, mounted, nullptr, &rt);
-    if (read_ns != nullptr) *read_ns = rt.read_ns;
-    if (parse_ns != nullptr) *parse_ns = rt.parse_ns;
-    if (error != 0) return error;
-    if (mounted->mount_id == 0 || mounted->root[0] == '\0') return EBADMSG;
-    return 0;
+    return written > 0 && static_cast<size_t>(written) < capacity
+        ? 0 : ENAMETOOLONG;
 }
 
 int ApplyRaw(MountBackendKind backend, int source_fd, int target_fd,
@@ -242,54 +86,80 @@ bool ProbeOne(MountBackendKind backend, const PinnedIdentity& source,
               const char* target_path, MountBackendProbeStep* telemetry) {
     if (telemetry == nullptr) return false;
     *telemetry = {};
-    size_t before_count = 0;
-    telemetry->before_error = ReadMountInfo(
-        target_path, nullptr, &before_count);
-    telemetry->before_count = before_count;
+    MountInfoSnapshot before_snapshot;
+    MountInfoSnapshot after_snapshot;
+    MountInfoSnapshot remaining_snapshot;
+    telemetry->before_error = CaptureMountInfoSnapshot(&before_snapshot);
+    telemetry->before_count = before_snapshot.entry_count;
     if (telemetry->before_error != 0) return false;
     telemetry->apply_error = ApplyRaw(
         backend, source.fd, target.fd, source_path, target_path);
     if (telemetry->apply_error != 0) {
+        DestroyMountInfoSnapshot(&before_snapshot);
         return false;
     }
 
-    struct stat target_stat {};
-    if (stat(target_path, &target_stat) != 0) {
-        telemetry->stat_error = errno;
+    telemetry->after_error = CaptureMountInfoSnapshot(&after_snapshot);
+    telemetry->after_count = after_snapshot.entry_count;
+    AppliedMount applied;
+    applied.backend = backend;
+    snprintf(applied.target.path, sizeof(applied.target.path), "%s", target_path);
+    CanonicalLocator target_locator;
+    snprintf(target_locator.path, sizeof(target_locator.path), "%s", target_path);
+    if (telemetry->after_error == 0) {
+        const MountError verify = VerifyDirectoryMount(
+            before_snapshot, after_snapshot, source, target,
+            target_locator, &applied, nullptr);
+        telemetry->verify_error = verify.error;
+        if (telemetry->verify_error == 0
+            && after_snapshot.entry_count != before_snapshot.entry_count + 1) {
+            telemetry->verify_error = EBADMSG;
+        }
     } else {
-        telemetry->identity_match = SameObject(target_stat, source) ? 1 : 0;
-    }
-    MountInfoIdentity mounted;
-    size_t after_count = 0;
-    telemetry->after_error = ReadMountInfo(
-        target_path, &mounted, &after_count);
-    telemetry->after_count = after_count;
-    telemetry->mounted_id = mounted.mount_id;
-    if (telemetry->stat_error != 0) {
-        telemetry->verify_error = telemetry->stat_error;
-    } else if (telemetry->identity_match == 0) {
-        telemetry->verify_error = EXDEV;
-    } else if (telemetry->after_error != 0) {
         telemetry->verify_error = telemetry->after_error;
-    } else if (after_count != before_count + 1 || mounted.mount_id == 0) {
-        telemetry->verify_error = EBADMSG;
     }
-    telemetry->rollback_error = umount2(target_path, MNT_DETACH) == 0
-        ? 0 : errno;
-    MountInfoIdentity remaining;
-    telemetry->remaining_error = ReadMountInfo(
-        target_path, &remaining, nullptr);
-    telemetry->remaining_id = remaining.mount_id;
+    struct stat target_stat {};
+    if (stat(target_path, &target_stat) != 0) telemetry->stat_error = errno;
+    telemetry->identity_match = telemetry->stat_error == 0
+        && SameObject(target_stat, source) ? 1 : 0;
+    telemetry->mounted_id = applied.mount_id;
+    if (telemetry->after_error == 0) {
+        MountRollbackResult rollback = ValidateRollbackDirectoryMount(
+            applied, after_snapshot);
+        if (rollback.ok()) rollback = UnmountValidatedDirectoryMount(applied);
+        telemetry->rollback_error = rollback.failure.error;
+    } else {
+        telemetry->rollback_error = telemetry->after_error;
+    }
+    if (telemetry->rollback_error == 0) {
+        telemetry->remaining_error = CaptureMountInfoSnapshot(
+            &remaining_snapshot);
+        if (telemetry->remaining_error == 0) {
+            MountPathIdentity remaining;
+            const int find_error = FindMountInfoPath(
+                remaining_snapshot, target_path, true, &remaining);
+            telemetry->remaining_error = find_error;
+            telemetry->remaining_id = find_error == 0 ? remaining.mount_id : 0;
+            const MountRollbackResult verify = VerifyRollbackDirectoryMount(
+                applied, remaining_snapshot);
+            if (!verify.ok()) telemetry->remaining_error = verify.failure.error;
+        }
+    }
     telemetry->success = telemetry->verify_error == 0
+        && telemetry->identity_match != 0
         && telemetry->rollback_error == 0
-        && telemetry->remaining_error == 0
+        && (telemetry->remaining_error == 0 || telemetry->remaining_error == ENOENT)
         && telemetry->remaining_id != telemetry->mounted_id;
+    DestroyMountInfoSnapshot(&remaining_snapshot);
+    DestroyMountInfoSnapshot(&after_snapshot);
+    DestroyMountInfoSnapshot(&before_snapshot);
     return telemetry->success != 0;
 }
 
 }  // namespace
 
-int PinDirectory(const char* absolute_path, PinnedIdentity* identity) {
+int PinDirectory(const MountInfoSnapshot& snapshot, const char* absolute_path,
+                 PinnedIdentity* identity) {
     if (absolute_path == nullptr || absolute_path[0] != '/' || identity == nullptr) {
         return EINVAL;
     }
@@ -314,6 +184,28 @@ int PinDirectory(const char* absolute_path, PinnedIdentity* identity) {
     identity->fd = fd;
     identity->device = pinned.st_dev;
     identity->inode = pinned.st_ino;
+    MountPathIdentity mount;
+    const int mount_error = FindMountInfoPath(
+        snapshot, absolute_path, false, &mount);
+    if (mount_error != 0 || mount.device != pinned.st_dev) {
+        ClosePinnedIdentity(identity);
+        return mount_error != 0 ? mount_error : EXDEV;
+    }
+    identity->mount.mount_id = mount.mount_id;
+    identity->mount.parent_mount_id = mount.parent_mount_id;
+    identity->mount.device = mount.device;
+    snprintf(identity->mount.root, sizeof(identity->mount.root), "%s", mount.root);
+    snprintf(identity->mount.mountpoint, sizeof(identity->mount.mountpoint), "%s",
+             mount.mountpoint);
+    snprintf(identity->mount.filesystem, sizeof(identity->mount.filesystem), "%s",
+             mount.filesystem);
+    const int root_error = BuildExpectedBindRoot(
+        absolute_path, mount.mountpoint, mount.root, identity->expected_bind_root,
+        sizeof(identity->expected_bind_root));
+    if (root_error != 0) {
+        ClosePinnedIdentity(identity);
+        return root_error;
+    }
     return 0;
 }
 
@@ -334,8 +226,11 @@ MountBackendProbe ProbeDirectoryMountBackends(const char* source_path,
     MountBackendProbe probe;
     PinnedIdentity source;
     PinnedIdentity target;
-    int error = PinDirectory(source_path, &source);
-    if (error == 0) error = PinDirectory(target_path, &target);
+    MountInfoSnapshot snapshot;
+    int error = CaptureMountInfoSnapshot(&snapshot);
+    if (error == 0) error = PinDirectory(snapshot, source_path, &source);
+    if (error == 0) error = PinDirectory(snapshot, target_path, &target);
+    DestroyMountInfoSnapshot(&snapshot);
     if (error != 0) {
         ClosePinnedIdentity(&source);
         ClosePinnedIdentity(&target);
@@ -362,74 +257,213 @@ MountBackendProbe ProbeDirectoryMountBackends(const char* source_path,
     return probe;
 }
 
-int ApplyDirectoryMount(MountBackendKind backend,
-                        const PinnedIdentity& source,
-                        const PinnedIdentity& target,
-                        const CanonicalLocator& source_locator,
-                        const CanonicalLocator& target_locator,
-                        AppliedMount* applied,
-                        MountApplyTiming* timing) {
-    if (applied == nullptr || source.fd < 0 || target.fd < 0) return EINVAL;
+MountApplyResult ApplyDirectoryMountRaw(
+    MountBackendKind backend, uint32_t operation_id,
+    const PinnedIdentity& source, const PinnedIdentity& target,
+    const CanonicalLocator& source_locator,
+    const CanonicalLocator& target_locator, MountApplyTiming* timing) {
+    MountApplyResult result;
+    result.mount.backend = backend;
+    result.mount.operation_id = operation_id;
+    snprintf(result.mount.target.path, sizeof(result.mount.target.path), "%s",
+             target_locator.path);
+    result.failure.backend = backend;
+    result.failure.operation_id = operation_id;
+    if (source.fd < 0 || target.fd < 0) {
+        result.failure.stage = MountOperationStage::kPreflight;
+        result.failure.error = EINVAL;
+        return result;
+    }
     const bool legacy = backend == MountBackendKind::kLegacyString;
     if (legacy) {
         const uint64_t vp0 = NowNsLocal();
         int error = VerifyPinnedDirectory(source_locator.path, source);
-        if (error != 0) return error;
+        if (error != 0) {
+            result.failure.stage = MountOperationStage::kPreflight;
+            result.failure.error = error;
+            return result;
+        }
         error = VerifyPinnedDirectory(target_locator.path, target);
-        if (error != 0) return error;
+        if (error != 0) {
+            result.failure.stage = MountOperationStage::kPreflight;
+            result.failure.error = error;
+            return result;
+        }
         if (timing != nullptr) timing->verify_pinned_ns = NowNsLocal() - vp0;
     }
-    // P0b: strict backends do not need the pre-mount full-table scan. ADR-0005
-    // requires strict to verify mountinfo source/target identity AFTER mount
-    // (line 51); the exact "+1 mountinfo delta" is a legacy-only requirement
-    // (line 61). Only legacy reads a before baseline for the delta check.
-    size_t before_count = 0;
     int error = 0;
-    if (legacy) {
-        const uint64_t bs0 = NowNsLocal();
-        error = ReadMountInfo(target_locator.path, nullptr, &before_count);
-        if (timing != nullptr) timing->before_scan_ns = NowNsLocal() - bs0;
-        if (error != 0) return error;
-    }
     const uint64_t ar0 = NowNsLocal();
     error = ApplyRaw(backend, source.fd, target.fd, source_locator.path,
                      target_locator.path);
     if (timing != nullptr) timing->apply_raw_ns = NowNsLocal() - ar0;
-    if (error != 0) return error;
-    MountInfoIdentity mounted;
-    const uint64_t v0 = NowNsLocal();
-    uint64_t verify_stat_ns = 0;
-    uint64_t verify_read_ns = 0;
-    uint64_t verify_parse_ns = 0;
-    error = VerifyAppliedMount(target_locator.path, source, before_count,
-                               &mounted, legacy, &verify_stat_ns,
-                               &verify_read_ns, &verify_parse_ns);
-    if (timing != nullptr) {
-        timing->verify_ns = NowNsLocal() - v0;
-        timing->verify_stat_ns = verify_stat_ns;
-        timing->verify_mountinfo_read_ns = verify_read_ns;
-        timing->verify_mountinfo_parse_ns = verify_parse_ns;
-    }
     if (error != 0) {
-        umount2(target_locator.path, MNT_DETACH);
-        return error;
+        result.failure.stage = MountOperationStage::kApply;
+        result.failure.error = error;
+        return result;
     }
-    applied->backend = backend;
-    strcpy(applied->target.path, target_locator.path);
-    applied->mount_id = mounted.mount_id;
-    return 0;
+    result.failure.mutation_happened = 1;
+    result.failure = {};
+    result.failure.backend = backend;
+    result.failure.operation_id = operation_id;
+    result.failure.mutation_happened = 1;
+    return result;
 }
 
-int RollbackDirectoryMount(const AppliedMount& applied) {
-    MountInfoIdentity current;
-    int error = ReadMountInfo(applied.target.path, &current, nullptr);
-    if (error != 0) return error;
-    if (current.mount_id == 0 || current.mount_id != applied.mount_id) return ESTALE;
-    if (umount2(applied.target.path, MNT_DETACH) != 0) return errno;
-    MountInfoIdentity remaining;
-    error = ReadMountInfo(applied.target.path, &remaining, nullptr);
-    if (error != 0) return error;
-    return remaining.mount_id == applied.mount_id ? EBUSY : 0;
+MountError VerifyDirectoryMount(
+    const MountInfoSnapshot& before_snapshot,
+    const MountInfoSnapshot& after_snapshot,
+    const PinnedIdentity& source, const PinnedIdentity& target,
+    const CanonicalLocator& target_locator, AppliedMount* applied,
+    MountApplyTiming* timing) {
+    MountError failure;
+    failure.stage = MountOperationStage::kVerify;
+    failure.backend = applied != nullptr
+        ? applied->backend : MountBackendKind::kUnsupported;
+    failure.operation_id = applied != nullptr ? applied->operation_id : 0;
+    failure.mutation_happened = 1;
+    if (applied == nullptr || target_locator.path[0] == '\0'
+        || before_snapshot.mapping == nullptr
+        || after_snapshot.mapping == nullptr
+        || before_snapshot.namespace_device != after_snapshot.namespace_device
+        || before_snapshot.namespace_inode != after_snapshot.namespace_inode
+        || !MountInfoSnapshotMatchesCurrentNamespace(after_snapshot)) {
+        failure.error = ESTALE;
+        return failure;
+    }
+
+    const uint64_t verify_started = NowNsLocal();
+    MountPathIdentity mounted;
+    int error = FindMountInfoPath(
+        after_snapshot, target_locator.path, true, &mounted);
+    applied->mount_id = mounted.mount_id;
+    failure.actual_mount_id = mounted.mount_id;
+    if (timing != nullptr) {
+        timing->verify_mountinfo_read_ns = after_snapshot.read_ns;
+        timing->verify_mountinfo_parse_ns = after_snapshot.parse_ns;
+    }
+
+    const bool legacy = applied->backend == MountBackendKind::kLegacyString;
+    if (error == 0 && legacy) {
+        const uint64_t stat_started = NowNsLocal();
+        struct stat target_stat {};
+        if (stat(target_locator.path, &target_stat) != 0) {
+            error = errno;
+        } else if (!SameObject(target_stat, source)) {
+            error = EXDEV;
+        }
+        if (timing != nullptr) {
+            timing->verify_stat_ns = NowNsLocal() - stat_started;
+        }
+        if (error == 0
+            && after_snapshot.entry_count != before_snapshot.entry_count + 1) {
+            error = EBADMSG;
+        }
+    }
+    if (error == 0
+        && (mounted.mount_id == 0 || mounted.root[0] == '\0'
+            || strcmp(mounted.root, source.expected_bind_root) != 0
+            || mounted.device != source.device
+            || strcmp(mounted.filesystem, source.mount.filesystem) != 0)) {
+        error = EXDEV;
+    }
+    const uint64_t expected_parent = strcmp(
+        target_locator.path, target.mount.mountpoint) == 0
+        ? target.mount.parent_mount_id : target.mount.mount_id;
+    if (error == 0
+        && (expected_parent == 0
+            || mounted.parent_mount_id != expected_parent)) {
+        error = EXDEV;
+    }
+    if (timing != nullptr) {
+        timing->verify_ns = NowNsLocal() - verify_started;
+    }
+    if (error != 0) {
+        failure.error = error;
+        return failure;
+    }
+    failure.stage = MountOperationStage::kNone;
+    failure.error = 0;
+    failure.identity_confirmed = 1;
+    return failure;
+}
+
+MountRollbackResult ValidateRollbackDirectoryMount(
+    const AppliedMount& applied, const MountInfoSnapshot& snapshot) {
+    MountRollbackResult result;
+    result.failure.backend = applied.backend;
+    result.failure.operation_id = applied.operation_id;
+    result.failure.expected_mount_id = applied.mount_id;
+    result.failure.mutation_happened = 1;
+    if (applied.mount_id == 0) {
+        result.failure.stage = MountOperationStage::kRollbackIdentity;
+        result.failure.error = ESTALE;
+        return result;
+    }
+    MountPathIdentity current;
+    const int error = MountInfoSnapshotMatchesCurrentNamespace(snapshot)
+        ? FindMountInfoPath(snapshot, applied.target.path, true, &current)
+        : ESTALE;
+    if (error != 0 || current.mount_id == 0
+        || current.mount_id != applied.mount_id) {
+        result.failure.stage = MountOperationStage::kRollbackIdentity;
+        result.failure.error = error != 0 ? error : ESTALE;
+        result.failure.actual_mount_id = current.mount_id;
+        return result;
+    }
+    result.failure.identity_confirmed = 1;
+    result.failure.actual_mount_id = current.mount_id;
+    result.failure.error = 0;
+    return result;
+}
+
+MountRollbackResult UnmountValidatedDirectoryMount(const AppliedMount& applied) {
+    MountRollbackResult result;
+    result.failure.backend = applied.backend;
+    result.failure.operation_id = applied.operation_id;
+    result.failure.expected_mount_id = applied.mount_id;
+    result.failure.actual_mount_id = applied.mount_id;
+    result.failure.mutation_happened = 1;
+    result.failure.identity_confirmed = 1;
+    if (umount2(applied.target.path, MNT_DETACH) != 0) {
+        result.failure.stage = MountOperationStage::kRollbackUnmount;
+        result.failure.error = errno;
+        return result;
+    }
+    result.failure.stage = MountOperationStage::kNone;
+    result.failure.error = 0;
+    return result;
+}
+
+MountRollbackResult VerifyRollbackDirectoryMount(
+    const AppliedMount& applied, const MountInfoSnapshot& snapshot) {
+    MountRollbackResult result;
+    result.failure.backend = applied.backend;
+    result.failure.operation_id = applied.operation_id;
+    result.failure.expected_mount_id = applied.mount_id;
+    result.failure.mutation_happened = 1;
+    result.failure.identity_confirmed = 1;
+    MountPathIdentity remaining;
+    const int error = MountInfoSnapshotMatchesCurrentNamespace(snapshot)
+        ? FindMountInfoPath(snapshot, applied.target.path, true, &remaining)
+        : ESTALE;
+    if (error != 0 && error != ENOENT) {
+        result.failure.stage = MountOperationStage::kRollbackVerify;
+        result.failure.error = error;
+        return result;
+    }
+    if (error == 0 && remaining.mount_id == applied.mount_id) {
+        result.failure.stage = MountOperationStage::kRollbackVerify;
+        result.failure.error = EBUSY;
+        result.failure.actual_mount_id = remaining.mount_id;
+        return result;
+    }
+    result.failure = {};
+    result.failure.backend = applied.backend;
+    result.failure.operation_id = applied.operation_id;
+    result.failure.expected_mount_id = applied.mount_id;
+    result.failure.mutation_happened = 1;
+    result.failure.identity_confirmed = 1;
+    return result;
 }
 
 int BindMountDirectoryFds(int source_fd, int target_fd) {

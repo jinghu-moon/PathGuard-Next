@@ -2,9 +2,9 @@
 
 > 状态：Phase 2 已完成；Phase 3 已由 ADR-0001 决定暂不实施；R1 companion mount 事务分段优化已完成（见 6.5）；跨设备采样待完成
 >
-> 文档版本：0.2
+> 文档版本：0.3
 >
-> 审计日期：2026-07-19（0.2 增补 2026-07-23 R1 mount 事务优化）
+> 审计日期：2026-07-19（0.2 增补 2026-07-23 R1 mount 事务优化；0.3 增补 2026-07-26 规则编译器 D0）
 >
 > 适用范围：Zygisk 启动路径、companion 挂载链路、MediaStore 兼容 Hook、daemon 与策略编译
 
@@ -29,7 +29,7 @@ P1/P2/P3 标签最初来自代码结构审计，不是测量结论。当前已�
 
 ### 2.1 Zygisk 策略查询
 
-`LoadDenyPlan()` 每次调用都会执行 `openat`、`fstat`、`mmap` 和 `munmap`，随后使用 format v3 的 package hash 排序索引和二分查找：
+`LoadProcessPlan()` 每次调用都会执行 `openat`、`fstat`、`mmap` 和 `munmap`，随后使用 format v5 的 package hash 排序索引和二分查找：
 
 - [zygisk/src/module_entry.cpp:141](../zygisk/src/module_entry.cpp#L141)
 - [zygisk/src/module_entry.cpp:151](../zygisk/src/module_entry.cpp#L151)
@@ -98,7 +98,9 @@ media = off
 media = hide_denied
 ```
 
-默认值为 `off`。只有用户明确选择 `hide_denied` 且 mount 成功时才安装 Hook；纯 deny/redirect 应用只执行 mount，挂载完成后卸载模块。mount 失败时不安装 Hook，保证 `failure = open` 不残留媒体查询过滤。该字段已经纳入 schema 2 和 `policy.bin` format v4。
+默认值为 `off`。当前 R1 编码器只允许 redirect，因此在 deny executor 恢复前拒绝
+`hide_denied` 生成可执行策略，避免出现“配置被接受但 Hook 未安装”的假成功。该字段保留在
+schema 2 和 `policy.bin` format v5 中，但不属于当前可执行能力。
 
 ### 3.2 模块常驻按 Hook 与否分别计算
 
@@ -111,7 +113,7 @@ media = hide_denied
 - 无 Hook 的匹配应用：模块卸载后的额外 RSS/PSS。
 - 有 Hook 的匹配应用：Hook 安装后的常驻 RSS/PSS。
 
-daemon/CLI 继续使用静态 C++ 运行库；Zygisk 已拆为独立 `APP_STL=none` 目标，移除 C++ STL/atomic 依赖并使用 C 类型和编译器原子内建。当前最终构建 arm64 Zygisk 库为 71,280B，armeabi-v7a 为 57,628B，ELF 不再依赖 libc++。
+daemon/CLI 可继续作为 C++ 可执行文件；规则编译器 D0 会比较 C++/toml++ 与 Rust/`toml_edit`，若选择 Rust，只把完整控制面规则编译器静态链接到 daemon 和需要离线 compile/validate 的 CLI。该选择必须单独报告 daemon/CLI 的 stripped 体积、峰值内存和编译延迟，不能改变 Zygisk 指标。Zygisk 已拆为独立 `APP_STL=none` 目标，移除 C++ STL/atomic 依赖并使用 C 类型和编译器原子内建；当前最终构建 arm64 Zygisk 库为 71,280B，armeabi-v7a 为 57,628B，ELF 不再依赖 libc++，并必须继续保持不链接 Rust runtime、TOML parser 或规则诊断。
 
 ## 4. 确定性改动与待验证改动
 
@@ -242,11 +244,14 @@ Phase 0 已完成的实现项：
 - MediaStore 聚合 query 计数与累计 Hook CPU 时间。
 - daemon parse、validate、encode、compare、publish 分段日志。
 - Host 策略规模基准和 package collision 查找测试。
-- policy format v4、共享字段定义和 hash 排序索引。
+- policy format v5、共享字段定义、固定 golden vector 和 hash 排序索引。
 - readiness 退避、MediaStore descriptor 缓存/Uri 早退出、validator 来源集合。
 - Zygisk `APP_STL=none` 双 ABI 构建。
 
-Phase 1 的确定性代码改造已经完成。Phase 2 已完成 readiness 退避、mount 成功后安装 Hook、MediaStore 快路径与纯 Hook 计时、validator 冲突检测和 Zygisk `APP_STL=none`。当前实现阶段没有遗留阻塞项，剩余工作是跨设备及不同 deny path 数量的扩展采样。
+Phase 1 的确定性代码改造已经完成。Phase 2 已完成 readiness 退避、MediaStore
+历史快路径实验、validator 冲突检测和 Zygisk `APP_STL=none`。当前 R1 将
+MediaStore compat 编译门控为不可执行；剩余阻塞项是补强后 mount identity 路径的
+Alioth 回归、worker owner-death/rollback failure 注入，以及跨设备 P95/P99 采样。
 
 2026-07-20 在 Xiaomi `alioth`（arm64-v8a、Magisk 30.6）上完成新通信链路回归。直接继承 companion socket 的实现曾在 `postAppSpecialize` 返回 `EACCES`，并被观测到“应用侧 fail-open、helper 之后仍完成 mount”的竞态；该实现已删除。当前 `memfd` 共享页 + futex 版本正常路径为 `result_received=1`、`result=0`、`committed=1`。20 次冷启动中 readiness P50/P95 为 4.1/8.1ms，mount P50/P95 为 0.31/0.55ms，companion total P50/P95 为 6.27/10.18ms，20/20 Hook 在 mount 成功后安装且无 fail-open。
 
@@ -259,7 +264,9 @@ Phase 1 的确定性代码改造已经完成。Phase 2 已完成 readiness 退�
 R1 双后端 executor 上线后，在 `alioth`（Linux 4.19.157、Magisk 30.6、Zygisk）实测单规则
 companion mount 事务约 246ms，其中 mount syscall 本身仅约 40 微秒。通过 `clock_gettime`
 分段计时逐层定位并优化，单规则 mount_total 从约 132ms 降到约 1.5ms，companion total
-从约 246ms 降到约 4ms，未降级任何 ADR 安全语义。
+从约 246ms 降到约 4ms。2026-07-24 已补回 strict mountinfo 的 root、filesystem、
+major:minor 和 parent identity 比对；下述 4ms 是补强前样本，必须在新验证路径上重新采样，
+不能直接作为补强后的最终预算。
 
 分段计时（stat / mountinfo read / mountinfo parse 三段独立埋点）推翻了"瓶颈是 mountinfo
 冷读"的假设：mountinfo 全表 read 仅约 0.6ms，真正成本是 parse（约 67ms）与
@@ -267,7 +274,7 @@ companion mount 事务约 246ms，其中 mount syscall 本身仅约 40 微秒。
 
 | 改动 | 内容 | 单规则收益 |
 |---|---|---:|
-| probe 缓存 | capability probe 结果按 boot_id + SELinux enforce + policy_flags 缓存于 companion 父进程，fork 子进程经 COW 继承，跨 app specialize 复用。probe 内部自建隔离 `unshare(CLONE_NEWNS)` namespace，结论与调用者所在 namespace 无关（全局 ns 与目标 app ns 实测同为 `primitives=0x16`），因此缓存安全。符合 ADR-0004「probe 结果绑定 boot identity/SELinux/topology generation」。 | probe 约 100ms → 0（缓存命中约 1µs） |
+| probe 缓存 | capability probe 结果按 boot_id + SELinux enforce + SELinux policy identity + policy_flags + topology generation 缓存于 companion 父进程，fork 子进程经 COW 继承。目标 namespace 在执行前重新捕获 topology 并比较 generation。 | probe 约 100ms → 0（旧样本缓存命中约 1µs；新 key 待复测） |
 | strict 免 before_scan | strict 后端删除 mount 前的 mountinfo 全表扫描。该扫描仅为 legacy 的 before/after delta 服务（ADR-0005 legacy 条目）；strict（ADR-0005 strict 条目）只要求 mount 后校验身份。 | before_scan 约 65ms → 0 |
 | mountinfo whole-file read + 手写 parse | 一次性 read 整个 `/proc/self/mountinfo` 到内存缓冲，再以手写指针扫描逐行解析；仅对 mountpoint 命中的行提取完整字段，替换对约 1600 行每行 `sscanf("%4095s")` 的开销。 | parse 约 67ms → 约 0.15ms（约 450x） |
 | strict verify 免 FUSE stat | strict verify 从 target 挂载点的 mountinfo 行完成身份校验（mount ID + `root` + filesystem），不再对 target 路径做 `stat()`。见 ADR-0005 strict 条目更新。实测 mountinfo 行的 `root` 字段即固定 source 的规范路径，直接满足身份验证。 | verify 约 45ms → 约 0.8ms |
@@ -286,6 +293,50 @@ companion mount 事务约 246ms，其中 mount syscall 本身仅约 40 微秒。
 
 legacy 后端**不适用**上述 strict verify 简化：它仍保留 mount 前后的 mountinfo delta 校验和
 `stat` + `SameObject` 身份比对（ADR-0005 legacy 条目），因为字符串 bind 无固定 FD 保证。
+
+### 6.6 namespace 级 mountinfo snapshot（2026-07-26）
+
+2026-07-25 在同一台 alioth 上重新采样发现，约 1608 行 mountinfo 的内核 seq_file
+生成/读取稳定需要约 66-75ms；6.5 中 0.6ms 的旧样本不能代表补强身份验证后的当前路径。
+单规则事务此前会在 companion 候选 topology、目标 topology、source pin、propagation、
+target pin 和 verify 中重复生成整表，mount syscall 仍只有约 50us。
+
+当前实现改为有界、绑定 mount namespace dev/inode 的 `MountInfoSnapshot`：
+
+- 原始文本上限 2MiB、条目上限 4096，匿名映射存储，不进入线程栈；
+- companion 候选 topology 的 visible/source 查询共享一次 snapshot；
+- worker 变更前的一次 snapshot 同时服务 topology、source pin、propagation 和首条 target pin；
+- mount 后立即写入未知 mount ID 的 journal，再捕获 post-snapshot，完成 mount ID、parent、
+  root、filesystem、device 验证并回填 journal；该 snapshot 成为下一条嵌套规则的当前视图；
+- 回滚前统一捕获一次 snapshot 并确认全部 journal 对象仍为顶层 mount，逆序卸载后再统一
+  捕获一次验证全部 mount ID 消失；身份不明仍进入 `namespace_tainted`。
+
+单规则正常 worker 路径由约 6 次整表读取降为 2 次；companion 候选 topology 由 2 次降为
+1 次。新增 `mi_snapshots`、`mi_read_us`、`mi_parse_us` 和 `topology_candidate` 遥测。预计收益
+必须通过生产配置真机 P50/P95/P99 重新确认，文档不预先宣称达到 300ms。
+
+2026-07-26 已在 alioth、Android 13、Linux 4.19.157、SELinux Enforcing、Magisk 30.6
+上使用生产配置完成 50 次 LocalSend force-stop/冷启动矩阵。策略为单条
+`Download/localsend-source -> Download/localsend-redirect`，后端为 strict `proc_fd`。
+所有样本均为 `committed=1`、`result=0`、`mi_snapshots=2`，probe cache 全部命中；未出现取消、
+回滚、namespace taint 或残留 mount。应用 namespace 中的 bind root 为
+`/0/Download/localsend-redirect`，redirect marker 可从 visible source 路径读取，而宿主 namespace
+中的 source 目录保持为空。
+
+| 指标（微秒） | P50 | P95 | P99 / max |
+|---|---:|---:|---:|
+| candidate topology snapshot total | 7,624 | 14,787 | 15,240 |
+| worker 两次 mountinfo read 合计 | 150,646 | 187,599 | 215,679 |
+| worker 两次 mountinfo parse 合计 | 969 | 1,549 | 1,779 |
+| mount transaction | 70,740 | 82,429 | 102,982 |
+| companion total | 172,284 | 215,900 | 237,772 |
+| 应用侧 Zygisk wait total | 152,796 | 199,176 | 218,472 |
+| raw mount syscall | 31 | 44 | 52 |
+
+该结果验证了事务级 snapshot 在当前设备上将正常 worker 路径固定为两次整表生成，并使单规则
+事务在 50/50 样本中于取消预算前提交。当前主要成本仍是内核生成/读取 mountinfo，而非解析、
+FD pin 或 mount syscall。证据保存在 `build/device-evidence/snapshot-prod-50-20260726-120101/`；
+该目录是本地测试产物，不作为跨 ROM 结论。
 
 工程注意：修改 Zygisk `.so` 后必须全清 `native/obj` 与 `native/libs` 再重编，否则增量构建
 可能因某个编译单元失败而静默复用陈旧 `.o`，导致产物 md5 不变、改动不生效。部署后需重启

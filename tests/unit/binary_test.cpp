@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -22,6 +23,15 @@ void RefreshChecksum(std::vector<std::uint8_t>* bytes) {
         bytes->data() + pathguard::binary_format::kHeaderSize,
         bytes->size() - pathguard::binary_format::kHeaderSize);
     StoreLe32(bytes, pathguard::binary_format::kPayloadChecksumOffset, checksum);
+}
+
+std::uint8_t HexNibble(char value) {
+    if (value >= '0' && value <= '9') return static_cast<std::uint8_t>(value - '0');
+    if (value >= 'a' && value <= 'f') {
+        return static_cast<std::uint8_t>(value - 'a' + 10);
+    }
+    assert(false);
+    return 0;
 }
 
 pathguard::AppPolicy MakeRedirectApp(const char* package, const char* path) {
@@ -154,6 +164,21 @@ int main() {
     unsupported.apps[0].mounts[0].backing_path.clear();
     assert(!pathguard::EncodePolicy(unsupported, &bytes, &error));
 
+    pathguard::PolicyDocument media_gated = source;
+    media_gated.apps[0].media_compat = pathguard::MediaCompat::kHideDenied;
+    assert(!pathguard::EncodePolicy(media_gated, &bytes, &error));
+
+    pathguard::PolicyDocument runtime_user = source;
+    runtime_user.apps[0].mounts[0].backing_path = "Users/{user}/Target";
+    assert(pathguard::EncodePolicy(runtime_user, &bytes, &error));
+    assert(pathguard::DecodePolicy(bytes, &decoded, &generation, &error));
+    const auto runtime_app = std::find_if(
+        decoded.apps.begin(), decoded.apps.end(), [](const pathguard::AppPolicy& item) {
+            return item.package == "com.example.app";
+        });
+    assert(runtime_app != decoded.apps.end());
+    assert(runtime_app->mounts[0].backing_path == "Users/{user}/Target");
+
     pathguard::PolicyDocument ambiguous_provider;
     ambiguous_provider.schema = 2;
     ambiguous_provider.failure_mode = pathguard::FailureMode::kOpen;
@@ -214,6 +239,30 @@ int main() {
     };
     golden.apps.push_back(golden_app);
     assert(pathguard::EncodePolicy(golden, &bytes, &error));
+    constexpr char kGoldenHex[] =
+        "50474e4205000200cf00000088e9e01cf460ea685603bd990100000001000000"
+        "00000000380000006800000078000000780000000000000015e1b3e301000000"
+        "1d0000001f00000000000000010000000000000000000000809707b0f29f2252"
+        "00000100000000000100020000000000210000003b000000006f72672e6c6f63"
+        "616c73656e642e6c6f63616c73656e645f6170700030002a00446f776e6c6f61"
+        "642f6c6f63616c73656e642d736f7572636500446f776e6c6f61642f6c6f6361"
+        "6c73656e642d726564697265637400";
+    assert(bytes.size() == 207);
+    assert(pathguard::ComputeContentGeneration(golden)
+        == UINT64_C(11078014328063549684));
+    assert(pathguard::ComputePlanGeneration(
+               golden.apps[0], pathguard::FailureMode::kOpen)
+        == UINT64_C(5918468725002442624));
+    assert(pathguard::binary_format::ReadLe32(
+               bytes.data() + pathguard::binary_format::kPayloadChecksumOffset)
+        == UINT32_C(484501896));
+    assert(std::strlen(kGoldenHex) == bytes.size() * 2);
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        const std::uint8_t expected = static_cast<std::uint8_t>(
+            (HexNibble(kGoldenHex[index * 2]) << 4)
+            | HexNibble(kGoldenHex[index * 2 + 1]));
+        assert(bytes[index] == expected);
+    }
     assert(pathguard::ComputeContentGeneration(golden) != 0);
     assert(pathguard::ComputePlanGeneration(
                golden.apps[0], pathguard::FailureMode::kOpen)

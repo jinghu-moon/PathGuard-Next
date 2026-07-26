@@ -9,6 +9,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #if defined(__linux__)
 #include <cerrno>
 #include <limits.h>
@@ -83,6 +87,29 @@ static bool ReadAll(const fs::path& path, std::string* output) {
     if (!input) return false;
     *output = std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
     return true;
+}
+
+static bool AtomicReplace(const fs::path& temporary, const fs::path& output,
+                          std::string* error) {
+#if defined(_WIN32)
+    if (MoveFileExW(temporary.c_str(), output.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
+        return true;
+    }
+    if (error != nullptr) {
+        *error = "cannot atomically publish policy.bin: win32="
+            + std::to_string(GetLastError());
+    }
+    return false;
+#else
+    std::error_code rename_error;
+    fs::rename(temporary, output, rename_error);
+    if (!rename_error) return true;
+    if (error != nullptr) {
+        *error = "cannot atomically publish policy.bin: " + rename_error.message();
+    }
+    return false;
+#endif
 }
 
 static bool ProbeStorageTopology() {
@@ -245,6 +272,14 @@ static bool CompileText(const std::string& text, const fs::path& output,
         *error = parse_error.message;
         return false;
     }
+    pathguard::PolicyDocument verified;
+    std::uint64_t verified_generation = 0;
+    if (!pathguard::DecodePolicy(bytes, &verified, &verified_generation, &parse_error)
+        || verified_generation == 0) {
+        perf->encode_ns = ElapsedNs(encode_started);
+        *error = "encoder self-check failed: " + parse_error.message;
+        return false;
+    }
     perf->encode_ns = ElapsedNs(encode_started);
     const std::uint64_t compare_started = NowNs();
     std::string current;
@@ -260,11 +295,9 @@ static bool CompileText(const std::string& text, const fs::path& output,
     fs::create_directories(output.parent_path());
     const fs::path temporary = output.string() + ".tmp";
     { std::ofstream file(temporary, std::ios::binary | std::ios::trunc); if (!file) { perf->publish_ns = ElapsedNs(publish_started); *error = "cannot create policy.bin.tmp"; return false; } file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())); }
-    std::error_code ec;
-    fs::rename(temporary, output, ec);
-    if (ec) { fs::remove(output, ec); fs::rename(temporary, output, ec); }
+    const bool replaced = AtomicReplace(temporary, output, error);
     perf->publish_ns = ElapsedNs(publish_started);
-    if (ec) { *error = "cannot publish policy.bin: " + ec.message(); return false; }
+    if (!replaced) return false;
     perf->published = true;
     return true;
 }

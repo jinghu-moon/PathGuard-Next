@@ -38,3 +38,8 @@ capability 使用无符号 64 位 bitset。稳定 bit 位由 `core/include/pathg
   支持，且 policy 显式设置 `allow_legacy_string_bind` 时，才可在事务开始前选择
   ADR-0005 定义的 `legacy_namespace_bind`；不得逐规则或在 strict 运行时失败后降级。
 - 运行时 probe 分别属于 R1 topology/backend resolver 和 R4 event reactor；本 ADR 只冻结协议位置。
+
+实现中的 mount probe cache key 绑定 boot ID、SELinux enforcing、SELinux policy inode
+identity、policy flags 与 topology generation。companion 在自身 namespace 捕获候选
+topology，进入目标 namespace 后按相同 source plane 重新捕获并比较 generation；不再以
+“同一设备上曾经 probe 成功”替代当前 topology 身份。

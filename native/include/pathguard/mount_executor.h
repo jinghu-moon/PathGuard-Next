@@ -5,6 +5,7 @@
 #include <sys/types.h>
 
 #include "pathguard/mount_backend.h"
+#include "pathguard/mount_info_snapshot.h"
 
 namespace pathguard {
 
@@ -12,6 +13,8 @@ struct PinnedIdentity {
     int fd = -1;
     dev_t device = 0;
     ino_t inode = 0;
+    MountPathIdentity mount;
+    char expected_bind_root[PATH_MAX]{};
 };
 
 struct CanonicalLocator {
@@ -22,6 +25,40 @@ struct AppliedMount {
     MountBackendKind backend = MountBackendKind::kUnsupported;
     CanonicalLocator target;
     uint64_t mount_id = 0;
+    uint32_t operation_id = 0;
+};
+
+enum class MountOperationStage : uint8_t {
+    kNone = 0,
+    kPreflight = 1,
+    kApply = 2,
+    kVerify = 3,
+    kRollbackIdentity = 4,
+    kRollbackUnmount = 5,
+    kRollbackVerify = 6,
+};
+
+struct MountError {
+    MountOperationStage stage = MountOperationStage::kNone;
+    MountBackendKind backend = MountBackendKind::kUnsupported;
+    uint32_t operation_id = 0;
+    int error = 0;
+    uint64_t expected_mount_id = 0;
+    uint64_t actual_mount_id = 0;
+    uint8_t mutation_happened = 0;
+    uint8_t identity_confirmed = 0;
+};
+
+struct MountApplyResult {
+    AppliedMount mount;
+    MountError failure;
+    bool ok() const { return failure.error == 0; }
+    bool mutation_happened() const { return failure.mutation_happened != 0; }
+};
+
+struct MountRollbackResult {
+    MountError failure;
+    bool ok() const { return failure.error == 0; }
 };
 
 struct MountBackendProbeStep {
@@ -77,21 +114,32 @@ struct MountApplyTiming {
     uint64_t verify_statx_mnt_id = 0;
 };
 
-int PinDirectory(const char* absolute_path, PinnedIdentity* identity);
+int PinDirectory(const MountInfoSnapshot& snapshot, const char* absolute_path,
+                 PinnedIdentity* identity);
 void ClosePinnedIdentity(PinnedIdentity* identity);
 int VerifyPinnedDirectory(const char* absolute_path,
                           const PinnedIdentity& identity);
 
 MountBackendProbe ProbeDirectoryMountBackends(const char* source_path,
                                               const char* target_path);
-int ApplyDirectoryMount(MountBackendKind backend,
-                        const PinnedIdentity& source,
-                        const PinnedIdentity& target,
-                        const CanonicalLocator& source_locator,
-                        const CanonicalLocator& target_locator,
-                        AppliedMount* applied,
-                        MountApplyTiming* timing = nullptr);
-int RollbackDirectoryMount(const AppliedMount& applied);
+MountApplyResult ApplyDirectoryMountRaw(MountBackendKind backend,
+                                        uint32_t operation_id,
+                                        const PinnedIdentity& source,
+                                        const PinnedIdentity& target,
+                                        const CanonicalLocator& source_locator,
+                                        const CanonicalLocator& target_locator,
+                                        MountApplyTiming* timing = nullptr);
+MountError VerifyDirectoryMount(
+    const MountInfoSnapshot& before_snapshot,
+    const MountInfoSnapshot& after_snapshot,
+    const PinnedIdentity& source, const PinnedIdentity& target,
+    const CanonicalLocator& target_locator, AppliedMount* applied,
+    MountApplyTiming* timing = nullptr);
+MountRollbackResult ValidateRollbackDirectoryMount(
+    const AppliedMount& applied, const MountInfoSnapshot& snapshot);
+MountRollbackResult UnmountValidatedDirectoryMount(const AppliedMount& applied);
+MountRollbackResult VerifyRollbackDirectoryMount(
+    const AppliedMount& applied, const MountInfoSnapshot& snapshot);
 
 int BindMountDirectoryFds(int source_fd, int target_fd);
 int MoveMountDirectoryFds(int source_fd, int target_fd);

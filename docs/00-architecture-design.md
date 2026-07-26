@@ -2,7 +2,7 @@
 
 > 状态：Draft
 >
-> 文档版本：0.2
+> 文档版本：0.3
 >
 > 目标平台：Android 12+，Magisk Zygisk / KernelSU + ZygiskNext
 >
@@ -54,7 +54,7 @@ PathGuard Next 是一个按 Android 应用隔离文件夹视图的 Root 模块�
 |---|---|
 | 控制面 | 配置、编译、发布、状态查询和诊断逻辑 |
 | 数据面 | 实际决定应用看到何种目录视图的 mount namespace 和 VFS |
-| 策略源 | 用户或管理 App 编辑的版本化 `rules.ini` |
+| 策略源 | 用户或管理 App 编辑的版本化 `rules.toml`（format 1 是否保留 `->` 由 D0 决定） |
 | 策略快照 | daemon 编译生成的只读 `policy.bin` |
 | 应用策略 | 一个包名及其进程、用户和目录规则集合 |
 | 挂载计划 | 针对一个应用进程生成的有序 mount 操作集合 |
@@ -126,7 +126,7 @@ SUSFS 一类方案可以在内核层处理路径和挂载痕迹，但要求设�
 每个命中策略的应用进程拥有独立 mount namespace。PathGuard 在应用代码开始执行前，将 deny 和 redirect 规则转换成 bind mount。
 
 ```text
-rules.ini
+rules.toml
     |
     v
 pathguardd -- compile/validate/publish
@@ -344,9 +344,9 @@ PathGuard-Next/
 
 ### 9.1 `core`
 
-纯 C++ 库，无 Android UI 依赖，负责：
+无 Android UI 依赖的核心逻辑。运行时 reader 保持 C++，纯规则编译链由 D0 在 Rust/`toml_edit` 与 C++/toml++ 中选择唯一实现，负责：
 
-- `rules.ini` 配置解析。
+- `rules.toml` 格式探测、脱糖、解析与诊断。
 - schema 校验。
 - 路径规范化。
 - 冲突和重定向环检测。
@@ -383,7 +383,7 @@ daemon 不监听每一次文件访问，不使用 fanotify 参与 deny 或 redir
 `pathguardctl` 是首个控制客户端，至少支持：
 
 ```text
-pathguardctl validate <rules.ini>
+pathguardctl validate <rules.toml>
 pathguardctl compile
 pathguardctl status
 pathguardctl probe
@@ -433,30 +433,29 @@ RootGateway 必须使用固定参数和长度前缀协议，不允许将用户�
 
 ### 10.1 用户规则文件
 
-用户编辑的源文件采用按包名分组的版本化 `rules.ini`。它是稳定的人类可读语法；daemon 将其解析为内部策略 IR，再编译成 `policy.bin`。新增能力通过 schema 版本和明确的动作/选项扩展，不改变既有规则的含义。
+用户编辑的唯一事实来源采用按包名分组的版本化 `rules.toml`。除 D0 待决的 redirect `->` 有限扩展外，format 1 遵循 TOML 1.0；daemon 将其编译为内部策略 IR 和 `policy.bin`。新增能力通过新的、明确命名的字段和规则格式版本扩展，不改变既有规则含义。完整契约以 `docs/04-rule-file-refactoring-design.md` 和 `docs/05-rule-arrow-desugarer-design.md` 为准。
 
-```ini
-schema = 2
-failure = open
+```toml
+format = 1
 
-[com.example.app]
-users = *
-processes = *
+[defaults]
+failure_mode = "open"
 
-deny Secret
-redirect Download/AppCache -> PathGuard/{package}/AppCache
+[apps."com.example.app"]
+users = [0]
+processes = ["*"]
+
+deny = ["Secret"]
+redirect = [
+    "Download/AppCache" -> "PathGuard/AppCache",
+]
 ```
 
 初始阶段只执行目录级 `deny` 和静态 `redirect`；后续可在同一语法骨架中加入白名单、文件级匹配、动态导出、媒体查询策略等动作。每种扩展必须有独立 capability、编译校验、运行状态和兼容矩阵，不能通过未声明的隐式语义实现。
 
 ### 10.2 占位符
 
-当前版本允许：
-
-- `{user}`：Android 用户对应的 emulated storage ID。
-- `{package}`：当前应用包名。
-
-禁止环境变量、命令替换和任意模板表达式。未来扩展占位符必须增加 schema 版本并经过编译器白名单校验。
+format 1 不支持 `{user}`、`{package}`、环境变量、命令替换或任意模板表达式。普通路径已经位于应用和 Android 用户作用域内，没有当前必要为少量字符串替换引入全局模板语言。未来真实能力若必须使用变量，应在该能力自己的版本化字段中定义有限语义，并通过新的规则格式版本引入。
 
 ### 10.3 包和进程匹配
 
@@ -476,10 +475,10 @@ redirect Download/AppCache -> PathGuard/{package}/AppCache
 
 规则格式需要支持长期演进，但不允许通过“猜测未知语法”保持兼容。扩展遵循以下约束：
 
-- `schema` 是整个源文件的格式版本；不兼容变更必须递增主版本。
+- `format` 是整个用户源文件的格式版本；不兼容变更必须进入新版本。
 - 新动作使用明确的动作标记或键名，并在 capability 中声明所需执行后端。
 - daemon 遇到未知动作、未知键或不支持的 capability 时拒绝编译，并保留上一份有效快照。
-- 已发布的规则语义必须保持向后兼容；语法迁移由 `pathguardctl migrate` 或 Manager 显式完成。
+- 已发布的规则语义必须保持向后兼容；语法迁移由 `pathguardctl migrate` 或 Manager 显式完成，不在一个 format 内长期维护双 parser。
 - 规则 IR 分离用户语法与执行后端，使同一条规则未来可以编译为 mount、provider 或其他受支持后端，而不让 Zygisk 解析用户格式。
 - 扩展能力必须分别定义安全边界、失败模式、状态值、性能预算和真机兼容矩阵。
 
@@ -495,7 +494,7 @@ redirect Download/AppCache -> PathGuard/{package}/AppCache
 - deny 父目录下的 redirect 子规则。
 - 源和目标路径类型不一致。
 - 超过长度、应用数或规则数上限的配置。
-- 未知字段和未知 schema 版本。
+- 未知字段和未知 `rules.toml format` 版本。
 
 编译器构建规则依赖图：
 
@@ -507,9 +506,9 @@ redirect Download/AppCache -> PathGuard/{package}/AppCache
 
 ## 12. 二进制策略格式
 
-源配置不在应用启动路径解析。daemon 将 `rules.ini` 编译为只读快照：
+源配置不在应用启动路径解析。daemon 将 `rules.toml` 编译为只读快照：
 
-`policy.bin` 是单一的全局策略快照，不按应用、进程或 ABI 分别生成。它包含所有应用策略的包索引和挂载规则；Zygisk 只 mmap 同一个文件并按包名查找，不在应用启动时重新解析 `rules.ini` 或重新编译策略。
+`policy.bin` 是单一的全局策略快照，不按应用、进程或 ABI 分别生成。它包含所有应用策略的包索引和挂载规则；Zygisk 只 mmap 同一个文件并按包名查找，不在应用启动时重新解析 `rules.toml` 或重新编译策略。
 
 ```text
 PolicyHeader
@@ -554,7 +553,7 @@ MountRule[]
 每次配置变化最多触发一次全局编译：
 
 ```text
-rules.ini changed
+rules.toml changed
     -> compile once
     -> policy.bin.tmp
     -> validate + fsync
@@ -857,9 +856,12 @@ T_total           对应用启动的总影响
 
 ## 22. 构建与工程约束
 
-- `core` 的编译器、验证器和策略快照生成器可使用 Rust；`daemon` 和 `cli` 也可以使用 Rust，但必须用同步 IO 或轻量事件循环，不引入没有必要的异步运行时。
+- 规则编译链是项目引入 Rust 的首选边界。Phase D0 应以同一套 golden 对比 C++/toml++ 与 Rust/`toml_edit`，若 Rust 方案通过 TOML 版本、source span、Android 构建、资源预算和 `policy.bin` 字节一致性验证，则从规则源字节到已验证 `PolicyBlob` 的纯编译阶段整体使用 Rust，不在脱糖器和 TOML AST 之间增加中间 FFI。
+- 首版不因规则编译器选用 Rust 而重写 daemon、CLI 或 companion。现有 C++ daemon/CLI 只通过一个窄 C ABI 调用完整规则编译请求；companion 是否迁移 Rust 属于独立决策，不能借配置重构扩大范围。
 - Zygisk `.so` 保持 C++20 薄实现，只包含策略快照 reader、身份提取和 companion client，不将完整 Rust core 静态链接进每个应用进程。
 - 如果 Rust 出现在 Zygisk 边界，crate 必须 `panic = "abort"`，FFI 入口不得允许 panic、异常或分配失败穿过边界；`catch_unwind` 不能用于捕获 abort panic。
+- 如果 Rust 仅位于 daemon/CLI 控制面的规则编译 C ABI，compiler crate 使用 `panic = "unwind"`，每个 `extern "C"` 入口在 Rust 内部以 `catch_unwind` 收口并转换为稳定的内部编译错误。该机制不能捕获 OOM abort、stack overflow、信号崩溃或 `panic = "abort"`，不得被描述为完整进程故障隔离；任何内部失败都继续保留上一份有效策略。
+- C ABI 只传递有长度的输入字节、固定宽度选项/快照和 opaque result handle；AST、RewriteMap、Rust `String`/`Vec`、Canonical Policy 对象及跨语言长期借用不得越过边界。Rust 分配的结果必须由 Rust 导出的释放函数回收。
 - Native 代码使用 C++20，但避免异常和 RTTI进入 Zygisk 热启动组件。
 - 依赖必须说明体积、许可证和更新策略。
 - 核心库应可在 Host 上构建并运行测试。
@@ -933,6 +935,7 @@ Phase 0 未通过时，暂停产品开发并重新评估后端，不先建设 GU
 ### Phase 1：核心策略与 CLI
 
 - 建立 `core`。
+- 完成规则编译器 D0：用同一 binder-neutral/source-map 和 207-byte `policy.bin` golden 比较 C++/toml++ 与 Rust/`toml_edit`，冻结唯一生产实现、TOML 版本和跨语言边界。
 - 完成 schema、验证器和二进制快照。
 - 验证每次配置变化只编译并原子发布一个全局 `policy.bin`，多个进程共享 mmap 后按包索引读取。
 - 完成 daemon、companion 协议和 CLI。
@@ -965,7 +968,7 @@ Phase 0 未通过时，暂停产品开发并重新评估后端，不先建设 GU
 | ADR-001 | 新项目不兼容旧项目内部架构 | Accepted |
 | ADR-002 | mount namespace 是唯一核心执行后端 | Proposed，等待 Phase 0 验证 |
 | ADR-003 | 初始执行后端先实现目录级 deny 和 redirect，规则语言保留可版本化扩展 | Accepted |
-| ADR-004 | 用户源文件使用严格、版本化 `rules.ini`；运行时使用二进制快照 | Accepted |
+| ADR-004 | 用户源文件迁移到版本化 `rules.toml`；运行时只使用二进制快照；format 1 箭头和规则编译语言由 D0 冻结 | Proposed，等待 D0 |
 | ADR-005 | 不实现隐式 PLT Hook fallback | Accepted |
 | ADR-006 | 新增规则可选 live apply；删除规则或修改已有挂载默认重启应用 | Accepted |
 | ADR-007 | CLI 先于管理 App 实现 | Accepted |

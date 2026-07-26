@@ -21,7 +21,13 @@ struct Rule {
     char backing_path[PATH_MAX];
 };
 
-bool Install(zygisk::Api* api, JNIEnv* env, const Rule* rules,
-             uint32_t rule_count, CallerMode caller_mode);
+struct InstallResult {
+    bool hooks_committed = false;
+    bool virtualization_active = false;
+    bool identity_hooks = false;
+};
+
+InstallResult Install(zygisk::Api* api, JNIEnv* env, const Rule* rules,
+                      uint32_t rule_count, CallerMode caller_mode);
 
 }  // namespace pathguard::provider_redirect

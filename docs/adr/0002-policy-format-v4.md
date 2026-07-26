@@ -1,7 +1,7 @@
-# ADR-0002：冻结 policy format v4 与 canonical IR
+# ADR-0002：冻结 policy format v5 与 canonical IR
 
-> 后续变更：ADR 0006 将格式升级到 v5，并使用 package entry 偏移 42 表示
-> `provider_compat`。v4 的其余布局保持不变。
+> 历史：初版冻结 v4；ADR-0006 增加 `provider_compat` 后升级为 v5。本文件现描述
+> 唯一可执行的 v5 契约，v4 不再生成或读取。
 
 状态：Accepted
 
@@ -13,7 +13,7 @@ schema 2 引入 mount rule、event rule、快照级 content generation 和逐包
 
 ## 决策
 
-format v4 是唯一受支持格式。所有整数使用 little-endian，无隐式 padding。共享常量和纯函数位于 `core/include/pathguard/policy_format.h`。
+format v5 是唯一受支持格式。所有整数使用 little-endian，无隐式 padding。共享常量和纯函数位于 `core/include/pathguard/policy_format.h`。
 
 哈希与校验参数冻结如下：
 
@@ -27,9 +27,10 @@ format v4 是唯一受支持格式。所有整数使用 little-endian，无隐�
 canonical plan 依次编码：
 
 ```text
-"PGPL4\0"
+"PGPL5\0"
 failure_mode:u8
 media_compat:u8
+provider_compat:u8
 allow_legacy_string_bind:u8
 package:bytes
 users:vector<bytes>
@@ -45,7 +46,7 @@ plan generation 是上述 canonical plan 的 FNV-1a 64。
 canonical content 依次编码：
 
 ```text
-"PGIR4\0"
+"PGIR5\0"
 schema:u16
 failure_mode:u8
 allow_legacy_string_bind:u8
@@ -76,24 +77,29 @@ Header 固定 56 bytes：
 | 48 | string_offset | u32 |
 | 52 | header_flags | u32 |
 
-`header_flags` 当前只定义 bit 0：`allow_legacy_string_bind`。未知 bit 必须拒绝；
-该字段属于 v4 预留标志位的首次使用，不改变表布局。
+`header_flags` 当前只定义 bit 0：`allow_legacy_string_bind`。未知 bit 必须拒绝。
 
-Package entry 固定 48 bytes，MountRule 和 EventRule entry 均固定 16 bytes。具体字段 offset 由共享头定义并通过 golden vector 锁定。
+Package entry 固定 48 bytes，MountRule 和 EventRule entry 均固定 16 bytes。package
+entry offset 42 为 `provider_compat`，offset 43 和 44..47 保留且必须为零。具体字段
+offset 由共享头定义并通过 golden vector 锁定。
 
 ## Golden vector
 
-固定输入为 `org.localsend.localsend_app`、user `0`、process `*`、`media=hide_denied`，包含 `deny DCIM` 和 `deny Pictures/Nagram`。
+固定输入为 `org.localsend.localsend_app`、user `0`、process `*`、
+`provider=virtualize`，包含
+`redirect Download/localsend-source -> Download/localsend-redirect`。
 
-- content generation、plan generation 和 payload checksum 由当前 canonical IR
-  重新计算；向量中的 `allow_legacy_string_bind` 固定为 `false`。
-- file size：190 bytes
+- content generation：`11078014328063549684`。
+- plan generation：`5918468725002442624`。
+- payload checksum：`484501896`。
+- `allow_legacy_string_bind`：`false`。
+- file size：207 bytes。
 
 完整二进制向量由 `tests/unit/binary_test.cpp` 断言。任何新增 header flag 必须
 更新本 ADR 与 golden vector；未知 flag 不能静默接受。
 
 ## 后果
 
-- schema 1 和 format v3 不再读取或生成。
+- schema 1、format v3 和 format v4 不再读取或生成。
 - 64 位 generation 碰撞作为已接受的低概率风险，不增加第二套哈希。
 - Zygisk 在索引查询前验证完整 payload checksum 和全量 package 排序；hash 命中后仍比较完整包名。

@@ -228,6 +228,10 @@ bool CanonicalizeDocument(const PolicyDocument& input, PolicyDocument* output,
             return Fail(error, "duplicate package");
         }
         if (!ValidatePolicy(&app, error)) return false;
+        if (app.media_compat != MediaCompat::kOff) {
+            return Fail(error,
+                        "media compatibility is not executable in redirect-only R1");
+        }
         for (const LogicalMountRule& rule : app.mounts) {
             if (rule.action != MountAction::kRedirect) {
                 return Fail(error, "only redirect is executable in Phase R1");

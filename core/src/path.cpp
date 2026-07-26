@@ -5,15 +5,20 @@
 namespace pathguard {
 namespace {
 
+constexpr std::size_t kMaxLogicalPathBytes = 4095;
+constexpr std::size_t kMaxPathComponentBytes = 255;
+
 bool SplitAndValidate(std::string_view input, std::vector<std::string>* parts) {
-    if (input.empty() || input.find('\0') != std::string_view::npos) {
+    if (input.empty() || input.size() > kMaxLogicalPathBytes
+        || input.find('\0') != std::string_view::npos) {
         return false;
     }
     std::size_t start = input.front() == '/' ? 1 : 0;
     while (start <= input.size()) {
         const std::size_t end = input.find('/', start);
         const std::string_view part = input.substr(start, end == std::string_view::npos ? input.size() - start : end - start);
-        if (part.empty() || part == "." || part == "..") {
+        if (part.empty() || part.size() > kMaxPathComponentBytes
+            || part == "." || part == "..") {
             return false;
         }
         parts->emplace_back(part);

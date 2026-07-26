@@ -47,5 +47,9 @@ add_executable(pathguard_topology_test unit/topology_test.cpp)
 target_link_libraries(pathguard_topology_test PRIVATE pathguard_core)
 add_test(NAME pathguard_topology_test COMMAND pathguard_topology_test)
 
+add_executable(pathguard_runtime_status_test unit/runtime_status_test.cpp)
+target_link_libraries(pathguard_runtime_status_test PRIVATE pathguard_core)
+add_test(NAME pathguard_runtime_status_test COMMAND pathguard_runtime_status_test)
+
 add_executable(pathguard_policy_benchmark perf/policy_benchmark.cpp)
 target_link_libraries(pathguard_policy_benchmark PRIVATE pathguard_core)

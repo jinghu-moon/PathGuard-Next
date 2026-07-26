@@ -70,3 +70,16 @@ Host 状态转换、CAS 竞争测试和 Zygisk/NDK 编译已完成。真机已�
 | 第一条 mount 后延迟 450ms | 1 | 452.931ms | `ECANCELED`、`rollback_us=63`、`committed=0` | 无 PathGuard mount，未安装 Hook |
 
 lease 前档位证明应用成功执行 `pending -> cancel_requested` 后，迟到 helper 无法进入 `applying`。第一条 mount 后档位证明应用不会在 300ms 时提前放行，而是等待逆序回滚完成。
+
+## 2026-07-24 owner-death 补强
+
+- mount syscall 成功后立即把 `AppliedMount` 写入 journal，即使后续 verify 失败；
+- verify 失败不再在 backend 内盲目 `umount2(path)`；
+- 回滚先核对顶层 mount ID，任一回滚身份不明或失败都进入 `namespace_tainted`；
+- worker 在 `applying`/`cancel_requested` 中异常退出或结果通道超时，companion 终止
+  worker、发布 `namespace_tainted` 并终止已知 namespace 成员；
+- 应用侧 applying 等待增加 10 秒 owner-death 保险。若 companion 自身不可用，目标
+  进程自终止，禁止以未知 namespace 状态继续 fail-open。
+
+提供 `PATHGUARD_TEST_CRASH_AFTER_MOUNT` 与
+`PATHGUARD_TEST_ROLLBACK_FAILURE` 真机故障注入开关；设备矩阵结果尚待补录。

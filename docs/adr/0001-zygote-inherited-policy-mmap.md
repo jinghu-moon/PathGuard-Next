@@ -8,7 +8,7 @@
 
 Zygisk 模块运行在 Zygote fork 出来的进程中。理论上可以在模块首次加载时打开并 mmap `policy.bin`，让后续应用进程继承映射，减少每次 specialize 的 `openat`、`fstat`、`mmap` 和 `munmap`。
 
-当前实现对每个命中或未命中进程独立读取 policy 快照，并使用 format v3 的 package hash、排序索引和二分查找。配置 daemon 通过临时文件和原子 rename 发布新快照。
+当前实现对每个命中或未命中进程独立读取 policy 快照，并使用 format v5 的 package hash、排序索引和二分查找。配置 daemon 通过临时文件和原子 rename 发布新快照。
 
 ## 约束
 
