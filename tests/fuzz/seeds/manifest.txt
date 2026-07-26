@@ -1,0 +1,2 @@
+# target<TAB>seed<TAB>sha256<TAB>purpose
+# RF2 adds the first executable scanner seeds.

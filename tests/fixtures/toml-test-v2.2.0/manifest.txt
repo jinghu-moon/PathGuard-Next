@@ -1,0 +1,2 @@
+# RF1 will append: sha256<TAB>upstream-relative-path<TAB>purpose
+# Every imported fixture must belong to tests/files-toml-1.0.0.

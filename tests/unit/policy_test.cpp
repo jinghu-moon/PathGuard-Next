@@ -1,28 +1,31 @@
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "pathguard/policy.h"
 #include "pathguard/validation.h"
 #include "test_assert.h"
 
-int main() {
-    const std::string input =
-        "schema = 2\n"
-        "failure = open\n"
-        "allow_legacy_string_bind = true\n"
-        "\n"
-        "[com.example.app]\n"
-        "media = hide_denied\n"
-        "provider = virtualize\n"
-        "users = 0, 10\n"
-        "processes = *\n"
-        "redirect DCIM/Example -> PathGuard/{package}/DCIM\n"
-        "deny Pictures/Private\n"
-        "observe DCIM/Camera\n"
-        "export DCIM/Camera -> Pictures/Backup @mode=move @media_scan=true\n";
+namespace fs = std::filesystem;
 
+namespace {
+
+std::string ReadFixture(const char* name) {
+    const fs::path path = fs::path(PATHGUARD_SOURCE_DIR) / "tests" / "fixtures"
+        / "legacy-rules" / name;
+    std::ifstream input(path, std::ios::binary);
+    assert(input);
+    return std::string(std::istreambuf_iterator<char>(input),
+                       std::istreambuf_iterator<char>());
+}
+
+}  // namespace
+
+int main() {
     pathguard::PolicyDocument document;
     pathguard::ParseError error;
-    assert(pathguard::ParseRulesIni(input, &document, &error));
+    assert(pathguard::ParseRulesIni(
+        ReadFixture("valid-full-syntax.ini"), &document, &error));
     assert(document.schema == 2);
     assert(document.failure_mode == pathguard::FailureMode::kOpen);
     assert(document.allow_legacy_string_bind);
@@ -36,44 +39,31 @@ int main() {
     assert(document.apps[0].events[1].options
         == (pathguard::kEventModeMove | pathguard::kEventMediaScan));
 
-    const std::string isolate =
-        "schema = 2\nfailure = open\n[com.example.isolated]\n"
-        "isolate -> Android/data/{package}/sdcard\n"
-        "allow Download/Public\n";
-    assert(pathguard::ParseRulesIni(isolate, &document, &error));
+    assert(pathguard::ParseRulesIni(
+        ReadFixture("legacy-isolate.ini"), &document, &error));
     assert(document.apps[0].mounts.size() == 2);
     assert(document.apps[0].mounts[0].action == pathguard::MountAction::kIsolateRoot);
     assert(document.apps[0].mounts[1].action == pathguard::MountAction::kRestore);
 
-    const std::string old_schema =
-        "schema = 1\nfailure = open\n[com.example.app]\ndeny Secret\n";
-    assert(!pathguard::ParseRulesIni(old_schema, &document, &error));
+    assert(!pathguard::ParseRulesIni(
+        ReadFixture("invalid-schema.ini"), &document, &error));
     assert(error.line == 1);
-    const std::string absolute_path =
-        "schema = 2\nfailure = open\n[com.example.app]\n"
-        "deny /storage/emulated/0/Secret\n";
-    assert(!pathguard::ParseRulesIni(absolute_path, &document, &error));
+    assert(!pathguard::ParseRulesIni(
+        ReadFixture("absolute-path.ini"), &document, &error));
     assert(error.line == 4);
-    const std::string closed =
-        "schema = 2\nfailure = closed\n[com.example.app]\ndeny Secret\n";
-    assert(!pathguard::ParseRulesIni(closed, &document, &error));
+    assert(!pathguard::ParseRulesIni(
+        ReadFixture("failure-closed.ini"), &document, &error));
     assert(error.line == 2);
-    const std::string invalid_legacy =
-        "schema = 2\nfailure = open\nallow_legacy_string_bind = yes\n"
-        "[com.example.app]\ndeny Secret\n";
-    assert(!pathguard::ParseRulesIni(invalid_legacy, &document, &error));
+    assert(!pathguard::ParseRulesIni(
+        ReadFixture("invalid-legacy-bool.ini"), &document, &error));
     assert(error.line == 3);
 
-    const std::string provider_without_redirect =
-        "schema = 2\nfailure = open\n[com.example.app]\n"
-        "users = 0\nprovider = virtualize\ndeny Secret\n";
-    assert(pathguard::ParseRulesIni(provider_without_redirect, &document, &error));
+    assert(pathguard::ParseRulesIni(
+        ReadFixture("provider-without-redirect.ini"), &document, &error));
     assert(!pathguard::ValidatePolicy(&document.apps[0], &error));
 
-    const std::string provider_wildcard_user =
-        "schema = 2\nfailure = open\n[com.example.app]\n"
-        "provider = virtualize\nredirect Source -> Target\n";
-    assert(pathguard::ParseRulesIni(provider_wildcard_user, &document, &error));
+    assert(pathguard::ParseRulesIni(
+        ReadFixture("provider-wildcard-user.ini"), &document, &error));
     assert(!pathguard::ValidatePolicy(&document.apps[0], &error));
     return 0;
 }

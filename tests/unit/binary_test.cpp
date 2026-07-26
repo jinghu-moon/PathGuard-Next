@@ -7,6 +7,7 @@
 #include "pathguard/binary.h"
 #include "pathguard/policy_format.h"
 #include "pathguard/policy_index.h"
+#include "policy_v5_golden_fixture.h"
 #include "test_assert.h"
 
 namespace {
@@ -32,6 +33,22 @@ std::uint8_t HexNibble(char value) {
     }
     assert(false);
     return 0;
+}
+
+std::uint16_t ReadLe16(const std::uint8_t* value) {
+    return static_cast<std::uint16_t>(value[0])
+        | static_cast<std::uint16_t>(value[1]) << 8;
+}
+
+std::string StringAt(const std::vector<std::uint8_t>& bytes,
+                     std::uint32_t string_table,
+                     std::uint32_t relative_offset) {
+    const std::size_t begin = string_table + relative_offset;
+    assert(begin < bytes.size());
+    const auto end = std::find(bytes.begin() + static_cast<std::ptrdiff_t>(begin),
+                               bytes.end(), 0);
+    assert(end != bytes.end());
+    return std::string(bytes.begin() + static_cast<std::ptrdiff_t>(begin), end);
 }
 
 pathguard::AppPolicy MakeRedirectApp(const char* package, const char* path) {
@@ -225,44 +242,116 @@ int main() {
                     bytes.data() + pathguard::binary_format::kStringTableOffset)},
                "pkg.000bec18", std::strlen("pkg.000bec18")) != nullptr);
 
-    pathguard::PolicyDocument golden;
-    golden.schema = 2;
-    golden.failure_mode = pathguard::FailureMode::kOpen;
-    pathguard::AppPolicy golden_app;
-    golden_app.package = "org.localsend.localsend_app";
-    golden_app.provider_compat = pathguard::ProviderCompat::kVirtualize;
-    golden_app.users = {"0"};
-    golden_app.processes = {"*"};
-    golden_app.mounts = {
-        {pathguard::MountAction::kRedirect, "Download/localsend-source",
-         "Download/localsend-redirect", 0, 0, 9},
-    };
-    golden.apps.push_back(golden_app);
+    const PolicyV5GoldenFixture golden_fixture = LoadPolicyV5GoldenFixture();
+    const pathguard::PolicyDocument& golden = golden_fixture.document;
     assert(pathguard::EncodePolicy(golden, &bytes, &error));
-    constexpr char kGoldenHex[] =
-        "50474e4205000200cf00000088e9e01cf460ea685603bd990100000001000000"
-        "00000000380000006800000078000000780000000000000015e1b3e301000000"
-        "1d0000001f00000000000000010000000000000000000000809707b0f29f2252"
-        "00000100000000000100020000000000210000003b000000006f72672e6c6f63"
-        "616c73656e642e6c6f63616c73656e645f6170700030002a00446f776e6c6f61"
-        "642f6c6f63616c73656e642d736f7572636500446f776e6c6f61642f6c6f6361"
-        "6c73656e642d726564697265637400";
-    assert(bytes.size() == 207);
+    assert(bytes.size() == golden_fixture.expected_file_size);
     assert(pathguard::ComputeContentGeneration(golden)
-        == UINT64_C(11078014328063549684));
+        == golden_fixture.expected_content_generation);
     assert(pathguard::ComputePlanGeneration(
                golden.apps[0], pathguard::FailureMode::kOpen)
-        == UINT64_C(5918468725002442624));
+        == golden_fixture.expected_plan_generation);
     assert(pathguard::binary_format::ReadLe32(
                bytes.data() + pathguard::binary_format::kPayloadChecksumOffset)
-        == UINT32_C(484501896));
-    assert(std::strlen(kGoldenHex) == bytes.size() * 2);
+        == golden_fixture.expected_payload_checksum);
+    assert(golden_fixture.expected_hex.size() == bytes.size() * 2);
     for (std::size_t index = 0; index < bytes.size(); ++index) {
         const std::uint8_t expected = static_cast<std::uint8_t>(
-            (HexNibble(kGoldenHex[index * 2]) << 4)
-            | HexNibble(kGoldenHex[index * 2 + 1]));
+            (HexNibble(golden_fixture.expected_hex[index * 2]) << 4)
+            | HexNibble(golden_fixture.expected_hex[index * 2 + 1]));
         assert(bytes[index] == expected);
     }
+
+    const std::uint32_t golden_package_offset =
+        pathguard::binary_format::ReadLe32(
+            bytes.data() + pathguard::binary_format::kPackageTableOffset);
+    const std::uint32_t golden_mount_offset =
+        pathguard::binary_format::ReadLe32(
+            bytes.data() + pathguard::binary_format::kMountRuleTableOffset);
+    const std::uint32_t golden_event_offset =
+        pathguard::binary_format::ReadLe32(
+            bytes.data() + pathguard::binary_format::kEventRuleTableOffset);
+    const std::uint32_t golden_string_offset =
+        pathguard::binary_format::ReadLe32(
+            bytes.data() + pathguard::binary_format::kStringTableOffset);
+    assert(pathguard::binary_format::ReadLe32(bytes.data())
+        == pathguard::binary_format::kMagic);
+    assert(ReadLe16(bytes.data() + 4) == pathguard::binary_format::kFormatVersion);
+    assert(ReadLe16(bytes.data() + 6) == pathguard::binary_format::kSchemaVersion);
+    assert(pathguard::binary_format::ReadLe32(
+               bytes.data() + pathguard::binary_format::kFileSizeOffset)
+        == golden_fixture.expected_file_size);
+    assert(pathguard::binary_format::ReadLe64(
+               bytes.data() + pathguard::binary_format::kContentGenerationOffset)
+        == golden_fixture.expected_content_generation);
+    assert(pathguard::binary_format::ReadLe32(
+               bytes.data() + pathguard::binary_format::kPackageCountOffset) == 1);
+    assert(pathguard::binary_format::ReadLe32(
+               bytes.data() + pathguard::binary_format::kMountRuleCountOffset) == 1);
+    assert(pathguard::binary_format::ReadLe32(
+               bytes.data() + pathguard::binary_format::kEventRuleCountOffset) == 0);
+    assert(golden_package_offset == pathguard::binary_format::kHeaderSize);
+    assert(golden_mount_offset == golden_package_offset
+        + pathguard::binary_format::kPackageSize);
+    assert(golden_event_offset == golden_mount_offset
+        + pathguard::binary_format::kMountRuleSize);
+    assert(golden_string_offset == golden_event_offset);
+    assert(pathguard::binary_format::ReadLe32(
+               bytes.data() + pathguard::binary_format::kHeaderFlagsOffset) == 0);
+
+    const std::uint8_t* package_entry = bytes.data() + golden_package_offset;
+    assert(pathguard::binary_format::ReadLe32(
+               package_entry + pathguard::binary_format::kPackageHashOffset)
+        == pathguard::binary_format::PackageNameHash(
+            golden.apps[0].package.data(), golden.apps[0].package.size()));
+    assert(StringAt(bytes, golden_string_offset,
+                    pathguard::binary_format::ReadLe32(
+                        package_entry + pathguard::binary_format::kPackageNameOffset))
+        == golden.apps[0].package);
+    assert(StringAt(bytes, golden_string_offset,
+                    pathguard::binary_format::ReadLe32(
+                        package_entry + pathguard::binary_format::kPackageUsersOffset))
+        == "0");
+    assert(StringAt(bytes, golden_string_offset,
+                    pathguard::binary_format::ReadLe32(
+                        package_entry + pathguard::binary_format::kPackageProcessesOffset))
+        == "*");
+    assert(pathguard::binary_format::ReadLe32(
+               package_entry + pathguard::binary_format::kPackageFirstMountOffset) == 0);
+    assert(pathguard::binary_format::ReadLe32(
+               package_entry + pathguard::binary_format::kPackageMountCountOffset) == 1);
+    assert(pathguard::binary_format::ReadLe32(
+               package_entry + pathguard::binary_format::kPackageFirstEventOffset) == 0);
+    assert(pathguard::binary_format::ReadLe32(
+               package_entry + pathguard::binary_format::kPackageEventCountOffset) == 0);
+    assert(pathguard::binary_format::ReadLe64(
+               package_entry + pathguard::binary_format::kPackagePlanGenerationOffset)
+        == golden_fixture.expected_plan_generation);
+    assert(package_entry[pathguard::binary_format::kPackageFailureModeOffset]
+        == static_cast<std::uint8_t>(pathguard::FailureMode::kOpen));
+    assert(package_entry[pathguard::binary_format::kPackageMediaCompatOffset]
+        == static_cast<std::uint8_t>(pathguard::MediaCompat::kOff));
+    assert(package_entry[pathguard::binary_format::kPackageProviderCompatOffset]
+        == static_cast<std::uint8_t>(pathguard::ProviderCompat::kVirtualize));
+    assert(package_entry[43] == 0);
+    assert(pathguard::binary_format::ReadLe32(package_entry + 44) == 0);
+
+    const std::uint8_t* mount_entry = bytes.data() + golden_mount_offset;
+    assert(mount_entry[pathguard::binary_format::kMountActionOffset]
+        == static_cast<std::uint8_t>(pathguard::MountAction::kRedirect));
+    assert(mount_entry[1] == 0);
+    assert(ReadLe16(mount_entry + pathguard::binary_format::kMountDepthOffset) == 2);
+    assert(ReadLe16(mount_entry + pathguard::binary_format::kMountFlagsOffset) == 0);
+    assert(ReadLe16(mount_entry + 6) == 0);
+    assert(StringAt(bytes, golden_string_offset,
+                    pathguard::binary_format::ReadLe32(
+                        mount_entry + pathguard::binary_format::kMountVisiblePathOffset))
+        == "Download/localsend-source");
+    assert(StringAt(bytes, golden_string_offset,
+                    pathguard::binary_format::ReadLe32(
+                        mount_entry + pathguard::binary_format::kMountBackingPathOffset))
+        == "Download/localsend-redirect");
+
     assert(pathguard::ComputeContentGeneration(golden) != 0);
     assert(pathguard::ComputePlanGeneration(
                golden.apps[0], pathguard::FailureMode::kOpen)

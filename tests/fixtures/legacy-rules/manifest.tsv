@@ -1,0 +1,12 @@
+# file|classification|parse|parse_error_line|validate|encode|schema|apps|mounts|events|binary_bytes|content_generation
+valid-redirect.ini|preserve|ok|0|ok|ok|2|1|1|0|179|18258669379964361373
+valid-full-syntax.ini|replace|ok|0|ok|error|2|1|2|2|0|0
+legacy-placeholders.ini|replace|ok|0|ok|ok|2|1|1|0|204|14124124540152938399
+legacy-isolate.ini|replace|ok|0|ok|error|2|1|2|0|0|0
+legacy-event.ini|compile-gated|ok|0|ok|error|2|1|1|2|0|0
+invalid-schema.ini|replace|error|1|skip|skip|0|0|0|0|0|0
+failure-closed.ini|compile-gated|error|2|skip|skip|0|0|0|0|0|0
+absolute-path.ini|preserve|error|4|skip|skip|0|0|0|0|0|0
+invalid-legacy-bool.ini|preserve|error|3|skip|skip|0|0|0|0|0|0
+provider-without-redirect.ini|compile-gated|ok|0|error|error|2|1|1|0|0|0
+provider-wildcard-user.ini|compile-gated|ok|0|error|error|2|1|1|0|0|0

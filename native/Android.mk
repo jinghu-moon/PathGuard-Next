@@ -14,9 +14,11 @@ MOUNT_EXECUTOR_SOURCE := mount_executor.cpp
 include $(CLEAR_VARS)
 LOCAL_MODULE := pathguardd
 LOCAL_SRC_FILES := ../daemon/src/main.cpp $(CORE_SOURCES) \
+    ../daemon/src/legacy_rules_control.cpp \
     $(DIRECTORY_RESOLVER_SOURCE) $(MOUNT_INFO_SNAPSHOT_SOURCE) \
     $(MOUNT_EXECUTOR_SOURCE)
-LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include $(ROOT_PATH)/native/include
+LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include $(ROOT_PATH)/daemon/include \
+    $(ROOT_PATH)/native/include
 LOCAL_CPPFLAGS := -DPATHGUARD_ANDROID=1
 LOCAL_LDLIBS := -llog
 include $(BUILD_EXECUTABLE)

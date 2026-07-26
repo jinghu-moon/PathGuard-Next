@@ -323,7 +323,7 @@ RF8 全量健壮性、性能、真机和删除旧路径
 
 ## 8. RF0 阶段：当前行为与测试基础设施
 
-### RF0-01 `[ ] P0` 固化 Host 构建与测试基线
+### RF0-01 `[x] P0` 固化 Host 构建与测试基线
 
 **依赖**
 
@@ -331,25 +331,25 @@ RF8 全量健壮性、性能、真机和删除旧路径
 
 **RED**
 
-- [ ] 增加一个基线检查，能在测试数量减少、`pathguard_binary_test` 缺失或 Release 测试未运行时失败。
-- [ ] 记录当前 10 个 CTest 名称及结果；证明检查在故意排除一个测试时会失败。
+- [x] 增加一个基线检查，能在测试数量减少、`pathguard_binary_test` 缺失或 Release 测试未运行时失败。
+- [x] 记录当前 10 个 CTest 名称及结果；证明检查在故意排除一个测试时会失败。
 
 **GREEN**
 
-- [ ] 建立 `tests/baseline/host-tests.md` 或机器可读等价记录。
-- [ ] 固定现有 CMake/CTest 命令，不改变生产代码。
+- [x] 建立 `tests/baseline/host-tests.md` 或机器可读等价记录。
+- [x] 固定现有 CMake/CTest 命令，不改变生产代码。
 
 **REFACTOR / VERIFY**
 
-- [ ] 执行 Release 构建和全量 CTest。
-- [ ] 保存执行日期、编译器和命令，不把本机绝对路径写入 golden。
+- [x] 执行 Release 构建和全量 CTest。
+- [x] 保存执行日期、编译器和命令，不把本机绝对路径写入 golden。
 
 **完成证据**
 
-- [ ] 10/10 Host 测试通过的日志。
-- [ ] 基线检查能发现测试目标丢失。
+- [x] 10/10 Host 测试通过的日志。
+- [x] 基线检查能发现测试目标丢失。
 
-### RF0-02 `[ ] P0` 建立旧规则 parser characterization
+### RF0-02 `[x] P0` 建立旧规则 parser characterization
 
 **依赖**
 
@@ -357,26 +357,26 @@ RF8 全量健壮性、性能、真机和删除旧路径
 
 **RED**
 
-- [ ] 为当前有效样例、非法 schema、failure closed、绝对路径、legacy 布尔、provider gate 建立独立 fixture。
-- [ ] 每个 fixture 标记 `preserve`、`replace` 或 `compile-gated`。
-- [ ] 先让 fixture harness 因未登记期望而失败。
+- [x] 为当前有效样例、非法 schema、failure closed、绝对路径、legacy 布尔、provider gate 建立独立 fixture。
+- [x] 每个 fixture 标记 `preserve`、`replace` 或 `compile-gated`。
+- [x] 先让 fixture harness 因未登记期望而失败。
 
 **GREEN**
 
-- [ ] 复用当前 `ParseRulesIni()` 运行 fixture，不修改旧 parser 语义。
-- [ ] 记录旧 `PolicyDocument` 输出、错误行和二进制结果。
+- [x] 复用当前 `ParseRulesIni()` 运行 fixture，不修改旧 parser 语义。
+- [x] 记录旧 `PolicyDocument` 输出、错误行和二进制结果。
 
 **REFACTOR / VERIFY**
 
-- [ ] 将 `tests/unit/policy_test.cpp` 中的大字符串拆为可复用 fixture 或 helper。
-- [ ] 不把旧文本错误消息当成未来稳定协议；只冻结必要的语义和错误位置。
+- [x] 将 `tests/unit/policy_test.cpp` 中的大字符串拆为可复用 fixture 或 helper。
+- [x] 不把旧文本错误消息当成未来稳定协议；只冻结必要的语义和错误位置。
 
 **完成证据**
 
-- [ ] 旧格式到预期语义的 characterization 表。
-- [ ] 明确列出 format 1 不再支持的 `{user}`、`{package}`、isolate/event 旧写法。
+- [x] 旧格式到预期语义的 characterization 表。
+- [x] 明确列出 format 1 不再支持的 `{user}`、`{package}`、isolate/event 旧写法。
 
-### RF0-03 `[ ] P0` 冻结 policy format v5 与 207-byte golden
+### RF0-03 `[x] P0` 冻结 policy format v5 与 207-byte golden
 
 **依赖**
 
@@ -384,24 +384,24 @@ RF8 全量健壮性、性能、真机和删除旧路径
 
 **RED**
 
-- [ ] 新增测试，若文件大小不是 207、checksum/generation/排序任一变化则失败。
-- [ ] 新增 C++ reader 对 golden 中每个字段的逐项断言，而不只逐字节比较。
+- [x] 新增测试，若文件大小不是 207、checksum/generation/排序任一变化则失败。
+- [x] 新增 C++ reader 对 golden 中每个字段的逐项断言，而不只逐字节比较。
 
 **GREEN**
 
-- [ ] 复用 `tests/unit/binary_test.cpp` 和 ADR-0002 常量。
-- [ ] 提取可供未来 Rust vertical slice 复用的固定语义输入描述。
+- [x] 复用 `tests/unit/binary_test.cpp` 和 ADR-0002 常量。
+- [x] 提取可供未来 Rust vertical slice 复用的固定语义输入描述。
 
 **REFACTOR / VERIFY**
 
-- [ ] Golden 只保留一个事实来源，避免 ADR、C++ 测试和未来 Rust 测试手工维护三份不一致字节。
-- [ ] `DecodePolicy()` 仍是 Zygisk 字节契约的独立 C++ verifier。
+- [x] Golden 只保留一个事实来源，避免 ADR、C++ 测试和未来 Rust 测试手工维护三份不一致字节。
+- [x] `DecodePolicy()` 仍是 Zygisk 字节契约的独立 C++ verifier。
 
 **完成证据**
 
-- [ ] 207-byte、content generation `11078014328063549684`、plan generation `5918468725002442624`、checksum `484501896` 全部通过。
+- [x] 207-byte、content generation `11078014328063549684`、plan generation `5918468725002442624`、checksum `484501896` 全部通过。
 
-### RF0-04 `[ ] P0` Characterize daemon/CLI 当前编译与发布行为
+### RF0-04 `[x] P0` Characterize daemon/CLI 当前编译与发布行为
 
 **依赖**
 
@@ -409,25 +409,25 @@ RF8 全量健壮性、性能、真机和删除旧路径
 
 **RED**
 
-- [ ] Host 集成测试覆盖：成功编译、非法配置、输出未变化、DecodePolicy 自检失败、临时文件替换失败。
-- [ ] 测试明确暴露当前固定 `policy.bin.tmp`、150ms sleep、文本比较和 `rules.ini` 路径。
+- [x] Host 集成测试覆盖：成功编译、非法配置、输出未变化、DecodePolicy 自检失败、临时文件替换失败。
+- [x] 测试明确暴露当前固定 `policy.bin.tmp`、150ms sleep、文本比较和 `rules.ini` 路径。
 
 **GREEN**
 
-- [ ] 只增加测试缝或最小文件系统 adapter，不提前实现新 Publisher/Reconciler。
-- [ ] 记录哪些行为必须被 RF7 替换。
+- [x] 只增加测试缝或最小文件系统 adapter，不提前实现新 Publisher/Reconciler。
+- [x] 记录哪些行为必须被 RF7 替换。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不为测试引入全局可变单例。
-- [ ] 文件系统、时钟和事件源只抽象到当前测试所需最小边界。
+- [x] 不为测试引入全局可变单例。
+- [x] 文件系统、时钟和事件源只抽象到当前测试所需最小边界。
 
 **完成证据**
 
-- [ ] 当前 daemon/CLI 行为矩阵。
-- [ ] 所有待替换行为都有对应 RF7 任务引用。
+- [x] 当前 daemon/CLI 行为矩阵。
+- [x] 所有待替换行为都有对应 RF7 任务引用。
 
-### RF0-05 `[ ] P0` 建立新编译链测试目录、fixture 规范和 seed 管理
+### RF0-05 `[x] P0` 建立新编译链测试目录、fixture 规范和 seed 管理
 
 **依赖**
 
@@ -435,12 +435,12 @@ RF8 全量健壮性、性能、真机和删除旧路径
 
 **RED**
 
-- [ ] 检查缺少 fixture provenance、license、manifest 或 seed 时失败。
-- [ ] 检查 golden 中出现生成文本内部 `{ from, to }` 诊断时失败。
+- [x] 检查缺少 fixture provenance、license、manifest 或 seed 时失败。
+- [x] 检查 golden 中出现生成文本内部 `{ from, to }` 诊断时失败。
 
 **GREEN**
 
-- [ ] 创建建议目录：
+- [x] 创建建议目录：
 
 ```text
 tests/
@@ -450,20 +450,28 @@ tests/
   device/rules/
 ```
 
-- [ ] 定义 golden 元数据：输入 SHA-256、TOML 版本、parser/backend、原始 byte span、错误码。
-- [ ] 定义 fuzz regression corpus 的命名和 seed 保存方式。
+- [x] 定义 golden 元数据：输入 SHA-256、TOML 版本、parser/backend、原始 byte span、错误码。
+- [x] 定义 fuzz regression corpus 的命名和 seed 保存方式。
 
 **REFACTOR / VERIFY**
 
-- [ ] 测试数据与生产代码分离。
-- [ ] 不复制无关参考项目源码。
+- [x] 测试数据与生产代码分离。
+- [x] 不复制无关参考项目源码。
 
 ### RF0 阶段闸门
 
-- [ ] Release Host 10/10 基线仍通过。
-- [ ] 旧规则语义、207-byte golden、daemon/CLI 当前行为均有 characterization。
-- [ ] 新测试目录和 fixture/golden 规范可被 CI 检查。
-- [ ] 尚未引入生产 TOML parser 或箭头实现。
+- [x] Release Host 10/10 基线仍通过。
+- [x] 旧规则语义、207-byte golden、daemon/CLI 当前行为均有 characterization。
+- [x] 新测试目录和 fixture/golden 规范可被 CI 检查。
+- [x] 尚未引入生产 TOML parser 或箭头实现。
+
+### RF0 验收记录（2026-07-26）
+
+- RED 证据：在测试目标和 CMake 接线先落地、实现尚不存在时，配置阶段按预期因缺少 `daemon/src/legacy_rules_control.cpp` 失败；基线守卫和资产守卫也分别以注入缺失测试、缺失资产及非法诊断 golden 自证失败能力。
+- GREEN 证据：Release Host 全量 CTest 为 15/15；其中 RF0 前的原始 10/10 基线由 `pathguard_host_baseline_guard` 持续保护。
+- policy v5 证据：207 bytes、content generation `11078014328063549684`、plan generation `5918468725002442624`、checksum `484501896` 和完整字节 golden 全部通过。
+- Android 证据：`./scripts/build-native.ps1 -Abi arm64-v8a` 构建通过，产出 `pathguardd`、`pathguardctl` 和 `libpathguard_zygisk.so`。
+- 范围审计：仅新增旧行为 characterization、测试缝和测试资产契约；未引入 TOML parser、Rust crate 或生产箭头脱糖实现，未开始 RF1。
 
 ---
 

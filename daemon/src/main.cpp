@@ -9,10 +9,6 @@
 #include <utility>
 #include <vector>
 
-#if defined(_WIN32)
-#include <windows.h>
-#endif
-
 #if defined(__linux__)
 #include <cerrno>
 #include <limits.h>
@@ -25,6 +21,7 @@
 #endif
 
 #include "pathguard/binary.h"
+#include "pathguard/legacy_rules_control.h"
 #include "pathguard/path.h"
 #include "pathguard/policy.h"
 #include "pathguard/topology.h"
@@ -42,6 +39,9 @@
 namespace fs = std::filesystem;
 
 using PerfClock = std::chrono::steady_clock;
+using pathguard::legacy_rules::CompileFile;
+using pathguard::legacy_rules::CompilePerf;
+using pathguard::legacy_rules::CompileText;
 
 static std::uint64_t NowNs() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -54,16 +54,6 @@ static std::uint64_t ElapsedNs(std::uint64_t start) {
 }
 
 static std::uint64_t NsToUs(std::uint64_t value) { return value / 1000ULL; }
-
-struct CompilePerf {
-    std::uint64_t parse_ns = 0;
-    std::uint64_t validate_ns = 0;
-    std::uint64_t encode_ns = 0;
-    std::uint64_t compare_ns = 0;
-    std::uint64_t publish_ns = 0;
-    bool unchanged = false;
-    bool published = false;
-};
 
 static void LogCompilePerf(const char* phase, std::uint64_t read_ns,
                            std::uint64_t debounce_ns, std::uint64_t stable_read_ns,
@@ -87,29 +77,6 @@ static bool ReadAll(const fs::path& path, std::string* output) {
     if (!input) return false;
     *output = std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
     return true;
-}
-
-static bool AtomicReplace(const fs::path& temporary, const fs::path& output,
-                          std::string* error) {
-#if defined(_WIN32)
-    if (MoveFileExW(temporary.c_str(), output.c_str(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
-        return true;
-    }
-    if (error != nullptr) {
-        *error = "cannot atomically publish policy.bin: win32="
-            + std::to_string(GetLastError());
-    }
-    return false;
-#else
-    std::error_code rename_error;
-    fs::rename(temporary, output, rename_error);
-    if (!rename_error) return true;
-    if (error != nullptr) {
-        *error = "cannot atomically publish policy.bin: " + rename_error.message();
-    }
-    return false;
-#endif
 }
 
 static bool ProbeStorageTopology() {
@@ -243,79 +210,6 @@ static bool ProbeProcFdMount(const char* source_root_path, const char* source_pa
 }
 #endif
 
-static bool CompileText(const std::string& text, const fs::path& output,
-                        CompilePerf* perf, std::string* error) {
-    if (perf == nullptr) return false;
-    *perf = {};
-    pathguard::PolicyDocument document;
-    pathguard::ParseError parse_error;
-    const std::uint64_t parse_started = NowNs();
-    if (!pathguard::ParseRulesIni(text, &document, &parse_error)) {
-        perf->parse_ns = ElapsedNs(parse_started);
-        *error = "line " + std::to_string(parse_error.line) + ": " + parse_error.message;
-        return false;
-    }
-    perf->parse_ns = ElapsedNs(parse_started);
-    const std::uint64_t validate_started = NowNs();
-    for (auto& app : document.apps) {
-        if (!pathguard::ValidatePolicy(&app, &parse_error)) {
-            perf->validate_ns = ElapsedNs(validate_started);
-            *error = "line " + std::to_string(parse_error.line) + ": " + parse_error.message;
-            return false;
-        }
-    }
-    perf->validate_ns = ElapsedNs(validate_started);
-    std::vector<std::uint8_t> bytes;
-    const std::uint64_t encode_started = NowNs();
-    if (!pathguard::EncodePolicy(document, &bytes, &parse_error)) {
-        perf->encode_ns = ElapsedNs(encode_started);
-        *error = parse_error.message;
-        return false;
-    }
-    pathguard::PolicyDocument verified;
-    std::uint64_t verified_generation = 0;
-    if (!pathguard::DecodePolicy(bytes, &verified, &verified_generation, &parse_error)
-        || verified_generation == 0) {
-        perf->encode_ns = ElapsedNs(encode_started);
-        *error = "encoder self-check failed: " + parse_error.message;
-        return false;
-    }
-    perf->encode_ns = ElapsedNs(encode_started);
-    const std::uint64_t compare_started = NowNs();
-    std::string current;
-    if (ReadAll(output, &current)
-        && current.size() == bytes.size()
-        && std::memcmp(current.data(), bytes.data(), bytes.size()) == 0) {
-        perf->compare_ns = ElapsedNs(compare_started);
-        perf->unchanged = true;
-        return true;
-    }
-    perf->compare_ns = ElapsedNs(compare_started);
-    const std::uint64_t publish_started = NowNs();
-    fs::create_directories(output.parent_path());
-    const fs::path temporary = output.string() + ".tmp";
-    { std::ofstream file(temporary, std::ios::binary | std::ios::trunc); if (!file) { perf->publish_ns = ElapsedNs(publish_started); *error = "cannot create policy.bin.tmp"; return false; } file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())); }
-    const bool replaced = AtomicReplace(temporary, output, error);
-    perf->publish_ns = ElapsedNs(publish_started);
-    if (!replaced) return false;
-    perf->published = true;
-    return true;
-}
-
-static bool CompileFile(const fs::path& config, const fs::path& output,
-                        CompilePerf* perf, std::uint64_t* read_ns,
-                        std::string* error) {
-    const std::uint64_t read_started = NowNs();
-    std::string text;
-    if (!ReadAll(config, &text)) {
-        if (read_ns != nullptr) *read_ns = ElapsedNs(read_started);
-        *error = "cannot read rules.ini";
-        return false;
-    }
-    if (read_ns != nullptr) *read_ns = ElapsedNs(read_started);
-    return CompileText(text, output, perf, error);
-}
-
 static void ReloadIfChanged(const fs::path& config, const fs::path& policy,
                             std::string* active_config,
                             std::string* rejected_config) {
@@ -323,14 +217,14 @@ static void ReloadIfChanged(const fs::path& config, const fs::path& policy,
     const std::uint64_t candidate_read_started = NowNs();
     std::string candidate;
     if (!ReadAll(config, &candidate)
-        || candidate == *active_config
-        || candidate == *rejected_config) {
+        || !pathguard::legacy_rules::IsCandidateNew(
+            candidate, *active_config, *rejected_config)) {
         return;
     }
     const std::uint64_t candidate_read_ns = ElapsedNs(candidate_read_started);
 
     const std::uint64_t debounce_started = NowNs();
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    std::this_thread::sleep_for(pathguard::legacy_rules::kReloadDebounce);
     const std::uint64_t debounce_ns = ElapsedNs(debounce_started);
     const std::uint64_t stable_read_started = NowNs();
     std::string stable_candidate;
@@ -495,7 +389,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 #endif
-    const fs::path config = module_dir / "config" / "rules.ini";
+    const fs::path config =
+        module_dir / "config" / pathguard::legacy_rules::kRulesFileName;
     const fs::path policy = module_dir / "run" / "policy.bin";
     if (compile || self_check) {
         std::string error;
