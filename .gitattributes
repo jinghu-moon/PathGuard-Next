@@ -4,3 +4,7 @@
 *.png binary
 *.so binary
 *.zip binary
+
+# Byte-exact parser fixtures and source-map golden files.
+tests/fixtures/toml-test-v2.2.0/**/*.toml binary
+tests/golden/rules/d0/**/*.toml binary
