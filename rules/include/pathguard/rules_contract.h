@@ -37,5 +37,9 @@ inline constexpr std::string_view kFormatMissing = "PG-FORMAT-MISSING";
 inline constexpr std::string_view kFormatInvalid = "PG-FORMAT-INVALID";
 inline constexpr std::string_view kFormatUnsupported = "PG-FORMAT-UNSUPPORTED";
 inline constexpr std::string_view kDiagnosticsOmitted = "PG-DIAGNOSTICS-OMITTED";
+inline constexpr std::string_view kTomlParse = "PG-TOML-PARSE";
+inline constexpr std::string_view kTypeMismatch = "PG-RULE-TYPE";
+inline constexpr std::string_view kUnknownField = "PG-RULE-UNKNOWN-FIELD";
+inline constexpr std::string_view kInvalidValue = "PG-RULE-INVALID-VALUE";
 
 }  // namespace pathguard::rules

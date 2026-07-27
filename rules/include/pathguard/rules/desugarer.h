@@ -13,8 +13,6 @@
 
 namespace pathguard::rules {
 
-using RuleId = std::uint32_t;
-
 struct ArrowRewrite {
     RuleId id = 0;
     ByteSpan rule;

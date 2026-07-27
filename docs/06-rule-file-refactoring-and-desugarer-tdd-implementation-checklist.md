@@ -1,8 +1,8 @@
 # PathGuard Next 配置文件重构与箭头脱糖器 · TDD 分阶段实施任务清单
 
-> 状态：RF3 完成（下一阶段为 RF4）
+> 状态：RF4 完成（下一阶段为 RF5）
 >
-> 文档版本：0.4
+> 文档版本：0.5
 >
 > 日期：2026-07-26
 >
@@ -1158,7 +1158,7 @@ tests/
 
 ## 12. RF4 阶段：唯一 TOML parser、来源绑定、Scope 与 RulesDocument
 
-### RF4-01 `[ ] P0` 接入 D0 选定的唯一 strict TOML parser
+### RF4-01 `[x] P0` 接入 D0 选定的唯一 strict TOML parser
 
 **依赖**
 
@@ -1166,21 +1166,21 @@ tests/
 
 **RED**
 
-- [ ] TOML 1.0 valid/reject subset、BOM/CRLF/Unicode、重复键和非法 escape 测试。
-- [ ] TOML 1.1-only 输入必须拒绝。
-- [ ] parser error 未映射到原始 source 时失败。
+- [x] TOML 1.0 valid/reject subset、BOM/CRLF/Unicode、重复键和非法 escape 测试。
+- [x] TOML 1.1-only 输入必须拒绝。
+- [x] parser error 未映射到原始 source 时失败。
 
 **GREEN**
 
-- [ ] Rust 路径使用不可变 `Document`；C++ 路径使用无异常 toml++。
-- [ ] 严格 TOML 分支直接解析原始 SourceBuffer。
+- [x] Rust 路径使用不可变 `Document`；C++ 路径使用无异常 toml++。（RF1 选择 C++）
+- [x] 严格 TOML 分支直接解析原始 SourceBuffer。
 
 **REFACTOR / VERIFY**
 
-- [ ] parser adapter 只暴露编译器需要的最小访问接口。
-- [ ] 未选 parser 不存在于生产依赖。
+- [x] parser adapter 只暴露编译器需要的最小访问接口。
+- [x] 未选 parser 不存在于生产依赖。
 
-### RF4-02 `[ ] P0` 实现 generated node 双向一一绑定（仅箭头分支）
+### RF4-02 `[x] P0` 实现 generated node 双向一一绑定（仅箭头分支）
 
 **依赖**
 
@@ -1188,21 +1188,21 @@ tests/
 
 **RED**
 
-- [ ] 每条 GeneratedRedirect 恰好匹配一个 inline table。
-- [ ] 每个被视为 generated 的 AST node 恰好消费一条记录。
-- [ ] 缺失、重复、多重匹配均返回 `PG-DESUGAR-INTERNAL`。
+- [x] 每条 GeneratedRedirect 恰好匹配一个 inline table。
+- [x] 每个被视为 generated 的 AST node 恰好消费一条记录。
+- [x] 缺失、重复、多重匹配均返回 `PG-DESUGAR-INTERNAL`。
 
 **GREEN**
 
-- [ ] 首选 generated table exact span lookup。
-- [ ] 按 D0 决议实现唯一 binder，不保留多个 fallback 分支。
+- [x] 首选 generated table exact span lookup。
+- [x] 按 D0 决议实现唯一 binder，不保留多个 fallback 分支。
 
 **REFACTOR / VERIFY**
 
-- [ ] binding 不通过 RewriteMap 通用查询。
-- [ ] Rust binding 前不调用 `into_mut()`。
+- [x] binding 不通过 RewriteMap 通用查询。
+- [x] Rust binding 前不调用 `into_mut()`。（C++ 路径不适用）
 
-### RF4-03 `[ ] P0` 实现 generated node AST scope validator（仅箭头分支）
+### RF4-03 `[x] P0` 实现 generated node AST scope validator（仅箭头分支）
 
 **依赖**
 
@@ -1210,21 +1210,21 @@ tests/
 
 **RED**
 
-- [ ] 接受 `/apps/<package>/redirect/<index>`。
-- [ ] deny、processes、top-level redirect、嵌套数组报 `PG-RULE-ARROW-SCOPE`。
-- [ ] table header 和 dotted-key 表面写法只要 AST 路径等价均得到同一结果。
+- [x] 接受 `/apps/<package>/redirect/<index>`。
+- [x] deny、processes、top-level redirect、嵌套数组报 `PG-RULE-ARROW-SCOPE`。
+- [x] table header 和 dotted-key 表面写法只要 AST 路径等价均得到同一结果。
 
 **GREEN**
 
-- [ ] parser 负责完整表路径，validator 只检查最终 path segments。
-- [ ] scope error 在普通字段类型错误前报告。
+- [x] parser 负责完整表路径，validator 只检查最终 path segments。
+- [x] scope error 在普通字段类型错误前报告。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不把 apps/package/redirect 识别逻辑移回 scanner。
-- [ ] 已报 scope error 的节点标记为 decoder 跳过。
+- [x] 不把 apps/package/redirect 识别逻辑移回 scanner。
+- [x] 已报 scope error 的节点标记为 decoder 跳过。
 
-### RF4-04 `[ ] P0` 拒绝手写 inline table 并抑制派生诊断（仅箭头分支）
+### RF4-04 `[x] P0` 拒绝手写 inline table 并抑制派生诊断（仅箭头分支）
 
 **依赖**
 
@@ -1233,21 +1233,21 @@ tests/
 
 **RED**
 
-- [ ] 纯手写和 arrow/手写混合数组报告 `PG-REDIRECT-SYNTAX`。
-- [ ] generated scope error 不再产生同节点的 deny 类型错误。
-- [ ] 手写 table 不能伪造 generated span。
+- [x] 纯手写和 arrow/手写混合数组报告 `PG-REDIRECT-SYNTAX`。
+- [x] generated scope error 不再产生同节点的 deny 类型错误。
+- [x] 手写 table 不能伪造 generated span。
 
 **GREEN**
 
-- [ ] redirect decoder 只接受已消费 GeneratedRedirect 的 inline table。
-- [ ] 同一根因只报告一次。
+- [x] redirect decoder 只接受已消费 GeneratedRedirect 的 inline table。
+- [x] 同一根因只报告一次。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不保留“兼容接受 {from,to}”选项。
-- [ ] 高级 redirect 不在当前字段中预留未用 key。
+- [x] 不保留“兼容接受 {from,to}”选项。
+- [x] 高级 redirect 不在当前字段中预留未用 key。
 
-### RF4-05 `[ ] P0` 实现统一 parse/source-map 诊断适配
+### RF4-05 `[x] P0` 实现统一 parse/source-map 诊断适配
 
 **依赖**
 
@@ -1255,21 +1255,21 @@ tests/
 
 **RED**
 
-- [ ] parse error 位于 copied/synthetic segment 时映射回不同正确原始 span。
-- [ ] JSON 与文本诊断 code/span 不一致时失败。
-- [ ] 默认输出出现 `<desugared>` 或内部 from/to 时失败。
+- [x] parse error 位于 copied/synthetic segment 时映射回不同正确原始 span。
+- [x] JSON 与文本诊断 code/span 不一致时失败。
+- [x] 默认输出出现 `<desugared>` 或内部 from/to 时失败。
 
 **GREEN**
 
-- [ ] 统一 Diagnostic：code、severity、phase、primary、related、field path、message key/args。
-- [ ] parser error 只在需要时构建详细上下文。
+- [x] 统一 Diagnostic：code、severity、phase、primary、related、field path、message key/args。
+- [x] parser error 只在需要时构建详细上下文。
 
 **REFACTOR / VERIFY**
 
-- [ ] 文本、JSON、状态文件和未来 Manager 共用同一模型。
-- [ ] 达诊断上限时追加 omitted 记录。
+- [x] 文本、JSON、状态文件和未来 Manager 共用同一模型。
+- [x] 达诊断上限时追加 omitted 记录。
 
-### RF4-06 `[ ] P0` 定义分层源模型和 OriginMap
+### RF4-06 `[x] P0` 定义分层源模型和 OriginMap
 
 **依赖**
 
@@ -1277,20 +1277,20 @@ tests/
 
 **RED**
 
-- [ ] 编译期类型测试/架构测试阻止 AST、parser node、comment、device snapshot 进入 RulesDocument。
-- [ ] RuleId/OriginMap 能分别定位 deny 和 redirect source/target。
+- [x] 编译期类型测试/架构测试阻止 AST、parser node、comment、device snapshot 进入 RulesDocument。
+- [x] RuleId/OriginMap 能分别定位 deny 和 redirect source/target。
 
 **GREEN**
 
-- [ ] 定义 `RulesDocument`、`RuleId`、`OriginMap<RuleId, SourceSpan>`。
-- [ ] 源码位置不写入 Canonical Policy。
+- [x] 定义 `RulesDocument`、`RuleId`、`OriginMap<RuleId, SourceSpan>`。
+- [x] 源码位置不写入 Canonical Policy。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不继续扩充旧 `PolicyDocument`。
-- [ ] 不设计跨编辑持久化 RuleId。
+- [x] 不继续扩充旧 `PolicyDocument`。
+- [x] 不设计跨编辑持久化 RuleId。
 
-### RF4-07 `[ ] P0` 解码顶层、compatibility 与应用字段
+### RF4-07 `[x] P0` 解码顶层、compatibility 与应用字段
 
 **依赖**
 
@@ -1298,21 +1298,21 @@ tests/
 
 **RED**
 
-- [ ] 覆盖 format、compatibility.allow_legacy_mount、apps、enabled、users、processes、file_picker。
-- [ ] 覆盖缺失默认值、类型错误、未知字段、重复应用、非法包名/user/process。
-- [ ] `enabled = false` 仍做 Host 静态校验但不进入策略 IR。
+- [x] 覆盖 format、compatibility.allow_legacy_mount、apps、enabled、users、processes、file_picker。
+- [x] 覆盖缺失默认值、类型错误、未知字段、重复应用、非法包名/user/process。
+- [x] `enabled = false` 仍做 Host 静态校验但不进入策略 IR。
 
 **GREEN**
 
-- [ ] 每个模块使用专一 decoder。
-- [ ] 未知字段和未知模块编译失败。
+- [x] 每个模块使用专一 decoder。
+- [x] 未知字段和未知模块编译失败。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不建立通用动态 field registry。
-- [ ] 默认值只定义一次并被测试复用。
+- [x] 不建立通用动态 field registry。
+- [x] 默认值只定义一次并被测试复用。
 
-### RF4-08 `[ ] P0` 解码 deny/redirect 并保持精确来源
+### RF4-08 `[x] P0` 解码 deny/redirect 并保持精确来源
 
 **依赖**
 
@@ -1320,26 +1320,38 @@ tests/
 
 **RED**
 
-- [ ] deny 只接受字符串数组。
-- [ ] redirect source/target 分别保留 origin span。
-- [ ] 空数组、非法元素、多行 operand、混合元素和超限规则数。
+- [x] deny 只接受字符串数组。
+- [x] redirect source/target 分别保留 origin span。
+- [x] 空数组、非法元素、多行 operand、混合元素和超限规则数。
 
 **GREEN**
 
-- [ ] 构建强类型 RulesDocument，不执行路径规范化或设备准入。
-- [ ] generated marker/AST/trivia 在 decode 完成后释放。
+- [x] 构建强类型 RulesDocument，不执行路径规范化或设备准入。
+- [x] generated marker/AST/trivia 在 decode 完成后释放。
 
 **REFACTOR / VERIFY**
 
-- [ ] parser Document 只存在单次 parse/decode 生命周期。
-- [ ] RulesDocument 不持有 parser 引用。
+- [x] parser Document 只存在单次 parse/decode 生命周期。
+- [x] RulesDocument 不持有 parser 引用。
 
 ### RF4 阶段闸门
 
-- [ ] 唯一 parser 的 TOML 1.0 gate 通过。
-- [ ] 若保留箭头，generated node 双向一一绑定、scope 优先和手写 table 拒绝通过。
-- [ ] parse、scope、type 诊断均指向原始 source。
-- [ ] RulesDocument/OriginMap 与 AST、设备状态和二进制布局隔离。
+- [x] 唯一 parser 的 TOML 1.0 gate 通过。
+- [x] 若保留箭头，generated node 双向一一绑定、scope 优先和手写 table 拒绝通过。
+- [x] parse、scope、type 诊断均指向原始 source。
+- [x] RulesDocument/OriginMap 与 AST、设备状态和二进制布局隔离。
+
+### RF4 验收记录（2026-07-27）
+
+- 实施提交/工作区版本：基于 `6027c9a` 的 RF4 工作区；未进入 RF5 语义编译。
+- RED：`pathguard_rules_parser_test` 首次因缺少 `pathguard/rules/compiler.h` 构建失败。
+- GREEN：新增唯一无异常 toml++ adapter、generated exact-span binder、AST scope validator、强类型 decoder、OriginMap 和统一文本/JSON Diagnostic；Host Release CTest `30/30` 通过。
+- Parser gate：toml-test v2.2.0 的 TOML 1.0 选集 valid 39、invalid 98 全部符合预期，并拒绝 TOML 1.1-only inline table 换行。
+- 诊断：copied operand 与 synthetic prefix parse error 均映射到原始 `rules.toml`；默认文本/JSON 不出现 `<desugared>` 或内部 generated source。
+- 解码：覆盖默认值、BOM/CRLF/Unicode、未知字段、类型/值错误、RuleId/OriginMap、规则上限、手写/混合 redirect 和 disabled app。
+- Android：`./scripts/build-native.ps1 -Abi arm64-v8a` 通过。
+- 架构边界：toml++ 为 `pathguard_rules` PRIVATE 依赖且只出现在实现文件；公开头无 toml AST，daemon/native/Zygisk 无 parser 链接。
+- 闸门结论：通过，解锁 RF5。
 
 ---
 

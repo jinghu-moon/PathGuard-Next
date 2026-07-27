@@ -207,6 +207,24 @@ add_test(
   COMMAND pathguard_rules_desugar_fuzz_smoke
 )
 
+add_executable(pathguard_rules_parser_test
+  unit/rules_parser_test.cpp
+)
+target_include_directories(pathguard_rules_parser_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_parser_test PRIVATE pathguard_rules)
+add_test(NAME pathguard_rules_parser_test COMMAND pathguard_rules_parser_test)
+
+add_executable(pathguard_rules_document_test
+  unit/rules_document_test.cpp
+)
+target_include_directories(pathguard_rules_document_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_document_test PRIVATE pathguard_rules)
+add_test(NAME pathguard_rules_document_test COMMAND pathguard_rules_document_test)
+
 if(PATHGUARD_BUILD_FUZZERS)
   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "PATHGUARD_BUILD_FUZZERS requires Clang/libFuzzer")
