@@ -18,7 +18,7 @@ PathGuard Next 的同步重定向只使用 mount namespace 和 VFS。配置监�
 异步事件面：fanotify -> bounded queue -> audit/export/move/delete
 ```
 
-配置面的规则格式、箭头脱糖和编译语言选择分别由 `docs/04-rule-file-refactoring-design.md` 与 `docs/05-rule-arrow-desugarer-design.md` 约束。Phase D0 只会选择一个完整规则编译器；无论最终使用 Rust/`toml_edit` 还是 C++/toml++，parser、诊断和 Rust runtime（如采用）都不得进入下方 Zygisk 同步数据面。
+配置面的规则格式、箭头脱糖和编译语言选择分别由 `docs/04-rule-file-refactoring-design.md` 与 `docs/05-rule-arrow-desugarer-design.md` 约束。Phase D0 已冻结唯一 C++20/toml++ v3.4.0 编译器；parser、诊断和控制面编译代码不得进入下方 Zygisk 同步数据面。
 
 禁止使用 PLT Hook、JNI Hook 或 fanotify 写后搬运实现基础 `redirect`。Hook 只能作为用户显式启用的 provider 兼容后端，不得改变基础能力的成功状态。
 

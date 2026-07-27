@@ -113,7 +113,7 @@ schema 2 和 `policy.bin` format v5 中，但不属于当前可执行能力。
 - 无 Hook 的匹配应用：模块卸载后的额外 RSS/PSS。
 - 有 Hook 的匹配应用：Hook 安装后的常驻 RSS/PSS。
 
-daemon/CLI 可继续作为 C++ 可执行文件；规则编译器 D0 会比较 C++/toml++ 与 Rust/`toml_edit`，若选择 Rust，只把完整控制面规则编译器静态链接到 daemon 和需要离线 compile/validate 的 CLI。该选择必须单独报告 daemon/CLI 的 stripped 体积、峰值内存和编译延迟，不能改变 Zygisk 指标。Zygisk 已拆为独立 `APP_STL=none` 目标，移除 C++ STL/atomic 依赖并使用 C 类型和编译器原子内建；当前最终构建 arm64 Zygisk 库为 71,280B，armeabi-v7a 为 57,628B，ELF 不再依赖 libc++，并必须继续保持不链接 Rust runtime、TOML parser 或规则诊断。
+daemon/CLI 保持 C++ 可执行文件；规则编译器 D0 已冻结 C++20 + toml++ v3.4.0，完整编译链只静态链接到 daemon 和离线 compile/validate CLI。编译延迟、峰值内存与 publish/fsync 单独报告，不能混入 Zygisk 指标。Zygisk 已拆为独立 `APP_STL=none` 目标，移除 C++ STL/atomic 依赖并使用 C 类型和编译器原子内建；当前最终构建 arm64 Zygisk 库为 71,280B，armeabi-v7a 为 57,628B，ELF 不再依赖 libc++，并必须继续保持不链接 Rust runtime、TOML parser 或规则诊断。
 
 ## 4. 确定性改动与待验证改动
 

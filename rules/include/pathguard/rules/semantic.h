@@ -83,10 +83,6 @@ struct PolicyBlob {
     std::uint64_t content_generation = 0;
 };
 
-struct CompileStatistics {
-    std::size_t path_normalizations = 0;
-};
-
 struct DeviceSnapshot {
     MountBackendCapabilities mount;
     bool provider_supported = false;

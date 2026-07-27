@@ -1,0 +1,4 @@
+format = 1
+[apps."com.example.app"]
+users = [0]
+redirect = ["Source" -> "Target"]

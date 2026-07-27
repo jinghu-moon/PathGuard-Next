@@ -14,6 +14,14 @@ RF2 提供两个层次：
   仅在 Clang 构建中启用 `PATHGUARD_BUILD_FUZZERS=ON`。
 - `pathguard_rules_desugar_fuzz_smoke` 与 `pathguard_rules_desugar_fuzzer`
   覆盖 FormatProbe、scanner、单次 emitter、RewriteMap 和畸形前缀组合。
+- `pathguard_rules_compile_fuzz_smoke` 与 `pathguard_rules_compile_fuzzer`
+  覆盖 parser/scope、decoder、语义、encoder 和独立 verifier；成功结果必须可复验，
+  任一 error 不得携带 blob。
+
+固定工具链为 LLVM/Clang 18 compatible libFuzzer，日常 smoke 使用仓库固定
+PRNG seed，长任务使用 `-max_total_time=3600 -timeout=10 -rss_limit_mb=512`。
+发现崩溃后先用 `-minimize_crash=1` 最小化，再把输入登记为 `.case` 和普通
+回归测试，不允许仅加入 ignore 列表。
 
 libFuzzer 的可写 corpus 和 artifact 必须放在 `build/` 下，不得直接把
 `tests/fuzz/seeds` 作为可写 corpus 目录。

@@ -344,7 +344,7 @@ PathGuard-Next/
 
 ### 9.1 `core`
 
-无 Android UI 依赖的核心逻辑。运行时 reader 保持 C++，纯规则编译链由 D0 在 Rust/`toml_edit` 与 C++/toml++ 中选择唯一实现，负责：
+无 Android UI 依赖的核心逻辑。运行时 reader 保持 C++；D0 已冻结纯规则编译链为 C++20 + toml++ v3.4.0 + TOML 1.0，负责：
 
 - `rules.toml` 格式探测、脱糖、解析与诊断。
 - schema 校验。
@@ -856,7 +856,7 @@ T_total           对应用启动的总影响
 
 ## 22. 构建与工程约束
 
-- 规则编译链是项目引入 Rust 的首选边界。Phase D0 应以同一套 golden 对比 C++/toml++ 与 Rust/`toml_edit`，若 Rust 方案通过 TOML 版本、source span、Android 构建、资源预算和 `policy.bin` 字节一致性验证，则从规则源字节到已验证 `PolicyBlob` 的纯编译阶段整体使用 Rust，不在脱糖器和 TOML AST 之间增加中间 FFI。
+- 规则编译链 D0 已用同一套 golden 比较 C++/toml++ 与 Rust/`toml_edit`，最终选择 C++20 + toml++ v3.4.0；生产构建不得恢复 Rust 中间 FFI、双 parser 或双编译器。
 - 首版不因规则编译器选用 Rust 而重写 daemon、CLI 或 companion。现有 C++ daemon/CLI 只通过一个窄 C ABI 调用完整规则编译请求；companion 是否迁移 Rust 属于独立决策，不能借配置重构扩大范围。
 - Zygisk `.so` 保持 C++20 薄实现，只包含策略快照 reader、身份提取和 companion client，不将完整 Rust core 静态链接进每个应用进程。
 - 如果 Rust 出现在 Zygisk 边界，crate 必须 `panic = "abort"`，FFI 入口不得允许 panic、异常或分配失败穿过边界；`catch_unwind` 不能用于捕获 abort panic。

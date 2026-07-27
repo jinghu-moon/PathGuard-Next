@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -20,11 +21,69 @@
 namespace pathguard::rules {
 namespace {
 
+using Clock = std::chrono::steady_clock;
+
+std::uint64_t ElapsedNs(Clock::time_point start) {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now() - start).count());
+}
+
 bool HasErrors(const std::vector<Diagnostic>& diagnostics) {
     return std::any_of(diagnostics.begin(), diagnostics.end(),
                        [](const Diagnostic& diagnostic) {
                            return diagnostic.severity == DiagnosticSeverity::kError;
                        });
+}
+
+ByteSpan OriginSpan(const OriginMap& origins, RuleId id);
+void AddDiagnostic(std::vector<Diagnostic>* diagnostics,
+                   std::string_view code, std::string_view message,
+                   ByteSpan primary, DiagnosticSeverity severity,
+                   const RulesLimits& limits,
+                   std::optional<ByteSpan> related = std::nullopt);
+
+bool AddExpanded(std::size_t value, std::size_t limit, std::size_t* total) {
+    if (value > limit || *total > limit - value) return false;
+    *total += value;
+    return true;
+}
+
+bool ValidateExpandedRuleLimit(const RulesDocument& document,
+                               const OriginMap& origins,
+                               const RulesLimits& limits,
+                               std::vector<Diagnostic>* diagnostics) {
+    std::size_t expanded = 0;
+    for (const AppRules& app : document.apps) {
+        if (!app.enabled) continue;
+        const std::size_t users = std::max<std::size_t>(app.users.size(), 1);
+        const std::size_t processes = std::max<std::size_t>(app.processes.size(), 1);
+        const std::size_t rules = app.deny.size() + app.redirects.size();
+        if (rules != 0
+            && (users > limits.max_expanded_rules / rules
+                || users * rules > limits.max_expanded_rules / processes
+                || !AddExpanded(users * rules * processes,
+                                limits.max_expanded_rules, &expanded))) {
+            RuleId first = !app.redirects.empty() ? app.redirects.front().id
+                                                  : app.deny.front().id;
+            AddDiagnostic(diagnostics, kResourceLimit,
+                          "expanded_rule_limit", OriginSpan(origins, first),
+                          DiagnosticSeverity::kError, limits);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ExceedsPathLimits(std::string_view input, const RulesLimits& limits) {
+    if (input.size() > limits.max_path_bytes) return true;
+    std::size_t components = input.empty() ? 0 : 1;
+    for (const char value : input) {
+        if (value == '/' && ++components > limits.max_path_components) {
+            return true;
+        }
+    }
+    return components > limits.max_path_components;
 }
 
 ByteSpan OriginSpan(const OriginMap& origins, RuleId id) {
@@ -36,7 +95,7 @@ void AddDiagnostic(std::vector<Diagnostic>* diagnostics,
                    std::string_view code, std::string_view message,
                    ByteSpan primary, DiagnosticSeverity severity,
                    const RulesLimits& limits,
-                   std::optional<ByteSpan> related = std::nullopt) {
+                   std::optional<ByteSpan> related) {
     if (diagnostics->size() >= limits.max_diagnostics) return;
     Diagnostic diagnostic;
     diagnostic.code = code;
@@ -265,15 +324,23 @@ void ValidateProviderAcrossApps(const ResolvedPolicy& policy,
     }
 }
 
-std::optional<PolicyBlob> EncodeAndVerify(const CanonicalPolicy& canonical) {
+std::optional<PolicyBlob> EncodeAndVerify(const CanonicalPolicy& canonical,
+                                          CompileStatistics* statistics) {
     pathguard::PolicyDocument document = ToPolicyDocument(canonical);
     PolicyBlob blob;
     pathguard::ParseError error;
+    const auto encode_started = Clock::now();
     if (!pathguard::EncodePolicy(document, &blob.bytes, &error)) {
+        statistics->encode_ns += ElapsedNs(encode_started);
         return std::nullopt;
     }
+    statistics->encode_ns += ElapsedNs(encode_started);
     blob.content_generation = pathguard::ComputeContentGeneration(document);
-    if (blob.content_generation == 0 || !VerifyPolicyBlob(canonical, blob)) {
+    const auto verify_started = Clock::now();
+    const bool verified = blob.content_generation != 0
+        && VerifyPolicyBlob(canonical, blob);
+    statistics->verify_ns += ElapsedNs(verify_started);
+    if (!verified) {
         return std::nullopt;
     }
     return blob;
@@ -331,8 +398,13 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
                               const RulesLimits& limits) {
     RulesBuildResult output;
     RulesCompileResult parsed = ParseRulesDocument(source, limits);
+    output.statistics = parsed.statistics;
     output.diagnostics = std::move(parsed.diagnostics);
     if (!parsed.document.has_value() || HasErrors(output.diagnostics)) {
+        return output;
+    }
+    if (!ValidateExpandedRuleLimit(*parsed.document, parsed.origins, limits,
+                                   &output.diagnostics)) {
         return output;
     }
 
@@ -348,7 +420,15 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
         app.file_picker = source_app.file_picker;
         app.deny.reserve(source_app.deny.size());
         app.redirects.reserve(source_app.redirects.size());
+        const auto normalize_started = Clock::now();
         for (const DenyRule& rule : source_app.deny) {
+            if (ExceedsPathLimits(rule.path, limits)) {
+                AddDiagnostic(&output.diagnostics, kResourceLimit,
+                              "path_resource_limit",
+                              OriginSpan(parsed.origins, rule.id),
+                              DiagnosticSeverity::kError, limits);
+                continue;
+            }
             auto path = NormalizeRulePath(rule.path, limits, &output.statistics);
             if (!path.has_value()) {
                 AddDiagnostic(&output.diagnostics, kPathInvalid, "invalid_path",
@@ -359,6 +439,14 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
             app.deny.push_back({rule.id, std::move(*path)});
         }
         for (const RedirectRule& rule : source_app.redirects) {
+            if (ExceedsPathLimits(rule.source, limits)
+                || ExceedsPathLimits(rule.target, limits)) {
+                AddDiagnostic(&output.diagnostics, kResourceLimit,
+                              "path_resource_limit",
+                              OriginSpan(parsed.origins, rule.id),
+                              DiagnosticSeverity::kError, limits);
+                continue;
+            }
             auto from = NormalizeRulePath(rule.source, limits, &output.statistics);
             auto to = NormalizeRulePath(rule.target, limits, &output.statistics);
             if (!from.has_value() || !to.has_value()) {
@@ -370,15 +458,21 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
             app.redirects.push_back(
                 {rule.id, std::move(*from), std::move(*to)});
         }
+        output.statistics.normalize_ns += ElapsedNs(normalize_started);
+        const auto conflict_started = Clock::now();
         ValidateRedirects(&app, parsed.origins, limits, &output.diagnostics);
         ValidateDeny(&app, parsed.origins, limits, &output.diagnostics);
+        output.statistics.conflict_ns += ElapsedNs(conflict_started);
         resolved.apps.push_back(std::move(app));
     }
+    const auto cross_conflict_started = Clock::now();
     ValidateProviderAcrossApps(resolved, parsed.origins, limits,
                                &output.diagnostics);
+    output.statistics.conflict_ns += ElapsedNs(cross_conflict_started);
     output.resolved = resolved;
     if (HasErrors(output.diagnostics)) return output;
 
+    const auto canonicalize_started = Clock::now();
     CanonicalPolicy canonical;
     canonical.allow_legacy_mount = resolved.allow_legacy_mount;
     for (const ResolvedAppPolicy& source_app : resolved.apps) {
@@ -412,13 +506,14 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
                  const CanonicalAppPolicy& rhs) {
                   return lhs.package < rhs.package;
               });
+    output.statistics.canonicalize_ns = ElapsedNs(canonicalize_started);
     output.canonical = canonical;
     output.requirements.mount_actions = kMountActionRedirect;
     output.requirements.provider = std::any_of(
         canonical.apps.begin(), canonical.apps.end(),
         [](const CanonicalAppPolicy& app) { return app.file_picker; });
     output.requirements.topology = !canonical.apps.empty();
-    output.blob = EncodeAndVerify(canonical);
+    output.blob = EncodeAndVerify(canonical, &output.statistics);
     if (!output.blob.has_value()) {
         AddDiagnostic(&output.diagnostics, kPolicyEncode,
                       "policy_encode_failed", {},

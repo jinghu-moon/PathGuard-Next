@@ -42,6 +42,22 @@ LOCAL_STATIC_LIBRARIES := pathguard_rules_compiler
 include $(BUILD_EXECUTABLE)
 
 include $(CLEAR_VARS)
+LOCAL_MODULE := pathguard_policy_reader_probe
+LOCAL_SRC_FILES := ../tests/device/rules/zygisk_policy_probe.cpp
+LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include
+include $(BUILD_EXECUTABLE)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := pathguard_rules_benchmark
+LOCAL_SRC_FILES := ../tests/perf/policy_benchmark.cpp \
+    ../daemon/src/rules_control.cpp
+LOCAL_C_INCLUDES := $(ROOT_PATH)/rules/include $(ROOT_PATH)/core/include \
+    $(ROOT_PATH)/daemon/include $(ROOT_PATH)/third_party/tomlplusplus
+LOCAL_CPPFLAGS := -DPATHGUARD_ANDROID=1
+LOCAL_STATIC_LIBRARIES := pathguard_rules_compiler
+include $(BUILD_EXECUTABLE)
+
+include $(CLEAR_VARS)
 LOCAL_MODULE := pathguardd
 LOCAL_SRC_FILES := ../daemon/src/main.cpp $(CORE_SOURCES) \
     ../daemon/src/rules_control.cpp \

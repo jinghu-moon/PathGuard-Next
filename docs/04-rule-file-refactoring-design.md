@@ -1,6 +1,6 @@
 # PathGuard Next 规则文件重构设计
 
-> 状态：Accepted（RF1/D0 已冻结编译语言、parser 与箭头决策）
+> 状态：Implemented（RF8 发布闸门通过；RF9 辅助工具独立演进）
 >
 > 文档版本：0.6
 >

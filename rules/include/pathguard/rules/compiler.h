@@ -15,6 +15,7 @@ struct RulesCompileResult {
     std::optional<RulesDocument> document;
     OriginMap origins;
     std::vector<Diagnostic> diagnostics;
+    CompileStatistics statistics;
 
     bool ok() const { return document.has_value() && diagnostics.empty(); }
 };

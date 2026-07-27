@@ -2,3 +2,4 @@
 rules-string	rules-string-fc1e00f7fbc3a5b3.seed	fc1e00f7fbc3a5b3e8dc8688d03f89e9b006daf190f679ec88823f30815a0f94	TOML string/comment boundary mutation seed
 rules-candidate	rules-candidate-c69f97c7c2b378df.seed	c69f97c7c2b378df7a86bed7cc567b05a3411797025fd9605b1c34aeb93e30ec	container and arrow candidate mutation seed
 rules-desugar	rules-desugar-3b6c80b98784e2b9.seed	3b6c80b98784e2b9a7d42a2500104281ed2a24d512f551efa947013f40af2292	full desugar pipeline and malformed prefix mutation seed
+rules-compile	rules-compile-627a6c43ba36db2d.seed	627a6c43ba36db2d52c79e89611e3fc0c1bee1d0139ac935eadbae4ad5f6d2d0	complete parse, scope, semantic, admission, encoder and verifier seed

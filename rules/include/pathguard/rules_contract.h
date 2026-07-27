@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 namespace pathguard::rules {
@@ -16,10 +17,29 @@ struct RulesLimits {
     std::size_t max_path_components = 256;
     std::size_t max_string_token_bytes = 4096;
     std::size_t max_rewrites = 4096;
-    std::size_t max_rewrite_segments = 24'576;
+    std::size_t max_rewrite_segments = 24'577;
     std::size_t max_diagnostics = 64;
     std::size_t max_related_spans = 8;
     std::size_t max_generated_bytes = 2 * 1024 * 1024;
+};
+
+struct CompileStatistics {
+    std::size_t source_bytes = 0;
+    std::size_t generated_bytes = 0;
+    std::size_t arrow_count = 0;
+    std::size_t rewrite_count = 0;
+    std::size_t path_normalizations = 0;
+    std::uint64_t format_probe_ns = 0;
+    std::uint64_t lex_ns = 0;
+    std::uint64_t rewrite_ns = 0;
+    std::uint64_t parse_ns = 0;
+    std::uint64_t scope_ns = 0;
+    std::uint64_t decode_ns = 0;
+    std::uint64_t normalize_ns = 0;
+    std::uint64_t conflict_ns = 0;
+    std::uint64_t canonicalize_ns = 0;
+    std::uint64_t encode_ns = 0;
+    std::uint64_t verify_ns = 0;
 };
 
 inline constexpr std::string_view kArrowContext = "PG-ARROW-CONTEXT";

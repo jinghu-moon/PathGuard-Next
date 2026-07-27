@@ -205,6 +205,38 @@ int main() {
     assert(failed_publish.state.deployment_epoch
            == readmitted.state.deployment_epoch);
 
+    Write(config / kRulesFileName, ValidRules("Restart"));
+    const ReconcileResult before_restart = reconciler.Reconcile();
+    assert(before_restart.ok() && before_restart.published);
+    Reconciler restarted(config, run, RulesLimits{}, unsupported);
+    assert(restarted.state().active_content_generation
+           == before_restart.state.active_content_generation);
+    assert(restarted.state().deployment_epoch
+           == before_restart.state.deployment_epoch);
+    const ReconcileResult recovered = restarted.Reconcile();
+    assert(recovered.ok() && recovered.unchanged && !recovered.published);
+    assert(recovered.state.deployment_epoch
+           == before_restart.state.deployment_epoch);
+
+    Write(run / "rules-status.txt",
+          "active_content_generation: 1\ndeployment_epoch: 99\n");
+    Reconciler stale_status(config, run, RulesLimits{}, unsupported);
+    assert(stale_status.state().active_content_generation
+           == before_restart.state.active_content_generation);
+    assert(stale_status.state().deployment_epoch == 1);
+
+    std::vector<std::uint8_t> corrupt = ReadBytes(run / "policy.bin");
+    corrupt[0] ^= 1U;
+    {
+        std::ofstream output(run / "policy.bin",
+                             std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(corrupt.data()),
+                     static_cast<std::streamsize>(corrupt.size()));
+    }
+    Reconciler corrupt_policy(config, run, RulesLimits{}, unsupported);
+    assert(corrupt_policy.state().active_content_generation == 0);
+    assert(corrupt_policy.state().deployment_epoch == 0);
+
     fs::remove_all(root);
     return 0;
 }

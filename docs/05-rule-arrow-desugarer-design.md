@@ -1,6 +1,6 @@
 # PathGuard Rules 箭头脱糖器设计
 
-> 状态：Accepted（Phase D0 已通过，进入 D1 前置完成）
+> 状态：Implemented（RF2～RF8 已完成并通过 Host/Android 闸门）
 >
 > 文档版本：0.4
 >

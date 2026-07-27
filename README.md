@@ -24,6 +24,34 @@ The architecture baseline and performance plan are documented in:
 - [Redirect subsystem design](docs/03-redirect-subsystem-design.md)
 - [Rule file refactoring design](docs/04-rule-file-refactoring-design.md)
 - [Arrow desugarer and rules compiler D0](docs/05-rule-arrow-desugarer-design.md)
+- [Rules refactoring TDD checklist](docs/06-rule-file-refactoring-and-desugarer-tdd-implementation-checklist.md)
+
+## Rules
+
+`module/config/rules.toml` is the only configuration source. Format 1 uses
+TOML 1.0 plus the local array-element syntax `"source" -> "target"` for
+redirects. The C++20 control-plane compiler uses toml++ v3.4.0 and publishes
+verified policy format v5 bytes; Zygisk only reads that frozen binary.
+
+```powershell
+pathguardctl validate module/config/rules.toml --host
+pathguardctl compile module/config/rules.toml output-policy.bin
+pathguardctl reload module
+pathguardctl status module
+```
+
+The daemon is the only writer of `module/run/policy.bin`. Invalid source,
+unsupported device admission, verification, fsync, or rename failures retain
+the previous valid generation.
+
+## Tests
+
+```powershell
+cmake -S . -B build -DPATHGUARD_BUILD_TESTS=ON
+cmake --build build --config Release --parallel 2
+ctest --test-dir build -C Release --output-on-failure
+./scripts/build-native.ps1 -Abi arm64-v8a
+```
 
 ## License
 

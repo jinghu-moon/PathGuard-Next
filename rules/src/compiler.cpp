@@ -1,6 +1,7 @@
 #include "pathguard/rules/compiler.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -13,9 +14,19 @@
 #include <vector>
 
 #include "toml.hpp"
+#include "pathguard/rules/arrow_scanner.h"
+#include "pathguard/rules/format_probe.h"
 
 namespace pathguard::rules {
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+std::uint64_t ElapsedNs(Clock::time_point start) {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now() - start).count());
+}
 
 struct InlineNode {
     const toml::table* table = nullptr;
@@ -32,31 +43,43 @@ std::size_t Utf8Width(unsigned char value) {
     return 1;
 }
 
-std::uint32_t PositionToByte(std::string_view source,
-                             toml::source_position position) {
-    std::size_t offset = 0;
-    std::size_t line = 1;
-    while (offset < source.size() && line < position.line) {
-        if (source[offset++] == '\n') ++line;
-    }
-    std::size_t column = 1;
-    while (offset < source.size() && column < position.column
-           && source[offset] != '\n') {
-        if (source[offset] == '\r') {
-            ++offset;
-        } else {
-            offset += std::min(Utf8Width(
-                static_cast<unsigned char>(source[offset])), source.size() - offset);
-            ++column;
+class GeneratedPositionIndex {
+public:
+    explicit GeneratedPositionIndex(std::string_view source)
+        : source_(source), line_starts_{0} {
+        for (std::uint32_t offset = 0; offset < source.size(); ++offset) {
+            if (source[offset] == '\n') line_starts_.push_back(offset + 1);
         }
     }
-    return static_cast<std::uint32_t>(offset);
-}
 
-ByteSpan RegionSpan(std::string_view source, const toml::source_region& region) {
-    return {PositionToByte(source, region.begin),
-            PositionToByte(source, region.end)};
-}
+    std::uint32_t ToByte(toml::source_position position) const {
+        if (position.line == 0 || position.line > line_starts_.size()) {
+            return static_cast<std::uint32_t>(source_.size());
+        }
+        std::size_t offset = line_starts_[position.line - 1];
+        std::size_t column = 1;
+        while (offset < source_.size() && column < position.column
+               && source_[offset] != '\n') {
+            if (source_[offset] == '\r') {
+                ++offset;
+            } else {
+                offset += std::min(Utf8Width(
+                    static_cast<unsigned char>(source_[offset])),
+                    source_.size() - offset);
+                ++column;
+            }
+        }
+        return static_cast<std::uint32_t>(offset);
+    }
+
+    ByteSpan Region(const toml::source_region& region) const {
+        return {ToByte(region.begin), ToByte(region.end)};
+    }
+
+private:
+    std::string_view source_;
+    std::vector<std::uint32_t> line_starts_;
+};
 
 bool IsPackageName(std::string_view value) {
     std::size_t components = 0;
@@ -99,16 +122,16 @@ bool IsRedirectScope(const std::vector<std::string>& path) {
 
 void CollectInlineNodes(const toml::node& node,
                         std::vector<std::string>* path,
-                        std::string_view generated_source,
+                        const GeneratedPositionIndex& positions,
                         std::vector<InlineNode>* output) {
     if (const toml::table* table = node.as_table()) {
         if (table->is_inline()) {
-            output->push_back({table, RegionSpan(generated_source, table->source()),
+            output->push_back({table, positions.Region(table->source()),
                                *path, nullptr});
         }
         table->for_each([&](const toml::key& key, const toml::node& child) {
             path->push_back(std::string(key.str()));
-            CollectInlineNodes(child, path, generated_source, output);
+            CollectInlineNodes(child, path, positions, output);
             path->pop_back();
         });
         return;
@@ -116,7 +139,7 @@ void CollectInlineNodes(const toml::node& node,
     if (const toml::array* array = node.as_array()) {
         for (std::size_t index = 0; index < array->size(); ++index) {
             path->push_back(std::to_string(index));
-            CollectInlineNodes(*array->get(index), path, generated_source, output);
+            CollectInlineNodes(*array->get(index), path, positions, output);
             path->pop_back();
         }
     }
@@ -134,21 +157,31 @@ public:
             return std::move(result_);
         }
         generated_source_ = desugared_.parser_input(source_);
+        GeneratedPositionIndex positions(generated_source_);
+        positions_ = &positions;
+        const auto parse_started = Clock::now();
         toml::parse_result parsed = toml::parse(generated_source_, source_.file_name());
+        result_.statistics.parse_ns = ElapsedNs(parse_started);
         if (!parsed) {
-            ByteSpan generated = RegionSpan(generated_source_, parsed.error().source());
+            ByteSpan generated = positions_->Region(parsed.error().source());
             const auto original = desugared_.rewrite_map.MapGeneratedSpan(generated);
             Add(kTomlParse, "rules.toml_parse",
                 original.value_or(ByteSpan{0, 0}), DiagnosticPhase::kParse, "");
             return std::move(result_);
         }
         toml::table& root = parsed.table();
-        if (!BindGenerated(root)) return std::move(result_);
+        const auto scope_started = Clock::now();
+        const bool bound = BindGenerated(root);
+        result_.statistics.scope_ns = ElapsedNs(scope_started);
+        if (!bound) return std::move(result_);
         for (const GeneratedRedirect& redirect : desugared_.redirects) {
             next_rule_id_ = std::max(next_rule_id_, redirect.id + 1);
         }
         RulesDocument document;
-        if (!DecodeRoot(root, &document) || !result_.diagnostics.empty()) {
+        const auto decode_started = Clock::now();
+        const bool decoded = DecodeRoot(root, &document);
+        result_.statistics.decode_ns = ElapsedNs(decode_started);
+        if (!decoded || !result_.diagnostics.empty()) {
             result_.origins = OriginMap{};
             return std::move(result_);
         }
@@ -174,33 +207,41 @@ private:
     }
 
     ByteSpan Original(const toml::source_region& region) {
-        const ByteSpan generated = RegionSpan(generated_source_, region);
+        const ByteSpan generated = positions_->Region(region);
         return desugared_.rewrite_map.MapGeneratedSpan(generated)
             .value_or(ByteSpan{0, 0});
     }
 
     bool BindGenerated(const toml::table& root) {
         std::vector<std::string> path;
-        CollectInlineNodes(root, &path, generated_source_, &inline_nodes_);
-        std::unordered_set<std::uint64_t> unique_spans;
+        CollectInlineNodes(root, &path, *positions_, &inline_nodes_);
+        std::unordered_map<std::uint64_t, InlineNode*> nodes_by_span;
+        nodes_by_span.reserve(inline_nodes_.size());
+        for (InlineNode& node : inline_nodes_) {
+            const std::uint64_t identity =
+                (static_cast<std::uint64_t>(node.generated.begin) << 32U)
+                | node.generated.end;
+            if (!nodes_by_span.emplace(identity, &node).second) {
+                Add(kDesugarInternal, "rules.generated_duplicate", {},
+                    DiagnosticPhase::kInternal, "");
+                return false;
+            }
+        }
+        std::unordered_set<std::uint64_t> generated_spans;
+        generated_spans.reserve(desugared_.redirects.size());
         for (const GeneratedRedirect& redirect : desugared_.redirects) {
             const std::uint64_t identity =
                 (static_cast<std::uint64_t>(redirect.generated_table.begin) << 32U)
                 | redirect.generated_table.end;
-            if (!unique_spans.insert(identity).second) {
+            if (!generated_spans.insert(identity).second) {
                 Add(kDesugarInternal, "rules.generated_duplicate",
                     redirect.original_rule, DiagnosticPhase::kInternal, "");
                 return false;
             }
-            InlineNode* match = nullptr;
-            std::size_t matches = 0;
-            for (InlineNode& node : inline_nodes_) {
-                if (node.generated == redirect.generated_table) {
-                    match = &node;
-                    ++matches;
-                }
-            }
-            if (matches != 1 || match == nullptr || match->origin != nullptr) {
+            const auto found = nodes_by_span.find(identity);
+            InlineNode* match = found == nodes_by_span.end()
+                ? nullptr : found->second;
+            if (match == nullptr || match->origin != nullptr) {
                 Add(kDesugarInternal, "rules.generated_unmatched",
                     redirect.original_rule, DiagnosticPhase::kInternal, "");
                 return false;
@@ -497,6 +538,7 @@ private:
     const RulesLimits& limits_;
     RulesCompileResult result_;
     std::string_view generated_source_;
+    const GeneratedPositionIndex* positions_ = nullptr;
     std::vector<InlineNode> inline_nodes_;
     std::unordered_map<const toml::table*, const GeneratedRedirect*> bound_;
     RuleId next_rule_id_ = 1;
@@ -521,7 +563,51 @@ RulesCompileResult DecodeDesugaredRules(const SourceBuffer& source,
 
 RulesCompileResult ParseRulesDocument(const SourceBuffer& source,
                                       const RulesLimits& limits) {
-    return DecodeDesugaredRules(source, DesugarRulesSource(source, limits), limits);
+    RulesCompileResult failed;
+    failed.statistics.source_bytes = source.size();
+    const auto format_started = Clock::now();
+    const FormatProbeResult format = ProbeRulesFormat(source);
+    failed.statistics.format_probe_ns = ElapsedNs(format_started);
+    if (!format.ok()) {
+        failed.diagnostics.push_back(format.diagnostic);
+        return failed;
+    }
+
+    const auto lex_started = Clock::now();
+    ArrowScanResult lexical = ScanArrowCandidates(source, limits);
+    failed.statistics.lex_ns = ElapsedNs(lex_started);
+    failed.statistics.arrow_count = lexical.candidates.size();
+    if (!lexical.parser_allowed()) {
+        failed.diagnostics = std::move(lexical.diagnostics);
+        return failed;
+    }
+
+    std::vector<ArrowRewrite> rewrites;
+    rewrites.reserve(lexical.candidates.size());
+    for (std::size_t index = 0; index < lexical.candidates.size(); ++index) {
+        const ArrowCandidate& candidate = lexical.candidates[index];
+        rewrites.push_back({static_cast<RuleId>(index + 1), candidate.rule,
+                            candidate.source, candidate.arrow, candidate.target});
+    }
+    const auto rewrite_started = Clock::now();
+    DesugarResult desugared = EmitDesugaredSource(source, rewrites, limits);
+    failed.statistics.rewrite_ns = ElapsedNs(rewrite_started);
+    failed.statistics.rewrite_count = rewrites.size();
+    failed.statistics.generated_bytes = desugared.parser_input(source).size();
+    if (!desugared.ok()) {
+        failed.diagnostics = std::move(desugared.diagnostics);
+        return failed;
+    }
+    RulesCompileResult result = DecodeDesugaredRules(
+        source, std::move(desugared), limits);
+    result.statistics.source_bytes = failed.statistics.source_bytes;
+    result.statistics.generated_bytes = failed.statistics.generated_bytes;
+    result.statistics.arrow_count = failed.statistics.arrow_count;
+    result.statistics.rewrite_count = failed.statistics.rewrite_count;
+    result.statistics.format_probe_ns = failed.statistics.format_probe_ns;
+    result.statistics.lex_ns = failed.statistics.lex_ns;
+    result.statistics.rewrite_ns = failed.statistics.rewrite_ns;
+    return result;
 }
 
 }  // namespace pathguard::rules
