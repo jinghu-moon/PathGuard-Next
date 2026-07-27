@@ -287,6 +287,14 @@ bool AtomicWriteText(const fs::path& path, std::string_view bytes) {
             return false;
         }
     }
+    std::error_code permission_error;
+    fs::permissions(temporary,
+                    fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace, permission_error);
+    if (permission_error || !FlushFile(temporary)) {
+        RemoveIfExists(temporary);
+        return false;
+    }
 #if defined(_WIN32)
     if (MoveFileExW(temporary.c_str(), path.c_str(),
                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
@@ -297,8 +305,11 @@ bool AtomicWriteText(const fs::path& path, std::string_view bytes) {
 #else
     std::error_code error;
     fs::rename(temporary, path, error);
-    if (error) RemoveIfExists(temporary);
-    return !error;
+    if (error) {
+        RemoveIfExists(temporary);
+        return false;
+    }
+    return FlushDirectory(path.parent_path());
 #endif
 }
 
@@ -676,6 +687,78 @@ ReconcileResult Reconciler::Reconcile(PublishOptions options) {
     output.state = state_;
     output.published = published.published;
     output.unchanged = published.unchanged;
+    return output;
+}
+
+ManagerSaveResult Reconciler::SaveRules(
+        std::string_view expected_source_digest, std::string replacement,
+        SaveRulesOptions options) {
+    ManagerSaveResult output;
+    output.reconcile.state = state_;
+    auto reject = [&](std::string code, std::string message) {
+        output.error_code = std::move(code);
+        output.message = std::move(message);
+        output.reconcile.state = state_;
+        return output;
+    };
+
+    const SourceLoadResult current = LoadRulesSource(config_directory_, limits_);
+    if (!current.ok()) {
+        return reject(current.error_code, current.message);
+    }
+    if (current.snapshot->digest != expected_source_digest) {
+        return reject("PG-SOURCE-CONFLICT",
+                      "rules.toml changed since the Manager snapshot");
+    }
+
+    rules::Diagnostic source_error;
+    auto candidate = rules::SourceBuffer::Create(
+        kRulesFileName, std::move(replacement), limits_, &source_error);
+    if (!candidate.has_value()) {
+        return reject(std::string(source_error.code),
+                      std::string(source_error.message_key));
+    }
+    const rules::RulesBuildResult built = rules::CompileRules(*candidate, limits_);
+    if (!built.ok()) {
+        if (built.diagnostics.empty()) {
+            return reject(std::string(rules::kCompilerInternal),
+                          "rules compiler failed");
+        }
+        return reject(std::string(built.diagnostics.front().code),
+                      rules::RenderDiagnosticText(
+                          built.diagnostics.front(), *candidate));
+    }
+    const rules::AdmissionResult admission = rules::AdmitPolicy(
+        *built.canonical, built.requirements, snapshot_);
+    if (!admission.admitted) {
+        return reject("PG-ADMISSION-UNSUPPORTED",
+                      "device capabilities or topology do not satisfy policy requirements");
+    }
+
+    if (options.before_commit != nullptr) {
+        options.before_commit(config_directory_ / kRulesFileName);
+    }
+    const SourceLoadResult before_commit = LoadRulesSource(
+        config_directory_, limits_);
+    if (!before_commit.ok()) {
+        return reject(before_commit.error_code, before_commit.message);
+    }
+    if (before_commit.snapshot->digest != expected_source_digest) {
+        return reject("PG-SOURCE-CONFLICT",
+                      "rules.toml changed while the save was being validated");
+    }
+    if (!AtomicWriteText(config_directory_ / kRulesFileName,
+                         candidate->bytes())) {
+        return reject("PG-SOURCE-WRITE",
+                      "cannot atomically replace rules.toml");
+    }
+
+    output.saved = true;
+    output.reconcile = Reconcile();
+    if (!output.reconcile.ok()) {
+        output.error_code = output.reconcile.state.error_code;
+        output.message = output.reconcile.state.message;
+    }
     return output;
 }
 

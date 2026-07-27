@@ -13,7 +13,8 @@ RULES_COMPILER_SOURCES := \
     ../rules/src/diagnostic.cpp \
     ../rules/src/format_probe.cpp \
     ../rules/src/semantic.cpp \
-    ../rules/src/source.cpp
+    ../rules/src/source.cpp \
+    ../rules/src/tools.cpp
 DIRECTORY_RESOLVER_SOURCE := directory_resolver.cpp
 MOUNT_INFO_SNAPSHOT_SOURCE := mount_info_snapshot.cpp
 MOUNT_EXECUTOR_SOURCE := mount_executor.cpp

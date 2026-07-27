@@ -6,6 +6,7 @@ add_library(pathguard_rules_compiler STATIC
   src/format_probe.cpp
   src/semantic.cpp
   src/source.cpp
+  src/tools.cpp
 )
 
 target_include_directories(pathguard_rules_compiler

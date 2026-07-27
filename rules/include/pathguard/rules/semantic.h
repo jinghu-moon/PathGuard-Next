@@ -107,6 +107,7 @@ struct RulesBuildResult {
     std::optional<PolicyBlob> blob;
     CompileStatistics statistics;
     std::vector<Diagnostic> diagnostics;
+    OriginMap origins;
 
     bool ok() const;
 };

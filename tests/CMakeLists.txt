@@ -227,6 +227,13 @@ target_compile_definitions(pathguard_rules_pipeline_test PRIVATE
 target_link_libraries(pathguard_rules_pipeline_test PRIVATE pathguard_rules_compiler)
 add_test(NAME pathguard_rules_pipeline_test COMMAND pathguard_rules_pipeline_test)
 
+add_executable(pathguard_rules_tools_test unit/rules_tools_test.cpp)
+target_include_directories(pathguard_rules_tools_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_tools_test PRIVATE pathguard_rules_compiler)
+add_test(NAME pathguard_rules_tools_test COMMAND pathguard_rules_tools_test)
+
 add_executable(pathguard_rules_limits_test unit/rules_limits_test.cpp)
 target_include_directories(pathguard_rules_limits_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/unit
@@ -257,6 +264,19 @@ target_link_libraries(pathguard_rules_control_test PRIVATE
   pathguard_rules_control
 )
 add_test(NAME pathguard_rules_control_test COMMAND pathguard_rules_control_test)
+
+add_executable(pathguard_rules_manager_save_test
+  unit/rules_manager_save_test.cpp
+)
+target_include_directories(pathguard_rules_manager_save_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/daemon/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_manager_save_test PRIVATE
+  pathguard_rules_control
+)
+add_test(NAME pathguard_rules_manager_save_test
+  COMMAND pathguard_rules_manager_save_test)
 
 add_executable(pathguard_rules_content_generation_test
   unit/rules_content_generation_test.cpp
@@ -436,6 +456,14 @@ add_test(
     -DPATHGUARDCTL=$<TARGET_FILE:pathguardctl>
     -DPATHGUARDD=$<TARGET_FILE:pathguardd>
     -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/rules/control_plane_test.cmake
+)
+
+add_test(
+  NAME pathguard_rules_tools_cli_integration
+  COMMAND ${CMAKE_COMMAND}
+    -DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+    -DPATHGUARDCTL=$<TARGET_FILE:pathguardctl>
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/rules/rules_tools_cli_test.cmake
 )
 
 if(WIN32)

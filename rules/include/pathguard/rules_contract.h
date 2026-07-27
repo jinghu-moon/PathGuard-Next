@@ -68,5 +68,7 @@ inline constexpr std::string_view kRedirectCycle = "PG-REDIRECT-CYCLE";
 inline constexpr std::string_view kProviderConflict = "PG-PROVIDER-CONFLICT";
 inline constexpr std::string_view kExecutorUnavailable = "PG-EXECUTOR-UNAVAILABLE";
 inline constexpr std::string_view kPolicyEncode = "PG-POLICY-ENCODE";
+inline constexpr std::string_view kLintUnicode = "PG-LINT-UNICODE";
+inline constexpr std::string_view kLintLegacy = "PG-LINT-LEGACY";
 
 }  // namespace pathguard::rules

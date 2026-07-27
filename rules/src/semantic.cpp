@@ -399,11 +399,12 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
     RulesBuildResult output;
     RulesCompileResult parsed = ParseRulesDocument(source, limits);
     output.statistics = parsed.statistics;
+    output.origins = std::move(parsed.origins);
     output.diagnostics = std::move(parsed.diagnostics);
     if (!parsed.document.has_value() || HasErrors(output.diagnostics)) {
         return output;
     }
-    if (!ValidateExpandedRuleLimit(*parsed.document, parsed.origins, limits,
+    if (!ValidateExpandedRuleLimit(*parsed.document, output.origins, limits,
                                    &output.diagnostics)) {
         return output;
     }
@@ -425,14 +426,14 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
             if (ExceedsPathLimits(rule.path, limits)) {
                 AddDiagnostic(&output.diagnostics, kResourceLimit,
                               "path_resource_limit",
-                              OriginSpan(parsed.origins, rule.id),
+                              OriginSpan(output.origins, rule.id),
                               DiagnosticSeverity::kError, limits);
                 continue;
             }
             auto path = NormalizeRulePath(rule.path, limits, &output.statistics);
             if (!path.has_value()) {
                 AddDiagnostic(&output.diagnostics, kPathInvalid, "invalid_path",
-                              OriginSpan(parsed.origins, rule.id),
+                              OriginSpan(output.origins, rule.id),
                               DiagnosticSeverity::kError, limits);
                 continue;
             }
@@ -443,7 +444,7 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
                 || ExceedsPathLimits(rule.target, limits)) {
                 AddDiagnostic(&output.diagnostics, kResourceLimit,
                               "path_resource_limit",
-                              OriginSpan(parsed.origins, rule.id),
+                              OriginSpan(output.origins, rule.id),
                               DiagnosticSeverity::kError, limits);
                 continue;
             }
@@ -451,7 +452,7 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
             auto to = NormalizeRulePath(rule.target, limits, &output.statistics);
             if (!from.has_value() || !to.has_value()) {
                 AddDiagnostic(&output.diagnostics, kPathInvalid, "invalid_path",
-                              OriginSpan(parsed.origins, rule.id),
+                              OriginSpan(output.origins, rule.id),
                               DiagnosticSeverity::kError, limits);
                 continue;
             }
@@ -460,17 +461,19 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
         }
         output.statistics.normalize_ns += ElapsedNs(normalize_started);
         const auto conflict_started = Clock::now();
-        ValidateRedirects(&app, parsed.origins, limits, &output.diagnostics);
-        ValidateDeny(&app, parsed.origins, limits, &output.diagnostics);
+        ValidateRedirects(&app, output.origins, limits, &output.diagnostics);
+        ValidateDeny(&app, output.origins, limits, &output.diagnostics);
         output.statistics.conflict_ns += ElapsedNs(conflict_started);
         resolved.apps.push_back(std::move(app));
     }
     const auto cross_conflict_started = Clock::now();
-    ValidateProviderAcrossApps(resolved, parsed.origins, limits,
+    ValidateProviderAcrossApps(resolved, output.origins, limits,
                                &output.diagnostics);
     output.statistics.conflict_ns += ElapsedNs(cross_conflict_started);
-    output.resolved = resolved;
-    if (HasErrors(output.diagnostics)) return output;
+    if (HasErrors(output.diagnostics)) {
+        output.resolved = std::move(resolved);
+        return output;
+    }
 
     const auto canonicalize_started = Clock::now();
     CanonicalPolicy canonical;
@@ -507,7 +510,6 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
                   return lhs.package < rhs.package;
               });
     output.statistics.canonicalize_ns = ElapsedNs(canonicalize_started);
-    output.canonical = canonical;
     output.requirements.mount_actions = kMountActionRedirect;
     output.requirements.provider = std::any_of(
         canonical.apps.begin(), canonical.apps.end(),
@@ -519,7 +521,10 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
                       "policy_encode_failed", {},
                       DiagnosticSeverity::kError, limits);
         output.canonical.reset();
+    } else {
+        output.canonical = std::move(canonical);
     }
+    output.resolved = std::move(resolved);
     return output;
 }
 

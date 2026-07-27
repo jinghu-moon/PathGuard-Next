@@ -36,6 +36,9 @@ verified policy format v5 bytes; Zygisk only reads that frozen binary.
 ```powershell
 pathguardctl validate module/config/rules.toml --host
 pathguardctl compile module/config/rules.toml output-policy.bin
+pathguardctl lint module/config/rules.toml
+pathguardctl plan old-rules.toml new-rules.toml
+pathguardctl explain --path module/config/rules.toml com.example.app Download/file
 pathguardctl reload module
 pathguardctl status module
 ```
@@ -43,6 +46,10 @@ pathguardctl status module
 The daemon is the only writer of `module/run/policy.bin`. Invalid source,
 unsupported device admission, verification, fsync, or rename failures retain
 the previous valid generation.
+
+Manager saves use the daemon control layer with an expected `source_digest`.
+Stale, invalid, or unsupported candidates are rejected before `rules.toml` is
+replaced; successful saves still use the daemon's single publisher.
 
 ## Tests
 

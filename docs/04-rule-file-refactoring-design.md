@@ -1,10 +1,10 @@
 # PathGuard Next 规则文件重构设计
 
-> 状态：Implemented（RF8 发布闸门通过；RF9 辅助工具独立演进）
+> 状态：Implemented（RF0～RF9 全部通过）
 >
-> 文档版本：0.6
+> 文档版本：0.7
 >
-> 日期：2026-07-26
+> 日期：2026-07-27
 >
 > 适用范围：PathGuard Next 控制面、CLI、daemon 与 Manager
 

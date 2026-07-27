@@ -1,10 +1,10 @@
 # PathGuard Next 配置文件重构与箭头脱糖器 · TDD 分阶段实施任务清单
 
-> 状态：RF8 完成（下一阶段为 RF9）
+> 状态：RF0～RF9 完成
 >
-> 文档版本：0.6
+> 文档版本：0.7
 >
-> 日期：2026-07-26
+> 日期：2026-07-27
 >
 > 设计基线：`docs/04-rule-file-refactoring-design.md`、`docs/05-rule-arrow-desugarer-design.md`
 >
@@ -2136,7 +2136,7 @@ tests/
 
 本阶段不阻塞核心 `rules.toml` 切换。只有 RF8 通过后开始。
 
-### RF9-01 `[ ] P1` 实现 `lint`、`plan` 和 `explain --path`
+### RF9-01 `[x] P1` 实现 `lint`、`plan` 和 `explain --path`
 
 **依赖**
 
@@ -2144,19 +2144,21 @@ tests/
 
 **RED**
 
-- [ ] lint 冗余/遮蔽/Unicode 近似/legacy 风险。
-- [ ] plan 稳定报告新增、删除、修改。
-- [ ] explain 展示最长前缀和被遮蔽父规则。
+- [x] lint 冗余/遮蔽/Unicode 近似/legacy 风险。
+- [x] plan 稳定报告新增、删除、修改。
+- [x] explain 展示最长前缀和被遮蔽父规则。
 
 **GREEN**
 
-- [ ] 复用 Canonical Policy、OriginMap 和现有 validator，不复制规则语义。
+- [x] 复用 Canonical Policy、OriginMap 和现有 validator，不复制规则语义。
 
 **REFACTOR / VERIFY**
 
-- [ ] 工具不写活动 policy。
+- [x] 工具不写活动 policy。
 
-### RF9-02 `[ ] P1` 实现 PathGuard 专用 `fmt`（仅真实需求确认后）
+### RF9-02 `[x] P1` PathGuard 专用 `fmt` 需求门禁（N/A）
+
+> 结论：真实用户无损格式化需求尚未确认，本项按 YAGNI 判定 N/A；不实现 formatter，不建立完整 CST。以下测试条件保留为未来独立任务的启动门禁，不表示当前已实现格式化。
 
 **依赖**
 
@@ -2164,20 +2166,20 @@ tests/
 
 **RED**
 
-- [ ] 保留箭头、注释、头部、行尾注释、空行和跨行规则。
-- [ ] 无法无损时拒绝覆盖。
+- [x] N/A：仅在真实 formatter 需求确认后建立上述 RED 用例。
+- [x] N/A：当前没有格式化写回入口，因而不会发生有损覆盖。
 
 **GREEN**
 
-- [ ] 仅在真实用户需求确认后实现。
-- [ ] 默认 stdout/新文件，原地写需额外安全检查。
+- [x] 真实用户需求启动条件未满足，不创建生产实现。
+- [x] N/A：未提供 stdout、新文件或原地格式化命令。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不直接调用严格 TOML formatter 改写扩展源。
-- [ ] 不让核心 compiler 持久化完整 CST。
+- [x] 未调用严格 TOML formatter 改写扩展源。
+- [x] 核心 compiler 不持久化完整 CST。
 
-### RF9-03 `[ ] P1` Manager 复用 daemon 编译与乐观并发
+### RF9-03 `[x] P1` Manager 复用 daemon 编译与乐观并发
 
 **依赖**
 
@@ -2185,23 +2187,33 @@ tests/
 
 **RED**
 
-- [ ] Manager 使用过期 source_digest 保存时被拒绝。
-- [ ] UI 显示 source/candidate/active/deployment/capability/topology 不混淆。
-- [ ] Manager 不复制 parser/validator。
+- [x] Manager 使用过期 source_digest 保存时被拒绝。
+- [x] UI/协议模型分别暴露 source/candidate/active/deployment/capability/topology。
+- [x] Manager 保存入口不复制 parser/validator。
 
 **GREEN**
 
-- [ ] 通过 daemon 统一 validate/admission/diagnostic。
-- [ ] 局部编辑仅在真实需求出现时建立独立 rules_editor。
+- [x] 通过 daemon 统一 validate/admission/diagnostic。
+- [x] 局部编辑真实需求尚未出现，不建立 rules_editor。
 
 **REFACTOR / VERIFY**
 
-- [ ] 无法保留注释时不整文件覆盖。
+- [x] 保存 API 只接受调用方提交的完整替换文本；daemon 不重排或重建 TOML，失败候选不覆盖源文件。
 
 ### RF9 阶段闸门
 
-- [ ] 辅助工具只复用已验证编译链。
-- [ ] fmt/Manager 没有成为第二输入语义或第二发布者。
+- [x] 辅助工具只复用已验证编译链。
+- [x] fmt/Manager 没有成为第二输入语义或第二发布者。
+
+### RF9 验收记录（2026-07-27）
+
+- RED：`pathguard_rules_tools_test`、`pathguard_rules_tools_cli_integration` 和 `pathguard_rules_manager_save_test` 分别先因缺失工具行为、CLI 命令与 `Reconciler::SaveRules` 失败。
+- GREEN：实现 `lint`、稳定 `plan`、最长前缀 `explain --path`；Manager 保存执行两次 source digest CAS、共享编译/准入、耐久原子源码替换，并回到唯一 Reconciler/Publisher。
+- YAGNI：`fmt` 的真实需求门禁未触发，未加入完整 CST、严格 TOML formatter 写回或 rules_editor。
+- Host Release：47/47 通过；RF9 新增的工具单测、CLI 集成和 Manager CAS 单测全部通过。
+- Android arm64、Host/Android parity、Zygisk ELF 隔离和 Alioth/R1 垂直链路全部通过。
+- 完整报告：`docs/rules-compiler-rf9-verification.md`。
+- 闸门结论：通过；RF0～RF9 实施主线完成。
 
 ---
 

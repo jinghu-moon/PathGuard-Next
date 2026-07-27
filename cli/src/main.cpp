@@ -11,6 +11,7 @@
 #include "pathguard/rules/diagnostic.h"
 #include "pathguard/rules/semantic.h"
 #include "pathguard/rules/source.h"
+#include "pathguard/rules/tools.h"
 
 namespace fs = std::filesystem;
 
@@ -139,6 +140,123 @@ static int ValidateOrCompile(const std::string& command, int argc, char** argv) 
     return 0;
 }
 
+static void PrintDiagnostics(
+        const pathguard::rules::RulesBuildResult& result,
+        const pathguard::rules::SourceBuffer& source,
+        bool errors_only = false) {
+    using namespace pathguard::rules;
+    for (const Diagnostic& diagnostic : result.diagnostics) {
+        if (errors_only
+            && diagnostic.severity != DiagnosticSeverity::kError) continue;
+        std::cerr << RenderDiagnosticText(diagnostic, source) << '\n';
+    }
+}
+
+static int LintRulesFile(const fs::path& path) {
+    using namespace pathguard::rules;
+    std::optional<SourceBuffer> source;
+    std::string load_error;
+    const RulesBuildResult result = CompileRulesFile(path, &source, &load_error);
+    if (!load_error.empty()) {
+        std::cerr << load_error << '\n';
+        return 1;
+    }
+    if (!source.has_value()) return 1;
+    PrintDiagnostics(result, *source, true);
+    for (const Diagnostic& diagnostic : LintRules(result, RulesLimits{})) {
+        std::cout << RenderDiagnosticText(diagnostic, *source) << '\n';
+    }
+    return result.ok() ? 0 : 1;
+}
+
+static const char* ChangeName(pathguard::rules::PolicyChangeKind kind) {
+    using pathguard::rules::PolicyChangeKind;
+    switch (kind) {
+        case PolicyChangeKind::kAdd: return "add";
+        case PolicyChangeKind::kRemove: return "remove";
+        case PolicyChangeKind::kModify: return "modify";
+    }
+    return "unknown";
+}
+
+static int PlanRulesFiles(const fs::path& before_path,
+                          const fs::path& after_path) {
+    using namespace pathguard::rules;
+    std::optional<SourceBuffer> before_source;
+    std::optional<SourceBuffer> after_source;
+    std::string error;
+    const RulesBuildResult before = CompileRulesFile(
+        before_path, &before_source, &error);
+    if (!error.empty() || !before_source.has_value()) {
+        std::cerr << (error.empty() ? "invalid old rules.toml" : error) << '\n';
+        return 1;
+    }
+    if (!before.ok()) {
+        PrintDiagnostics(before, *before_source);
+        return 1;
+    }
+    error.clear();
+    const RulesBuildResult after = CompileRulesFile(
+        after_path, &after_source, &error);
+    if (!error.empty() || !after_source.has_value()) {
+        std::cerr << (error.empty() ? "invalid new rules.toml" : error) << '\n';
+        return 1;
+    }
+    if (!after.ok()) {
+        PrintDiagnostics(after, *after_source);
+        return 1;
+    }
+    for (const PolicyChange& change :
+         BuildPolicyPlan(*before.canonical, *after.canonical)) {
+        std::cout << ChangeName(change.kind) << ' ' << change.package << ' '
+                  << change.source;
+        if (!change.before_target.empty()) {
+            std::cout << " from=" << change.before_target;
+        }
+        if (!change.after_target.empty()) {
+            std::cout << " to=" << change.after_target;
+        }
+        std::cout << '\n';
+    }
+    return 0;
+}
+
+static int ExplainRulesPath(const fs::path& rules_path,
+                            std::string_view package,
+                            std::string_view path) {
+    using namespace pathguard::rules;
+    std::optional<SourceBuffer> source;
+    std::string error;
+    const RulesBuildResult result = CompileRulesFile(
+        rules_path, &source, &error);
+    if (!error.empty() || !source.has_value()) {
+        std::cerr << (error.empty() ? "invalid rules.toml" : error) << '\n';
+        return 1;
+    }
+    if (!result.resolved.has_value()) {
+        PrintDiagnostics(result, *source);
+        return 1;
+    }
+    const PathExplanation explanation = ExplainPath(
+        *result.resolved, package, path, RulesLimits{});
+    std::cout << "package=" << explanation.package
+              << "\npath=" << explanation.query << '\n';
+    if (!explanation.source.has_value()) {
+        std::cout << "match=none\nshadowed_parent=none\n";
+        return 0;
+    }
+    std::cout << "match=" << *explanation.source << " -> "
+              << *explanation.target << '\n';
+    if (explanation.shadowed_parents.empty()) {
+        std::cout << "shadowed_parent=none\n";
+    } else {
+        for (const std::string& parent : explanation.shadowed_parents) {
+            std::cout << "shadowed_parent=" << parent << '\n';
+        }
+    }
+    return 0;
+}
+
 static const char* MountActionName(pathguard::MountAction action) {
     switch (action) {
         case pathguard::MountAction::kDeny: return "deny";
@@ -190,12 +308,34 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: pathguardctl validate <rules.toml> --host|--device [--json]\n"
                      "       pathguardctl compile <rules.toml> <output-policy.bin>\n"
+                     "       pathguardctl lint <rules.toml>\n"
+                     "       pathguardctl plan <old-rules.toml> <new-rules.toml>\n"
+                     "       pathguardctl explain --path <rules.toml> <package> <path>\n"
                      "       pathguardctl reload <module-dir>\n"
                      "       pathguardctl explain <policy.bin> <package>\n"
                      "       pathguardctl status <module-dir> [pid]\n";
         return 2;
     }
     const std::string command = argv[1];
+    if (command == "lint") {
+        if (argc != 3) { std::cerr << "missing rules.toml\n"; return 2; }
+        return LintRulesFile(argv[2]);
+    }
+    if (command == "plan") {
+        if (argc != 4) {
+            std::cerr << "missing old or new rules.toml\n";
+            return 2;
+        }
+        return PlanRulesFiles(argv[2], argv[3]);
+    }
+    if (command == "explain" && argc >= 3
+        && std::string_view(argv[2]) == "--path") {
+        if (argc != 6) {
+            std::cerr << "missing rules.toml, package, or path\n";
+            return 2;
+        }
+        return ExplainRulesPath(argv[3], argv[4], argv[5]);
+    }
     if (command == "status") {
         if (argc < 3) { std::cerr << "missing module directory\n"; return 2; }
         return PrintStatus(argv[2], argc >= 4 ? argv[3] : nullptr);

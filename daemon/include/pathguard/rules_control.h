@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "pathguard/rules/semantic.h"
@@ -111,6 +112,19 @@ struct ReconcileResult {
     bool ok() const { return state.status == ControlStatus::kActive; }
 };
 
+struct SaveRulesOptions {
+    void (*before_commit)(const std::filesystem::path& path) = nullptr;
+};
+
+struct ManagerSaveResult {
+    ReconcileResult reconcile;
+    bool saved = false;
+    std::string error_code;
+    std::string message;
+
+    bool ok() const { return saved && reconcile.ok(); }
+};
+
 class Reconciler {
 public:
     Reconciler(std::filesystem::path config_directory,
@@ -120,6 +134,9 @@ public:
 
     void SetDeviceSnapshot(rules::DeviceSnapshot snapshot);
     ReconcileResult Reconcile(PublishOptions options = {});
+    ManagerSaveResult SaveRules(std::string_view expected_source_digest,
+                                std::string replacement,
+                                SaveRulesOptions options = {});
     const ControlState& state() const { return state_; }
 
 private:
