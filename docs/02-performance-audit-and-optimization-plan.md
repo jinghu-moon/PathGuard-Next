@@ -364,17 +364,62 @@ visible target 互不嵌套。实现据此完成以下改造：
 - MediaStore deny SQL、参数文本和 JNI `String[]` 改为 Hook 安装时生成一次。无原始 query
   selection/args 时直接复用 global reference，有原参数时只构建合并结果。
 
-当前验证证据仅包括 48/48 Host 测试、arm64-v8a/armeabi-v7a NDK 构建、Zygisk ELF 隔离检查
-和 universal 模块打包。尚未将下列项目标记为完成：
+2026-07-27 已在同一台 alioth 上完成 20 次生产构建冷启动矩阵，规则为 2 deny + 1 redirect。
+20/20 均为 `committed=1`、`result=0`、`mi_snapshots=2`，60/60 MountOp 成功；首条
+`open_tree` 均以 `ENOSYS` 无 mutation 失败并安全锁定 `proc_fd`。未出现取消、回滚、taint
+或 query fallback。修正 companion 行末 `total_us` 提取后的结果如下：
 
-- LocalSend 的 2 deny + 1 redirect 组合功能回归；
-- `open_tree -> proc_fd` 首条 fallback、`mi_snapshots=2` 和最终 mount identity 真机确认；
-- 50 次冷启动 P50/P95/P99 与 2026-07-26 基线对比；
-- applying cancel、worker crash、rollback failure 三个注入构建回归；
-- MediaStore 512 次 query 的 rewrite/fallback/CPU 聚合指标复测。
+| 指标（微秒） | P50 | P95 | P99 / max |
+|---|---:|---:|---:|
+| candidate topology snapshot total | 8,463 | 13,107 | 14,305 |
+| worker 两次 mountinfo read 合计 | 156,704 | 165,576 | 173,262 |
+| 全量 source/target pin | 1,494 | 1,977 | 2,706 |
+| mount transaction | 72,577 | 77,125 | 79,523 |
+| companion total | 180,173 | 192,390 | 197,587 |
+| 应用侧 Zygisk wait total | 160,609 | 170,519 | 173,731 |
 
-在这些真机数据完成前，不宣称具体毫秒收益。预期变化是多规则 worker 的 snapshot 数从
-`1 + N` 收敛为 `2`，但 companion 候选 topology snapshot 和设备调度抖动仍存在。
+功能回归确认宿主 source 为空时，应用 namespace 的 visible source 精确呈现 backing 中两个
+文件；两个 deny target 均指向同一 deny anchor，应用 UID 列举返回 `EACCES`。强制重新进入
+LocalSend 媒体选择器后累计 `query_media=786`、`query_rewrite=786`、`query_fallback=0`，
+deny 目录中的最新媒体未出现在选择器中。该三规则样本不能与 2026-07-26 单规则样本作同配置
+加速结论，但 P95 尾延迟仍低于旧单规则样本。
+
+### 6.8 strict 成功路径延迟 mountinfo 身份读取（2026-07-27）
+
+6.7 之后的主要成本仍是 worker 第二次 post-mount snapshot。strict `open_tree`/`proc_fd`
+后端的 source 与 target 都由已复核的 FD 消费；单次 mount syscall 返回成功时，内核已原子
+完成该 MountOp。成功提交不需要 mount ID，mount ID 只用于失败后的精确回滚。因此实现调整为：
+
+- 初始 snapshot 保留，继续统一承担目标 namespace topology、传播属性、全部 source/target
+  mount identity 与 lease 前复核；
+- strict 全部 syscall 成功且共享状态成功从 `applying` 提交到 `complete` 时，不捕获
+  post-mount snapshot，日志记为 `verification=syscall`，正常 worker 固定为 1 次 snapshot；
+- apply、取消或共享状态提交任一步失败且 journal 非空时，立即捕获 fresh snapshot，验证并
+  回填全部 mount ID 后才允许回滚；捕获/身份确认失败仍 taint 并终止 namespace；
+- legacy string 后端不享受该优化，成功路径仍执行 before/final delta、root、filesystem、
+  device、parent 和 `stat + SameObject` 校验。
+
+纯决策测试覆盖 strict success、legacy success、strict failure 和无 mutation 四种组合；Host
+48/48、Android arm64/arm32 生产构建及 mount-delay、worker-crash、rollback-failure 三个注入
+档位编译已通过。
+
+同日使用与 6.7 完全相同的 2 deny + 1 redirect 配置完成 20 次生产构建冷启动 A/B 复测。
+20/20 均为 `mi_snapshots=1`、`committed=1`、`result=0`，60/60 MountOp 均记录
+`verification=syscall`；未出现 rollback、taint 或残留 mount：
+
+| 指标（微秒） | 6.7 P50 | 6.8 P50 | 降幅 | 6.7 P95 | 6.8 P95 | 降幅 |
+|---|---:|---:|---:|---:|---:|---:|
+| worker apply | 165,181 | 89,013 | 46.1% | 171,768 | 101,772 | 40.8% |
+| mount transaction | 72,577 | 84 | 99.9% | 77,125 | 110 | 99.9% |
+| worker mountinfo read | 156,704 | 82,099 | 47.6% | 165,576 | 94,197 | 43.1% |
+| companion total | 180,173 | 105,180 | 41.6% | 192,390 | 120,365 | 37.4% |
+| 应用侧 Zygisk wait | 160,609 | 86,553 | 46.1% | 170,519 | 104,163 | 38.9% |
+
+candidate topology P50/P95 为 8,573/17,320us，source/target pin 为 1,457/1,772us，说明收益
+来自精确删除第二次 worker mountinfo 生成，而不是把成本转移到其他阶段。单轮功能门禁再次确认
+两个 deny 返回 `EACCES`、redirect visible source 呈现 backing 内容、MediaStore 412/412 media
+query 被改写且 0 fallback。force-stop 后应用 PID 消失，Zygote、system_server 和 daemon 均无
+目标挂载残留。证据位于 `build/device-evidence/deferred-verify-20260727/`。
 
 工程注意：修改 Zygisk `.so` 后必须全清 `native/obj` 与 `native/libs` 再重编，否则增量构建
 可能因某个编译单元失败而静默复用陈旧 `.o`，导致产物 md5 不变、改动不生效。部署后需重启

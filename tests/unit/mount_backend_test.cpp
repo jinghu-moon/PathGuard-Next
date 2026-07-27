@@ -52,5 +52,16 @@ int main() {
     assert(NextMountBackend(
         MountBackendKind::kLegacyString, kMountActionRedirect,
         true, true) == MountBackendKind::kUnsupported);
+
+    assert(!NeedsPostMountSnapshot(
+        MountBackendKind::kStrictOpenTree, true, true));
+    assert(!NeedsPostMountSnapshot(
+        MountBackendKind::kStrictProcFd, true, true));
+    assert(NeedsPostMountSnapshot(
+        MountBackendKind::kLegacyString, true, true));
+    assert(NeedsPostMountSnapshot(
+        MountBackendKind::kStrictProcFd, true, false));
+    assert(!NeedsPostMountSnapshot(
+        MountBackendKind::kStrictProcFd, false, false));
     return 0;
 }

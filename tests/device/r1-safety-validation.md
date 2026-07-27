@@ -48,8 +48,32 @@ current data.
 
 The 2026-07-27 executor no longer emits production capability-probe timings. New
 collections must report first-operation backend fallback, transaction-level pin time,
-the fixed initial/final snapshot pair, and batch verification. Keep the older probe
-columns only when comparing historical evidence.
+snapshot count, and verification mode. Strict successful transactions must report one
+worker snapshot and `verification=syscall`; legacy success and every post-mutation failure
+must retain mountinfo identity verification. Keep older probe columns only when comparing
+historical evidence.
+
+## Strict deferred-verification result (2026-07-27)
+
+- Host Release: 48/48 tests passed, including the strict/legacy/failure snapshot decision.
+- Android compile gates: arm64-v8a and armeabi-v7a production builds passed Zygisk ELF
+  isolation; arm64 mount-delay, worker-crash, and rollback-failure variants also built.
+- Device: alioth, Android 13, Linux 4.19.157, SELinux Enforcing, Magisk 30.6;
+  production arm64 hash matched the locally packaged artifact.
+- Samples: 20 force-stop/cold-start cycles with two deny and one redirect MountOp.
+- Outcome: 20/20 `mi_snapshots=1`, committed, and successful; 60/60 MountOps reported
+  `verification=syscall`; no rollback, taint, or error was observed.
+- P50/P95: worker apply 89.013/101.772ms, companion total 105.180/120.365ms,
+  app-side wait 86.553/104.163ms. The mount transaction itself was 84/110us.
+- Functional gate: both deny paths returned `EACCES`, redirect exposed both backing files,
+  runtime state was `active/complete/fd_pinned`, and MediaStore rewrote 412/412 media
+  queries with zero fallback.
+- Lifecycle gate: force-stop removed the app PID; Zygote, system_server, and PathGuard
+  daemon contained no configured mount afterward.
+- Evidence: `build/device-evidence/deferred-verify-20260727/`.
+- Failure evidence remains mandatory: cancellation after the first mutation must capture
+  mountinfo before rollback; unknown identity, owner death, and injected rollback failure
+  must never be reported as committed success.
 
 ## Alioth production snapshot result (2026-07-26)
 

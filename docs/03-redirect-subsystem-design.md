@@ -291,10 +291,11 @@ deny anchor FD。未来 R2 引入 `isolation.allow` 后若允许父子覆盖，�
 
 目标 namespace 的变更前 mountinfo 以有界 snapshot 捕获一次，绑定 namespace dev/inode；
 topology、全部 source/target identity 和 propagation 均查询该 snapshot。取得 lease 后连续
-执行扁平 `MountOp[]`，所有成功 syscall 立即以未知 mount ID 写入 journal；循环结束只捕获
-一次最终 snapshot，并用同一对 before/final snapshot 批量校验全部 mount。正常 worker
-路径的 snapshot 数固定为 2，与规则数无关。snapshot 原始文本和条目数必须有硬上限，
-存储不得进入 Zygisk 线程栈。
+执行扁平 `MountOp[]`，所有成功 syscall 立即以未知 mount ID 写入 journal。strict 后端的
+source/target 均由固定 FD 消费，因此全部 syscall 成功且共享状态成功提交后，不再读取
+post-mount snapshot；正常 strict worker 路径固定为 1 次 snapshot，与规则数无关。
+legacy 成功路径和任何 mutation 后的失败路径仍捕获最终 snapshot。snapshot 原始文本和
+条目数必须有硬上限，存储不得进入 Zygisk 线程栈。
 
 legacy 后端仍执行上述 FD 预检，但最终 mount 使用由规范相对路径重新生成的
 canonical string。mount 前后必须复验设备、inode 与 mount ID；该检查只能缩小
@@ -306,12 +307,12 @@ legacy 还必须比较事务级 mountinfo delta：最终条目数恰好增加本
 必须确认记录的 mount 仍是 canonical target 的最顶层 mount，身份不明时禁止盲目
 `umount2(path)`。
 
-mount syscall 成功后先把 canonical target 和未知 mount ID 写入 journal；最终 snapshot
-取得并完整验证实际身份后才按 operation index 回填各 journal 项。root/device/filesystem/parent
-任一项未确认时保留未知 ID，禁止回滚该路径。失败路径优先复用该最终 snapshot
-确认全部记录仍为各自 target 的顶层 mount，再逆序卸载，最后用一个 snapshot 批量确认全部
-记录 ID 消失。最终 snapshot 捕获失败时允许为回滚重试一次 fresh snapshot。
-任何阶段无法确认身份都必须 taint namespace，禁止逐路径盲目回滚。
+mount syscall 成功后先把 canonical target 和未知 mount ID 写入 journal。strict 成功提交后
+journal 不再用于回滚，可以保持未知 ID；若 apply、取消或提交失败，则必须先取得 fresh
+snapshot，完整验证实际身份并按 operation index 回填各 journal 项。legacy 无论成功失败都
+执行该验证。root/device/filesystem/parent 任一项未确认时保留未知 ID，禁止回滚该路径。
+失败路径确认全部记录仍为各自 target 的顶层 mount 后逆序卸载，最后用一个 snapshot 批量
+确认全部 mount ID 消失。任何阶段无法确认身份都必须 taint namespace，禁止逐路径盲目回滚。
 
 legacy 还必须固定 PID、PID start time、UID、package/process、mount namespace
 inode、namespace FD、plan generation 和 topology generation。首版只允许成员关系
@@ -619,7 +620,8 @@ media = hide_denied
 - [x] topology probe 与 backend path resolver；Alioth Android 13 真机 topology 识别 `/storage/emulated/0 -> /data/media/0`。
 - [x] openat2/逐组件 FD walk resolver 与 symlink/magic-link 拒绝；Alioth 4.19 内核走 `component_fd_walk` capability。
 - [x] 基于 pinned identity/`AppliedMount` 完成双后端通用 executor；format 1 扁平计划在
-  lease 前固定全部 target，并以初始/最终两个 snapshot 批量验证。
+  lease 前固定全部 target。strict 成功路径只保留初始 snapshot；legacy 成功和 strict
+  失败路径使用最终 snapshot 批量验证并为回滚回填 mount ID。
 - [ ] Alioth 完成 legacy redirect-only 垂直链路：私有 namespace probe、两阶段
   topology、mountinfo delta、PID/namespace identity 和 mount ID 保护回滚。
 - [ ] 在支持设备上立即完成 strict redirect-only 垂直链路，分别验证

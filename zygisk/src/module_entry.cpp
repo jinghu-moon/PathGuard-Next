@@ -1751,7 +1751,8 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
                 pathguard::MountBackendReason::kNone);
         }
         // Record every successful namespace mutation before any later work.
-        // The one final snapshot fills all mount IDs in this journal.
+        // Strict success does not need a mount ID; failures hydrate IDs from
+        // one snapshot before rollback.
         if (apply_result.mutation_happened()) {
             if (!workspace->journal.Push(apply_result.mount)) {
                 error = EOVERFLOW;
@@ -1774,7 +1775,54 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
     }
     if (error == 0 && IsCancelRequested(state)) error = ECANCELED;
 
-    if (!workspace->journal.empty()) {
+    const auto log_mount_step = [&](size_t rule_index,
+                                    const pathguard::MountError& outcome,
+                                    uint64_t mount_id,
+                                    const char* verification) {
+        const pathguard::MountApplyTiming& timing =
+            workspace->timings[rule_index];
+        LOGI("perf mount_step rule=%zu backend=%u target_pin_us=%llu "
+             "verify_pinned_us=%llu apply_raw_us=%llu verify_us=%llu "
+             "verify_stat_us=%llu mutation=1 stage=%u errno=%d mount_id=%llu "
+             "verification=%s",
+             rule_index, static_cast<uint32_t>(backend),
+             static_cast<unsigned long long>(
+                 workspace->target_pin_ns[rule_index] / 1000u),
+             static_cast<unsigned long long>(
+                 timing.verify_pinned_ns / 1000u),
+             static_cast<unsigned long long>(timing.apply_raw_ns / 1000u),
+             static_cast<unsigned long long>(timing.verify_ns / 1000u),
+             static_cast<unsigned long long>(timing.verify_stat_ns / 1000u),
+             static_cast<unsigned>(outcome.stage), outcome.error,
+             static_cast<unsigned long long>(mount_id), verification);
+    };
+
+    bool result_published = false;
+    if (error == 0 && !pathguard::NeedsPostMountSnapshot(
+            backend, !workspace->journal.empty(), true)) {
+        perf.mount_total_ns = pathguard::perf::ElapsedNs(mounts_started);
+        perf.result = 0;
+        CompanionResult result = state->result;
+        result.mount = perf;
+        if (PublishSharedResult(state, result, MountState::kApplying,
+                                MountState::kComplete)) {
+            result_published = true;
+            pathguard::MountError committed;
+            for (size_t journal_index = 0;
+                 journal_index < workspace->journal.size(); ++journal_index) {
+                const pathguard::AppliedMount* recorded =
+                    workspace->journal.At(journal_index);
+                if (recorded != nullptr && recorded->operation_id < plan.count) {
+                    log_mount_step(recorded->operation_id, committed, 0, "syscall");
+                }
+            }
+        } else {
+            error = ECANCELED;
+        }
+    }
+
+    if (pathguard::NeedsPostMountSnapshot(
+            backend, !workspace->journal.empty(), error == 0)) {
         const int final_snapshot_error = pathguard::CaptureMountInfoSnapshot(
             &mutation_snapshot);
         if (final_snapshot_error != 0) {
@@ -1823,28 +1871,13 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
                 if (verify.error != 0) {
                     perf.failure_stage = static_cast<uint32_t>(verify.stage);
                 }
-                const pathguard::MountApplyTiming& timing =
-                    workspace->timings[rule_index];
-                LOGI("perf mount_step rule=%zu backend=%u target_pin_us=%llu "
-                     "verify_pinned_us=%llu apply_raw_us=%llu verify_us=%llu "
-                     "verify_stat_us=%llu mutation=1 stage=%u errno=%d mount_id=%llu",
-                     rule_index, static_cast<uint32_t>(backend),
-                     static_cast<unsigned long long>(
-                         workspace->target_pin_ns[rule_index] / 1000u),
-                     static_cast<unsigned long long>(
-                         timing.verify_pinned_ns / 1000u),
-                     static_cast<unsigned long long>(
-                         timing.apply_raw_ns / 1000u),
-                     static_cast<unsigned long long>(timing.verify_ns / 1000u),
-                     static_cast<unsigned long long>(
-                         timing.verify_stat_ns / 1000u),
-                     static_cast<unsigned>(verify.stage), verify.error,
-                     static_cast<unsigned long long>(verified.mount_id));
+                log_mount_step(
+                    rule_index, verify, verified.mount_id, "mountinfo");
             }
         }
     }
     perf.mount_total_ns = pathguard::perf::ElapsedNs(mounts_started);
-    if (error == 0) {
+    if (error == 0 && !result_published) {
         perf.result = 0;
         CompanionResult result = state->result;
         result.mount = perf;

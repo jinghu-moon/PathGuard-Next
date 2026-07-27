@@ -88,4 +88,11 @@ constexpr MountBackendKind NextMountBackend(
     return MountBackendKind::kUnsupported;
 }
 
+constexpr bool NeedsPostMountSnapshot(MountBackendKind backend,
+                                      bool mutation_recorded,
+                                      bool apply_succeeded) {
+    return mutation_recorded
+        && (!apply_succeeded || backend == MountBackendKind::kLegacyString);
+}
+
 }  // namespace pathguard
