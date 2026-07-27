@@ -1,0 +1,4 @@
+# case|original|generated|segment-kind|generated-segment|expected-original
+copied|errors/copied-original.toml|errors/copied-generated.toml|copied|19:23|19:23
+synthetic-rule|errors/synthetic-original.toml|errors/synthetic-rule-generated.toml|synthetic-rule|23:47|23:33
+synthetic-arrow|errors/synthetic-original.toml|errors/synthetic-arrow-generated.toml|synthetic-arrow|35:42|27:29

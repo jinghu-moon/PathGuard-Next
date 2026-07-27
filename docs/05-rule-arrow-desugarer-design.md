@@ -1,14 +1,16 @@
 # PathGuard Rules 箭头脱糖器设计
 
-> 状态：Proposed（Phase D0 Go/No-Go 待完成）
+> 状态：Accepted（Phase D0 已通过，进入 D1 前置完成）
 >
-> 文档版本：0.3
+> 文档版本：0.4
 >
 > 日期：2026-07-26
 >
 > 上位设计：`docs/04-rule-file-refactoring-design.md`
 >
 > 适用范围：PathGuard Next 控制面规则编译器、CLI 校验工具与 daemon
+>
+> D0 决议：`docs/decisions/rules-compiler-d0.md`，选择 C++20 + toml++ v3.4.0 + 箭头语法
 
 ## 1. 文档目的
 
@@ -54,8 +56,8 @@ redirect = [
 8. `GeneratedRedirect` 只保存语义诊断和 AST 绑定所需的最小来源信息，不承担通用位置映射。
 9. 标准 TOML 解析后先验证所有 generated node 的 AST 作用域，再执行普通字段类型解码。
 10. v1 拒绝用户手写 `{ from, to }`，避免两套等价配置语法。
-11. Phase D0 用同一 binder-neutral 语料比较 C++/toml++ 与 Rust/`toml_edit::Document`；最终只保留一个生产 parser 和一套规则编译器。
-12. Rust 候选覆盖从规则源字节到已验证 PolicyBlob 的完整纯编译链，不允许只把脱糖器做成 Rust 再把 AST/span 交回 C++。
+11. Phase D0 已用同一 binder-neutral 语料完成 C++/toml++ 与 Rust/`toml_edit::Document` 比较；生产只保留 C++20 + toml++ v3.4.0。
+12. Rust 候选曾覆盖从规则源字节到已验证 PolicyBlob 的完整纯编译链；因额外工具链、C ABI、体积和完整编译资源成本未被选择，原型已删除。
 13. Formatter、PathGuard 自建无损 CST 和 token 重写属于独立后续能力，不进入首版脱糖器。
 
 总体流程：
@@ -107,9 +109,11 @@ Phase D0 必须同时保留以下替代方案作为基准，而不是只验证�
 | 标准 inline table | `{ from = "A", to = "B" }` | 零自定义语法、标准诊断 | 更长，手机端手写和快速扫读较弱 |
 | 标准映射子表 | `"A" = "B"` | 严格 TOML、一行一条 | `=` 更像赋值/相等；source 被编码为动态 key |
 
-当前是“条件性采用箭头”：只有 D0 证明关键依赖可靠，才进入 D1。严格 TOML 方案不作为并存的第二输入语法，只作为 D0 失败时的替代决策。
+D0 已证明关键依赖可靠并确认箭头方向表达的手工编辑价值，结论为采用箭头并进入 D1。严格 TOML 方案不作为并存的第二输入语法；未来只有通过新格式版本和价值复审才能替换箭头。
 
 ### 2.3 Phase D0 Go/No-Go 条件
+
+本节保留为已执行的决策门槛。2026-07-26 的结果是全部通过：toml++ 的 table/value source region 在共同 Unicode/CRLF/BOM golden 中稳定，不需要隐藏标记；固定输入生成 207-byte policy v5；Android arm64 和 Zygisk 隔离验证通过。完整数据见 D0 决议。
 
 满足以下条件才允许进入 D1：
 

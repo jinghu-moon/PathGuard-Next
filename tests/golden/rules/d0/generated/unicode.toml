@@ -1,0 +1,4 @@
+# 路径
+format = 1
+[apps."com.example"]
+redirect = [{ from = "下载/A", to = "目标/B" }]

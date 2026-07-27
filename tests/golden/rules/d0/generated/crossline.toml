@@ -1,0 +1,5 @@
+format = 1
+[apps."com.example"]
+redirect = [
+  { from = "A", to = "B" },
+]

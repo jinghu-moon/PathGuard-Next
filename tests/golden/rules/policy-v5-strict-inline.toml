@@ -1,0 +1,13 @@
+format = 1
+
+[compatibility]
+allow_legacy_mount = false
+
+[apps."org.localsend.localsend_app"]
+enabled = true
+users = [0]
+processes = ["*"]
+file_picker = true
+redirect = [
+    { from = "Download/localsend-source", to = "Download/localsend-redirect" },
+]

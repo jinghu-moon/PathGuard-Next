@@ -1,0 +1,6 @@
+# case|generated|field|generated-table-spans|expected
+valid|generated/ascii.toml|redirect|44:68|OK
+wrong-scope|binding/wrong-scope.toml|deny|40:64|PG-RULE-ARROW-SCOPE
+handwritten|binding/handwritten.toml|redirect|-|PG-REDIRECT-SYNTAX
+missing-generated|generated/ascii.toml|redirect|0:1|PG-DESUGAR-INTERNAL
+duplicate-generated|generated/ascii.toml|redirect|44:68,44:68|PG-DESUGAR-INTERNAL

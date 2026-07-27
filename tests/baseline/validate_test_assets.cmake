@@ -12,6 +12,8 @@ set(required_files
   "${root}/fixtures/toml-test-v2.2.0/LICENSE"
   "${root}/fixtures/toml-test-v2.2.0/PROVENANCE.md"
   "${root}/fixtures/toml-test-v2.2.0/manifest.txt"
+  "${root}/fixtures/toml-test-v2.2.0/files-toml-1.0.0"
+  "${root}/fixtures/toml-test-v2.2.0/excluded-toml-1.1.txt"
   "${root}/golden/rules/README.md"
   "${root}/integration/rules/README.md"
   "${root}/device/rules/README.md"
@@ -23,6 +25,9 @@ foreach(required IN LISTS required_files)
     message(FATAL_ERROR "Required RF0 test asset is missing: ${required}")
   endif()
 endforeach()
+
+set(FIXTURE_ROOT "${root}/fixtures/toml-test-v2.2.0")
+include("${SOURCE_DIR}/tests/baseline/validate_toml_test_fixtures.cmake")
 
 file(READ "${root}/fixtures/toml-test-v2.2.0/PROVENANCE.md" provenance)
 foreach(required_text IN ITEMS "v2.2.0" "TOML version：1.0" "files-toml-1.0.0")

@@ -1,0 +1,4 @@
+# syntax|example|direction_clarity|standard_toml|custom_entities|format1_role
+arrow|"A" -> "B"|high|no|scanner+rewrite-map+generated-binding|candidate
+inline-table|{ from = "A", to = "B" }|high|yes|none|strict-exit
+mapping-subtable|"A" = "B"|medium|yes|dynamic-key-decoder|strict-comparison

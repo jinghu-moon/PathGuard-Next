@@ -1,0 +1,7 @@
+format = 1
+[apps."com.example"]
+redirect = [
+  "A"
+    ->
+  "B",
+]

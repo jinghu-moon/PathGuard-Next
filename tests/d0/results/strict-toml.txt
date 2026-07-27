@@ -1,0 +1,10 @@
+candidate=strict-toml-exit
+inline_table_direction_clarity=high
+inline_table_custom_parser_entities=0
+mapping_subtable_direction_clarity=medium
+mapping_subtable_custom_parser_entities=0
+strict_inline_policy_v5=207-bytes-pass
+strict_mapping_policy_v5=207-bytes-pass
+coexist_with_arrow_in_format1=no
+selection=not-selected
+reason=arrow-direction-notation-retains-manual-editing-value-after-technical-kill-criteria-pass

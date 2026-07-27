@@ -1,0 +1,8 @@
+# case|index|original|generated|scope|original_rule|original_source|original_arrow|original_target|generated_table|generated_source|generated_target
+ascii|0|original/ascii.toml|generated/ascii.toml|redirect|44:54|44:47|48:50|51:54|44:68|53:56|63:66
+unicode|0|original/unicode.toml|generated/unicode.toml|redirect|53:77|53:63|64:66|67:77|53:91|62:72|79:89
+crlf|0|original/crlf.toml|generated/crlf.toml|redirect|46:56|46:49|50:52|53:56|46:70|55:58|65:68
+bom|0|original/bom.toml|generated/bom.toml|redirect|47:57|47:50|51:53|54:57|47:71|56:59|66:69
+crossline|0|original/crossline.toml|generated/crossline.toml|redirect|47:63|47:50|55:57|60:63|47:71|56:59|66:69
+multiple|0|original/multiple.toml|generated/multiple.toml|redirect|44:54|44:47|48:50|51:54|44:68|53:56|63:66
+multiple|1|original/multiple.toml|generated/multiple.toml|redirect|56:66|56:59|60:62|63:66|70:94|79:82|89:92

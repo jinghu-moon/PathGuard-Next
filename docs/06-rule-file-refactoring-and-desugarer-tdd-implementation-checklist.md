@@ -1,8 +1,8 @@
 # PathGuard Next 配置文件重构与箭头脱糖器 · TDD 分阶段实施任务清单
 
-> 状态：Proposed（RF1 / Phase D0 联合 Go/No-Go 未完成）
+> 状态：RF1 完成（Phase D0 已接受，下一阶段为 RF2）
 >
-> 文档版本：0.1
+> 文档版本：0.2
 >
 > 日期：2026-07-26
 >
@@ -133,14 +133,13 @@ ctest --test-dir build -C Release --output-on-failure
 ./scripts/build-native.ps1 -Abi arm64-v8a
 ```
 
-Rust 候选创建后：
+RF1 选定 C++20 + toml++ 后的 D0/隔离验证：
 
 ```powershell
-cargo test --manifest-path rules-compiler/Cargo.toml --locked
-cargo build --manifest-path rules-compiler/Cargo.toml --release --locked
+./scripts/build-rules-compiler-d0.ps1
 ```
 
-具体 crate 路径、CTest 名称和 fuzz 命令在对应任务创建后必须回填本节；不得长期保留不可执行的伪命令。
+Rust 候选的历史命令和原始测量只保留在 D0 决议与结果记录中；生产工作区不保留不可执行的 Cargo 入口。后续 CTest 名称和 fuzz 命令在对应任务创建后必须回填本节。
 
 ---
 
@@ -181,7 +180,7 @@ cargo build --manifest-path rules-compiler/Cargo.toml --release --locked
 | 项目 | 当前状态 |
 |---|---|
 | Host 构建 | CMake + C++20 |
-| Host 测试 | 2026-07-26 Release 基线 10/10 通过 |
+| Host 测试 | 2026-07-26 RF1 Release 19/19 通过；原始 10/10 基线由守卫持续保护 |
 | 规则源 | `module/config/rules.ini` |
 | 解析入口 | `core/src/policy.cpp::ParseRulesIni()` |
 | 源模型 | `PolicyDocument` 同时承载源语义、源码行号和二进制输入 |
@@ -477,7 +476,7 @@ tests/
 
 ## 9. RF1 阶段：D0 联合 Go/No-Go 与格式冻结
 
-### RF1-01 `[ ] P0` 冻结 D0 外部断言和严格 TOML 对照组
+### RF1-01 `[x] P0` 冻结 D0 外部断言和严格 TOML 对照组
 
 **依赖**
 
@@ -485,22 +484,22 @@ tests/
 
 **RED**
 
-- [ ] 先建立候选无关的测试接口，缺少任一候选输出时测试失败。
-- [ ] 同一语料同时描述箭头、标准 inline table、标准映射子表三种用户方案的可读性和实现成本。
-- [ ] 决策模板缺少 kill criterion、资源数据或删除计划时检查失败。
+- [x] 先建立候选无关的测试接口，缺少任一候选输出时测试失败。
+- [x] 同一语料同时描述箭头、标准 inline table、标准映射子表三种用户方案的可读性和实现成本。
+- [x] 决策模板缺少 kill criterion、资源数据或删除计划时检查失败。
 
 **GREEN**
 
-- [ ] 冻结 D0 只比较完整规则编译边界，不只比较 parser API。
-- [ ] 冻结三种唯一结论及条件分支。
-- [ ] 冻结 binder-neutral 结果结构：AST node span、value span、parse error 原始 span、scope 结果、PolicyBlob。
+- [x] 冻结 D0 只比较完整规则编译边界，不只比较 parser API。
+- [x] 冻结三种唯一结论及条件分支。
+- [x] 冻结 binder-neutral 结果结构：AST node span、value span、parse error 原始 span、scope 结果、PolicyBlob。
 
 **REFACTOR / VERIFY**
 
-- [ ] 所有候选共享同一断言，不根据结果调整 golden。
-- [ ] 严格 TOML 是退出路径，不作为同 format 并存语法。
+- [x] 所有候选共享同一断言，不根据结果调整 golden。
+- [x] 严格 TOML 是退出路径，不作为同 format 并存语法。
 
-### RF1-02 `[ ] P0` 导入并冻结 toml-test v2.2.0 的 TOML 1.0 fixture 子集
+### RF1-02 `[x] P0` 导入并冻结 toml-test v2.2.0 的 TOML 1.0 fixture 子集
 
 **依赖**
 
@@ -508,34 +507,34 @@ tests/
 
 **RED**
 
-- [ ] 测试证明直接扫描整个 `refer/toml-test-main/tests` 会错误包含 TOML 1.1-only 用例。
-- [ ] 测试在 fixture 不属于 `tests/files-toml-1.0.0` 时失败。
-- [ ] 测试在上游版本、许可证或来源摘要缺失时失败。
+- [x] 测试证明直接扫描整个 `refer/toml-test-main/tests` 会错误包含 TOML 1.1-only 用例。
+- [x] 测试在 fixture 不属于 `tests/files-toml-1.0.0` 时失败。
+- [x] 测试在上游版本、许可证或来源摘要缺失时失败。
 
 **GREEN**
 
-- [ ] 明确使用 `toml-test copy -toml=1.0` 或本地 `tests/files-toml-1.0.0` 过滤。
-- [ ] 第一批至少选择：
+- [x] 明确使用 `toml-test copy -toml=1.0` 或本地 `tests/files-toml-1.0.0` 过滤。
+- [x] 第一批至少选择：
   - `valid/string/*.toml`；
   - `invalid/string/*.toml`；
   - `invalid/encoding/*.toml`；
   - `valid/comment/*.toml`；
   - `valid/array/*.toml` 与 `invalid/array/*.toml` 中和 frame/分隔符有关的用例；
   - UTF-8 BOM、LF、CRLF 代表用例。
-- [ ] 复制 MIT LICENSE、上游版本 `v2.2.0`、来源路径和筛选脚本/manifest。
+- [x] 复制 MIT LICENSE、上游版本 `v2.2.0`、来源路径和筛选脚本/manifest。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不接入 Go tagged-JSON 协议，不为 PathGuard 重测 `toml_edit` 全部语义。
-- [ ] parser 版本门只保留少量 TOML 1.0/1.1 边界用例；scanner fixture 专注不越界、边界稳定和不误判。
-- [ ] invalid fixture 的成功条件是安全终止和正确失败归属，不是 scanner 必须替代 strict parser 给出完整 TOML 错误。
+- [x] 不接入 Go tagged-JSON 协议，不为 PathGuard 重测 `toml_edit` 全部语义。
+- [x] parser 版本门只保留少量 TOML 1.0/1.1 边界用例；scanner fixture 专注不越界、边界稳定和不误判。
+- [x] invalid fixture 的成功条件是安全终止和正确失败归属，不是 scanner 必须替代 strict parser 给出完整 TOML 错误。
 
 **完成证据**
 
-- [ ] 生成后的 fixture manifest 只包含 TOML 1.0 清单成员。
-- [ ] fixture 数量和 SHA-256 可重复生成。
+- [x] 生成后的 fixture manifest 只包含 TOML 1.0 清单成员。
+- [x] fixture 数量和 SHA-256 可重复生成。
 
-### RF1-03 `[ ] P0` 冻结 binder-neutral source-map/generated-node golden
+### RF1-03 `[x] P0` 冻结 binder-neutral source-map/generated-node golden
 
 **依赖**
 
@@ -543,22 +542,22 @@ tests/
 
 **RED**
 
-- [ ] 覆盖 ASCII、Unicode、BOM、LF、CRLF、同行/跨行箭头、多次 rewrite。
-- [ ] 覆盖 parse error 落在 copied、synthetic-rule、synthetic-arrow 三类 segment。
-- [ ] 覆盖合法 scope、错误 scope、手写 inline table 和 generated node 重复/缺失。
-- [ ] 任一 candidate adapter 返回不同原始 byte span 时测试失败。
+- [x] 覆盖 ASCII、Unicode、BOM、LF、CRLF、同行/跨行箭头、多次 rewrite。
+- [x] 覆盖 parse error 落在 copied、synthetic-rule、synthetic-arrow 三类 segment。
+- [x] 覆盖合法 scope、错误 scope、手写 inline table 和 generated node 重复/缺失。
+- [x] 任一 candidate adapter 返回不同原始 byte span 时测试失败。
 
 **GREEN**
 
-- [ ] Golden 只记录外部结果，不记录 toml++ 或 `toml_edit` 私有对象布局。
-- [ ] 每条记录固定原始/生成 table、source、target span 和期望错误码。
+- [x] Golden 只记录外部结果，不记录 toml++ 或 `toml_edit` 私有对象布局。
+- [x] 每条记录固定原始/生成 table、source、target span 和期望错误码。
 
 **REFACTOR / VERIFY**
 
-- [ ] 语料不可在候选结果已知后分叉。
-- [ ] 默认诊断不得展示内部 `from`、`to` 合成字段。
+- [x] 语料不可在候选结果已知后分叉。
+- [x] 默认诊断不得展示内部 `from`、`to` 合成字段。
 
-### RF1-04 `[ ] P0` 实现最小 C++/toml++ v3.4.0 adapter spike
+### RF1-04 `[x] P0` 实现最小 C++/toml++ v3.4.0 adapter spike
 
 **依赖**
 
@@ -566,23 +565,23 @@ tests/
 
 **RED**
 
-- [ ] 在未实现 adapter 时 binder-neutral tests 失败。
-- [ ] 添加 Unicode/CRLF/BOM、无异常 parse error、table/value source region 测试。
-- [ ] 添加 TOML 1.1-only 输入拒绝测试。
+- [x] 在未实现 adapter 时 binder-neutral tests 失败。
+- [x] 添加 Unicode/CRLF/BOM、无异常 parse error、table/value source region 测试。
+- [x] 添加 TOML 1.1-only 输入拒绝测试。
 
 **GREEN**
 
-- [ ] 仅实现 D0 所需 parse/bind adapter。
-- [ ] 使用冻结宏关闭异常、formatter 和 unreleased features。
-- [ ] 若 source region 不足，只实现一次受控隐藏标记原型。
+- [x] 仅实现 D0 所需 parse/bind adapter。
+- [x] 使用冻结宏关闭异常、formatter 和 unreleased features。
+- [x] 若 source region 不足，只实现一次受控隐藏标记原型。（source region 充足，未启用 fallback）
 
 **REFACTOR / VERIFY**
 
-- [ ] 隐藏标记原型使用相同 golden，不建立第二套宽松断言。
-- [ ] 记录 toml++ 头文件 SHA-256、许可证、Host/NDK 构建方式。
-- [ ] 不把 adapter 接入生产 daemon。
+- [x] 隐藏标记原型使用相同 golden，不建立第二套宽松断言。（未触发）
+- [x] 记录 toml++ 头文件 SHA-256、许可证、Host/NDK 构建方式。
+- [x] 不把 adapter 接入生产 daemon。
 
-### RF1-05 `[ ] P0` 实现最小 Rust/`toml_edit` adapter spike
+### RF1-05 `[x] P0` 实现最小 Rust/`toml_edit` adapter spike
 
 **依赖**
 
@@ -590,23 +589,23 @@ tests/
 
 **RED**
 
-- [ ] `Document::parse` 的 table/value/error span 未映射到 golden 时失败。
-- [ ] 添加 `DocumentMut`/`into_mut()` 清除 span 的回归测试。
-- [ ] 添加 Cargo.lock 变化导致 TOML 1.1-only 输入被接受时失败的版本门。
+- [x] `Document::parse` 的 table/value/error span 未映射到 golden 时失败。
+- [x] 添加 `DocumentMut`/`into_mut()` 清除 span 的回归测试。
+- [x] 添加 Cargo.lock 变化导致 TOML 1.1-only 输入被接受时失败的版本门。
 
 **GREEN**
 
-- [ ] 创建隔离 D0 manifest，固定 `toml_edit = 0.23.7` 和 `toml_parser = 1.0.4`。
-- [ ] 使用不可变 `Document` 完成 parse、node span 和最小 scope 遍历。
-- [ ] 所有命令使用 `--locked`。
+- [x] 创建隔离 D0 manifest，固定 `toml_edit = 0.23.7` 和 `toml_parser = 1.0.4`。
+- [x] 使用不可变 `Document` 完成 parse、node span 和最小 scope 遍历。
+- [x] 所有命令使用 `--locked`。
 
 **REFACTOR / VERIFY**
 
-- [ ] 记录实际依赖树、许可证、Rust MSRV 和 crate 体积。
-- [ ] 不增加隐藏字段、`DocumentMut`、自建 CST 或中间 FFI。
-- [ ] D0 artifact 尚不提升为生产 workspace。
+- [x] 记录实际依赖树、许可证、Rust MSRV 和 crate 体积。
+- [x] 不增加隐藏字段、`DocumentMut`、自建 CST 或中间 FFI。
+- [x] D0 artifact 尚不提升为生产 workspace，并在未选中后删除。
 
-### RF1-06 `[ ] P0` 建立两候选完整编译 vertical slice
+### RF1-06 `[x] P0` 建立两候选完整编译 vertical slice
 
 **依赖**
 
@@ -614,25 +613,25 @@ tests/
 
 **RED**
 
-- [ ] Rust 或 C++ 任一候选不能从各自的 TOML 输入生成 207-byte blob 时失败。
-- [ ] 逐字节差异、checksum/generation/排序差异任一导致失败。
-- [ ] 现有 C++ `DecodePolicy()` 无法读取任一候选输出时失败。
-- [ ] 严格 TOML 对照输入不能生成同一语义 blob 时失败。
+- [x] Rust 或 C++ 任一候选不能从各自的 TOML 输入生成 207-byte blob 时失败。
+- [x] 逐字节差异、checksum/generation/排序差异任一导致失败。
+- [x] 现有 C++ `DecodePolicy()` 无法读取任一候选输出时失败。
+- [x] 严格 TOML 对照输入不能生成同一语义 blob 时失败。
 
 **GREEN**
 
-- [ ] 分别实现最小 C++ 和 Rust `source -> parse -> decode -> canonicalize -> encode -> verify` vertical slice。
-- [ ] 两个候选只实现 golden 所需字段，不提前实现全部模块。
-- [ ] C++ 候选可复用现有 format v5 编码器；Rust 候选实现独立最小 encoder。
-- [ ] 两个输出都交给现有 C++ reader 独立验证。
+- [x] 分别实现最小 C++ 和 Rust `source -> parse -> decode -> canonicalize -> encode -> verify` vertical slice。
+- [x] 两个候选只实现 golden 所需字段，不提前实现全部模块。
+- [x] C++ 候选可复用现有 format v5 编码器；Rust 候选实现独立最小 encoder。
+- [x] 两个输出都交给现有 C++ reader 独立验证。
 
 **REFACTOR / VERIFY**
 
-- [ ] 编码常量来自冻结 policy format 契约，不复制魔法 offset。
-- [ ] 比较完整编译路径，不用 C++ parser-only 对比 Rust end-to-end。
-- [ ] Rust encoder 自检与 C++ reader 验证职责分离。
+- [x] 编码常量来自冻结 policy format 契约，不复制魔法 offset。
+- [x] 比较完整编译路径，不用 C++ parser-only 对比 Rust end-to-end。
+- [x] Rust encoder 自检与 C++ reader 验证职责分离。
 
-### RF1-07 `[ ] P0` 建立最小 C ABI harness
+### RF1-07 `[x] P0` 建立最小 C ABI harness
 
 **依赖**
 
@@ -640,24 +639,24 @@ tests/
 
 **RED**
 
-- [ ] 覆盖 null/length 组合、非法 UTF-8、超限输入、未知 ABI version、未知枚举。
-- [ ] 覆盖 opaque result accessor、null free、唯一释放和重复调用。
-- [ ] 注入 unwind panic，要求返回 `PG-COMPILER-INTERNAL` 且无 policy bytes。
-- [ ] C/Rust `sizeof`、`alignof`、`offsetof` 或枚举宽度不一致时失败。
+- [x] 覆盖 null/length 组合、非法 UTF-8、超限输入、未知 ABI version、未知枚举。
+- [x] 覆盖 opaque result accessor、null free、唯一释放和重复调用。
+- [x] 注入 unwind panic，要求返回 `PG-COMPILER-INTERNAL` 且无 policy bytes。
+- [x] C/Rust `sizeof`、`alignof`、`offsetof` 或枚举宽度不一致时失败。
 
 **GREEN**
 
-- [ ] 手写极窄版本化 C 头。
-- [ ] 每个 `extern "C"` 入口内部 `catch_unwind`。
-- [ ] Rust 分配只由 `pg_rules_result_free()` 释放。
+- [x] 手写极窄版本化 C 头。
+- [x] 每个 `extern "C"` 入口内部 `catch_unwind`。
+- [x] Rust 分配只由 `pg_rules_result_free()` 释放。
 
 **REFACTOR / VERIFY**
 
-- [ ] ABI 不暴露 AST、RewriteMap、RulesDocument、Canonical Policy、Rust String/Vec 或回调。
-- [ ] 不为 double-free 建立全局 handle registry。
-- [ ] 明确记录 `catch_unwind` 无法处理 OOM abort、stack overflow、signal 和 `panic=abort`。
+- [x] ABI 不暴露 AST、RewriteMap、RulesDocument、Canonical Policy、Rust String/Vec 或回调。
+- [x] 不为 double-free 建立全局 handle registry。
+- [x] 明确记录 `catch_unwind` 无法处理 OOM abort、stack overflow、signal 和 `panic=abort`。
 
-### RF1-08 `[ ] P0` 验证 Host/Android arm64 构建与 Zygisk 隔离
+### RF1-08 `[x] P0` 验证 Host/Android arm64 构建与 Zygisk 隔离
 
 **依赖**
 
@@ -665,22 +664,22 @@ tests/
 
 **RED**
 
-- [ ] 构建脚本选择非 NDK r27d 或 API 31 时失败。
-- [ ] `pathguard_zygisk` ELF/link map 出现 parser、Rust runtime 或 compiler symbol 时失败。
-- [ ] candidate 无法生成 Android arm64 release artifact 时失败。
+- [x] 构建脚本选择非 NDK r27d 或 API 31 时失败。
+- [x] `pathguard_zygisk` ELF/link map 出现 parser、Rust runtime 或 compiler symbol 时失败。
+- [x] candidate 无法生成 Android arm64 release artifact 时失败。
 
 **GREEN**
 
-- [ ] 两候选使用同一 NDK revision、ABI、优化级别和输入。
-- [ ] 构建日志打印 rustc/clang/parser/cargo-ndk/NDK 版本。
-- [ ] Rust candidate 生成最小 staticlib；C++ candidate 生成等价控制面目标。
+- [x] 两候选使用同一 NDK revision、ABI、优化级别和输入。
+- [x] 构建日志打印 rustc/clang/parser/cargo-ndk/NDK 版本。
+- [x] Rust candidate 生成最小 staticlib；C++ candidate 生成等价控制面目标。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不修改 Zygisk 生产依赖图来迁就 candidate。
-- [ ] 不在 D0 默认构建 armv7/x86，先完成 arm64 证据。
+- [x] 不修改 Zygisk 生产依赖图来迁就 candidate。
+- [x] 不在 D0 默认构建 armv7/x86，先完成 arm64 证据。
 
-### RF1-09 `[ ] P0` 运行候选资源与性能对比
+### RF1-09 `[x] P0` 运行候选资源与性能对比
 
 **依赖**
 
@@ -688,21 +687,21 @@ tests/
 
 **RED**
 
-- [ ] 报告缺少完整编译时间、峰值内存、stripped 增量体积或构建时间时失败。
-- [ ] parser-only 与端到端数据混用时报告无效。
+- [x] 报告缺少完整编译时间、峰值内存、stripped 增量体积或构建时间时失败。
+- [x] parser-only 与端到端数据混用时报告无效。
 
 **GREEN**
 
-- [ ] 使用同一典型、大型、极限输入、预热策略和 release 构建。
-- [ ] 分别记录 parser adapter 和完整 vertical slice。
-- [ ] 记录 `toml_edit` trivia/span 共存峰值和 C++ source-region 转换成本。
+- [x] 使用同一典型、大型、极限输入、预热策略和 release 构建。
+- [x] 分别记录 parser adapter 和完整 vertical slice。
+- [x] 记录 `toml_edit` trivia/span 共存峰值和 C++ source-region 转换成本。
 
 **REFACTOR / VERIFY**
 
-- [ ] CPU 编译预算与 fsync 发布预算分开。
-- [ ] 不预设 Rust 或 C++ 必然更快。
+- [x] CPU 编译预算与 fsync 发布预算分开。
+- [x] 不预设 Rust 或 C++ 必然更快。
 
-### RF1-10 `[ ] P0` 冻结 RulesLimits、错误码和唯一 D0 决议
+### RF1-10 `[x] P0` 冻结 RulesLimits、错误码和唯一 D0 决议
 
 **依赖**
 
@@ -710,35 +709,46 @@ tests/
 
 **RED**
 
-- [ ] 对每个 limit 写 boundary-1、boundary、boundary+1 测试；未冻结具体数值时测试配置失败。
-- [ ] 决议缺少未选实现删除清单、严格 TOML比较或 kill criterion 结论时失败。
+- [x] 对每个 limit 写 boundary-1、boundary、boundary+1 测试；未冻结具体数值时测试配置失败。
+- [x] 决议缺少未选实现删除清单、严格 TOML比较或 kill criterion 结论时失败。
 
 **GREEN**
 
-- [ ] 冻结至少：源字节、嵌套深度、token/节点、应用数、每应用规则数、展开后规则数、路径字节/组件、rewrite/segment、诊断/关联位置、生成文本。
-- [ ] 冻结 `PG-ARROW-*`、`PG-RULE-ARROW-SCOPE`、`PG-REDIRECT-SYNTAX`、`PG-DESUGAR-INTERNAL`、`PG-COMPILER-INTERNAL` 和资源超限错误码。
-- [ ] 输出三选一决议。
+- [x] 冻结至少：源字节、嵌套深度、token/节点、应用数、每应用规则数、展开后规则数、路径字节/组件、rewrite/segment、诊断/关联位置、生成文本。
+- [x] 冻结 `PG-ARROW-*`、`PG-RULE-ARROW-SCOPE`、`PG-REDIRECT-SYNTAX`、`PG-DESUGAR-INTERNAL`、`PG-COMPILER-INTERNAL` 和资源超限错误码。
+- [x] 输出三选一决议。
 
 **REFACTOR / VERIFY**
 
-- [ ] 若选择 Rust，删除 C++ parser/fallback 原型并提升单一 compiler crate。
-- [ ] 若选择 C++，删除 Rust D0 artifact，不引入 Rust 生产工具链。
-- [ ] 若选择严格 TOML，删除两个箭头 adapter 原型并更新 format 1 语法。
-- [ ] 不保留“以后也许用”的未选 parser 包装层。
+- [x] 若选择 Rust，删除 C++ parser/fallback 原型并提升单一 compiler crate。（未选择 Rust）
+- [x] 若选择 C++，删除 Rust D0 artifact，不引入 Rust 生产工具链。
+- [x] 若选择严格 TOML，删除两个箭头 adapter 原型并更新 format 1 语法。（未选择严格 TOML）
+- [x] 不保留“以后也许用”的未选 parser 包装层。
 
 **完成证据**
 
-- [ ] `docs/decisions/rules-compiler-d0.md` 或等价决议文件。
-- [ ] 完整命令、版本、输入摘要、原始测量和 Go/No-Go 结论。
+- [x] `docs/decisions/rules-compiler-d0.md` 或等价决议文件。
+- [x] 完整命令、版本、输入摘要、原始测量和 Go/No-Go 结论。
 
 ### RF1 阶段闸门
 
-- [ ] D0 外部断言、toml-test TOML 1.0 fixture 和 binder-neutral golden 已冻结。
-- [ ] C++、Rust 和严格 TOML 在同一标准下完成比较。
-- [ ] 已冻结唯一生产语言/parser/语法。
-- [ ] 未选 adapter、parser、fallback 和构建 artifact 已删除。
-- [ ] RulesLimits 与错误码有边界测试。
-- [ ] 未通过时 RF2/RF3 不开始；严格 TOML 分支直接转 RF4。
+- [x] D0 外部断言、toml-test TOML 1.0 fixture 和 binder-neutral golden 已冻结。
+- [x] C++、Rust 和严格 TOML 在同一标准下完成比较。
+- [x] 已冻结唯一生产语言/parser/语法。
+- [x] 未选 adapter、parser、fallback 和构建 artifact 已删除。
+- [x] RulesLimits 与错误码有边界测试。
+- [x] 未通过时 RF2/RF3 不开始；严格 TOML 分支直接转 RF4。（本次通过，后续按顺序进入 RF2）
+
+### RF1 验收记录（2026-07-26）
+
+- RED：C++ adapter 初始因未完成 parse overload/BOM 处理而编译失败；TOML fixture 守卫拒绝注入的 1.1-only inline-table newline；D0 守卫分别拒绝缺失候选报告、缺少 kill criterion 和残留 Rust artifact；Android 构建脚本拒绝 API 30。
+- 共同语料：137 个 TOML 1.0 fixture（39 valid、98 invalid），6 组 source-map 文件、7 个 generated redirect、3 类 parse error segment 和 5 类 generated binding/scope 场景。
+- 正确性：C++ 与 Rust vertical slice 均生成完全相同的 207-byte policy v5，且通过现有 C++ `DecodePolicy()`；严格 inline table 和映射子表得到同一 blob。
+- 资源结论：C++ 在 4,096 条规则下完整编译中位数 5,167 µs、峰值 working set 17,076,224 B、Android stripped 样本 279,016 B；Rust 分别为 6,960 µs、24,608,768 B、1,504,288 B。
+- 唯一决议：选择 C++20 + toml++ v3.4.0 + TOML 1.0 + 箭头语法；不需要隐藏标记。Rust 候选虽通过正确性验证，但因第二工具链、C ABI 和资源成本未选择，原型已删除。
+- 隔离：NDK r27d（27.3.13750724）、API 31、arm64-v8a 构建通过；Zygisk symbol/string 扫描未发现 parser、Rust runtime 或 rules compiler 依赖。
+- 回归：Release Host 全量 CTest 19/19；`build-native.ps1 -Abi arm64-v8a` 与 RF1 D0 Android 构建均通过。
+- 范围：尚未实现 RF2 流式扫描器或 RF3 rewrite，不把 D0 adapter 接入 daemon。
 
 ---
 

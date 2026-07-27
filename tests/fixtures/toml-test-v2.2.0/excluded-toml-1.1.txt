@@ -1,0 +1,6 @@
+# These upstream fixtures are intentionally excluded from PathGuard format 1.
+valid/datetime/no-seconds.toml
+valid/inline-table/newline-comment.toml
+valid/inline-table/newline.toml
+valid/key/empty-05.toml
+valid/spec-1.1.0/common-0.toml
