@@ -1,8 +1,8 @@
 # PathGuard Next 配置文件重构与箭头脱糖器 · TDD 分阶段实施任务清单
 
-> 状态：RF2 完成（下一阶段为 RF3）
+> 状态：RF3 完成（下一阶段为 RF4）
 >
-> 文档版本：0.3
+> 文档版本：0.4
 >
 > 日期：2026-07-26
 >
@@ -984,7 +984,7 @@ tests/
 
 > 本阶段仅在 RF1 决定保留箭头时执行。
 
-### RF3-01 `[ ] P0` 实现 `ArrowRewrite` 收集和区间不变量
+### RF3-01 `[x] P0` 实现 `ArrowRewrite` 收集和区间不变量
 
 **依赖**
 
@@ -992,20 +992,20 @@ tests/
 
 **RED**
 
-- [ ] rewrite 乱序、重叠、空 operand span、RuleId 重复时失败。
-- [ ] 超过 rewrite 上限或生成大小溢出时失败。
+- [x] rewrite 乱序、重叠、空 operand span、RuleId 重复时失败。
+- [x] 超过 rewrite 上限或生成大小溢出时失败。
 
 **GREEN**
 
-- [ ] 只保存 rule/source/arrow/target span 和单次编译 RuleId。
-- [ ] 扫描无错误后按 rule begin 校验。
+- [x] 只保存 rule/source/arrow/target span 和单次编译 RuleId。
+- [x] 扫描无错误后按 rule begin 校验。
 
 **REFACTOR / VERIFY**
 
-- [ ] RuleId 不做跨编辑持久化或哈希。
-- [ ] 内部不变量失败统一为 `PG-DESUGAR-INTERNAL`。
+- [x] RuleId 不做跨编辑持久化或哈希。
+- [x] 内部不变量失败统一为 `PG-DESUGAR-INTERNAL`。
 
-### RF3-02 `[ ] P0` 实现单次严格 TOML 输出
+### RF3-02 `[x] P0` 实现单次严格 TOML 输出
 
 **依赖**
 
@@ -1013,22 +1013,22 @@ tests/
 
 **RED**
 
-- [ ] 输出不是 `{ from = raw-source, to = raw-target }` 时失败。
-- [ ] source/target raw token 字节发生改变时失败。
-- [ ] 跨行箭头生成多行 inline table 时失败。
-- [ ] 反复 insert/replace 的性能守卫或代码检查失败。
+- [x] 输出不是 `{ from = raw-source, to = raw-target }` 时失败。
+- [x] source/target raw token 字节发生改变时失败。
+- [x] 跨行箭头生成多行 inline table 时失败。
+- [x] 反复 insert/replace 的性能守卫或代码检查失败。
 
 **GREEN**
 
-- [ ] 预计算增量、验证生成大小、一次 reserve、按 offset 单次复制。
-- [ ] 原始逗号、右括号和元素后注释不进入 rewrite span。
+- [x] 预计算增量、验证生成大小、一次 reserve、按 offset 单次复制。
+- [x] 原始逗号、右括号和元素后注释不进入 rewrite span。
 
 **REFACTOR / VERIFY**
 
-- [ ] 总复杂度 O(N + R)。
-- [ ] 不解码再编码字符串。
+- [x] 总复杂度 O(N + R)。
+- [x] 不解码再编码字符串。
 
-### RF3-03 `[ ] P0` 实现无箭头零 rewrite 快路径
+### RF3-03 `[x] P0` 实现无箭头零 rewrite 快路径
 
 **依赖**
 
@@ -1036,20 +1036,20 @@ tests/
 
 **RED**
 
-- [ ] 无外部箭头输入发生 generated buffer、rewrite 或 GeneratedRedirect 分配时失败。
-- [ ] parser input 不再指向原始 source 时失败。
+- [x] 无外部箭头输入发生 generated buffer、rewrite 或 GeneratedRedirect 分配时失败。
+- [x] parser input 不再指向原始 source 时失败。
 
 **GREEN**
 
-- [ ] 允许 parser 直接借用 SourceBuffer。
-- [ ] RewriteMap 使用空/identity 约定。
+- [x] 允许 parser 直接借用 SourceBuffer。
+- [x] RewriteMap 使用空/identity 约定。
 
 **REFACTOR / VERIFY**
 
-- [ ] 快路径与普通路径共享后续 parser/decode API。
-- [ ] 不为快路径建立第二套语义编译器。
+- [x] 快路径与普通路径共享后续 parser/decode API。
+- [x] 不为快路径建立第二套语义编译器。
 
-### RF3-04 `[ ] P0` 实现分段 `RewriteMap`
+### RF3-04 `[x] P0` 实现分段 `RewriteMap`
 
 **依赖**
 
@@ -1057,22 +1057,22 @@ tests/
 
 **RED**
 
-- [ ] copied、synthetic-rule、synthetic-arrow segment 映射均有 boundary 测试。
-- [ ] segment 非递增、重叠、空洞处理不一致或查询越界时失败。
-- [ ] Unicode/CRLF/BOM generated position 映射错误时失败。
+- [x] copied、synthetic-rule、synthetic-arrow segment 映射均有 boundary 测试。
+- [x] segment 非递增、重叠、空洞处理不一致或查询越界时失败。
+- [x] Unicode/CRLF/BOM generated position 映射错误时失败。
 
 **GREEN**
 
-- [ ] segment 按 generated begin 严格递增。
-- [ ] 位置查询使用二分查找；copied 区间线性偏移映射。
-- [ ] 合成前后缀映射整条 rule，`, to =` 映射 arrow。
+- [x] segment 按 generated begin 严格递增。
+- [x] 位置查询使用二分查找；copied 区间线性偏移映射。
+- [x] 合成前后缀映射整条 rule，`, to =` 映射 arrow。
 
 **REFACTOR / VERIFY**
 
-- [ ] 通用 generated-to-original 查询只用于诊断。
-- [ ] 成功路径测试断言 `MapGeneratedPosition()` 调用次数为 0。
+- [x] 通用 generated-to-original 查询只用于诊断。
+- [x] 成功路径测试断言 `MapGeneratedPosition()` 调用次数为 0。
 
-### RF3-05 `[ ] P0` 实现 `GeneratedRedirect` 最小来源记录
+### RF3-05 `[x] P0` 实现 `GeneratedRedirect` 最小来源记录
 
 **依赖**
 
@@ -1080,21 +1080,21 @@ tests/
 
 **RED**
 
-- [ ] generated table/source/target span 不精确时失败。
-- [ ] 原始 source/target 路径错误无法分别定位时失败。
-- [ ] 手写 inline table 被错误标记为 generated 时失败。
+- [x] generated table/source/target span 不精确时失败。
+- [x] 原始 source/target 路径错误无法分别定位时失败。
+- [x] 手写 inline table 被错误标记为 generated 时失败。
 
 **GREEN**
 
-- [ ] 保存 RuleId、原始 rule/source/arrow/target 和 generated table/source/target span。
-- [ ] 不保存普通 TOML token 或 trivia。
+- [x] 保存 RuleId、原始 rule/source/arrow/target 和 generated table/source/target span。
+- [x] 不保存普通 TOML token 或 trivia。
 
 **REFACTOR / VERIFY**
 
-- [ ] RewriteMap 与 GeneratedRedirect 职责不合并。
-- [ ] 不使用 AST path 代替来源证明。
+- [x] RewriteMap 与 GeneratedRedirect 职责不合并。
+- [x] 不使用 AST path 代替来源证明。
 
-### RF3-06 `[ ] P0` 建立 source-map golden 与属性测试
+### RF3-06 `[x] P0` 建立 source-map golden 与属性测试
 
 **依赖**
 
@@ -1102,20 +1102,20 @@ tests/
 
 **RED**
 
-- [ ] 覆盖多次 rewrite 后 parser error 位于各 segment 类型。
-- [ ] 无箭头恒等、operand 字节保持、rewrite 不重叠、生成文本无外部箭头属性。
+- [x] 覆盖多次 rewrite 后 parser error 位于各 segment 类型。
+- [x] 无箭头恒等、operand 字节保持、rewrite 不重叠、生成文本无外部箭头属性。
 
 **GREEN**
 
-- [ ] Golden 固定 byte begin/end、行列、错误码、message key 和 related spans。
-- [ ] 使用 RF1-03 binder-neutral 语料。
+- [x] Golden 固定 byte begin/end、行列、错误码、message key 和 related spans。
+- [x] 使用 RF1-03 binder-neutral 语料。
 
 **REFACTOR / VERIFY**
 
-- [ ] 输出不依赖平台换行转换。
-- [ ] 错误输出不泄漏 generated source 细节。
+- [x] 输出不依赖平台换行转换。
+- [x] 错误输出不泄漏 generated source 细节。
 
-### RF3-07 `[ ] P0` 完整 desugar 管线 fuzz 与畸形前缀组合
+### RF3-07 `[x] P0` 完整 desugar 管线 fuzz 与畸形前缀组合
 
 **依赖**
 
@@ -1123,25 +1123,36 @@ tests/
 
 **RED**
 
-- [ ] 生成 `MalformedTomlPrefix + ValidRedirectSuffix` corpus。
-- [ ] 故意制造 frame 漂移、重叠 rewrite 或 generated mismatch 时能失败。
+- [x] 生成 `MalformedTomlPrefix + ValidRedirectSuffix` corpus。
+- [x] 故意制造 frame 漂移、重叠 rewrite 或 generated mismatch 时能失败。
 
 **GREEN**
 
-- [ ] fuzz `FormatProbe -> lex -> validate -> emit -> source map`。
-- [ ] 不变量：错误不产生 parser candidate，成功不残留外部 arrow，所有 span 在源范围内。
+- [x] fuzz `FormatProbe -> lex -> validate -> emit -> source map`。
+- [x] 不变量：错误不产生 parser candidate，成功不残留外部 arrow，所有 span 在源范围内。
 
 **REFACTOR / VERIFY**
 
-- [ ] 未终止字符串吞没后缀时报告边界错误，不伪造后缀 arrow。
-- [ ] generated mismatch 终止为内部错误，绝不降级成功。
+- [x] 未终止字符串吞没后缀时报告边界错误，不伪造后缀 arrow。
+- [x] generated mismatch 终止为内部错误，绝不降级成功。
 
 ### RF3 阶段闸门
 
-- [ ] all-or-nothing rewrite、零 rewrite 快路径和 O(N + R) emitter 通过。
-- [ ] RewriteMap/GeneratedRedirect golden 与属性测试通过。
-- [ ] 畸形前缀组合不会产生静默错误策略。
-- [ ] 成功路径不调用通用 RewriteMap 查询。
+- [x] all-or-nothing rewrite、零 rewrite 快路径和 O(N + R) emitter 通过。
+- [x] RewriteMap/GeneratedRedirect golden 与属性测试通过。
+- [x] 畸形前缀组合不会产生静默错误策略。
+- [x] 成功路径不调用通用 RewriteMap 查询。
+
+### RF3 验收记录（2026-07-27）
+
+- 实施提交/工作区版本：基于 `72c698d` 的 RF3 工作区；未进入 RF4 parser/AST decode。
+- RED：`pathguard_rules_desugarer_test` 首次因缺少 `pathguard/rules/desugarer.h` 构建失败，证明测试先于生产接口。
+- GREEN：新增单次 emitter、identity 快路径、`RewriteMap`、`GeneratedRedirect`、2 个单元/golden CTest 和 1 个完整管线 fuzz smoke；Host Release CTest `28/28` 通过。
+- Golden：复用 RF1 binder-neutral 的 ASCII、Unicode、CRLF、BOM、跨行和多 rewrite 共 7 行来源记录，以及 copied/synthetic-rule/synthetic-arrow 三类 source-map 错误位置。
+- Fuzz：Clang `20.1.7`、libFuzzer seed `2025751881`，`pathguard_rules_desugar_fuzzer` 运行 10,000 次通过；固定 seed SHA-256 为 `3b6c80b98784e2b9a7d42a2500104281ed2a24d512f551efa947013f40af2292`。
+- Android：`./scripts/build-native.ps1 -Abi arm64-v8a` 通过。
+- 架构边界：无 parser、AST、RulesDocument 或 daemon 接入；成功路径 `RewriteMap` 查询计数为 0；daemon/Zygisk 未链接 `pathguard_rules`。
+- 闸门结论：通过，解锁 RF4。
 
 ---
 

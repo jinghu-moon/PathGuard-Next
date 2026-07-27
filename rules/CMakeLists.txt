@@ -1,5 +1,6 @@
 add_library(pathguard_rules STATIC
   src/arrow_scanner.cpp
+  src/desugarer.cpp
   src/format_probe.cpp
   src/source.cpp
 )

@@ -9,6 +9,7 @@ struct ByteSpan {
     std::uint32_t begin = 0;
     std::uint32_t end = 0;
 
+    std::uint32_t size() const { return end - begin; }
     bool operator==(const ByteSpan&) const = default;
 };
 

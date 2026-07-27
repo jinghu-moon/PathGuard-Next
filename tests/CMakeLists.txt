@@ -164,6 +164,49 @@ add_test(
   COMMAND pathguard_rules_candidate_fuzz_smoke
 )
 
+add_executable(pathguard_rules_desugarer_test
+  unit/rules_desugarer_test.cpp
+)
+target_include_directories(pathguard_rules_desugarer_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_desugarer_test PRIVATE pathguard_rules)
+add_test(
+  NAME pathguard_rules_desugarer_test
+  COMMAND pathguard_rules_desugarer_test
+)
+
+add_executable(pathguard_rules_desugarer_golden_test
+  unit/rules_desugarer_golden_test.cpp
+)
+target_include_directories(pathguard_rules_desugarer_golden_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_compile_definitions(pathguard_rules_desugarer_golden_test PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+target_link_libraries(pathguard_rules_desugarer_golden_test PRIVATE pathguard_rules)
+add_test(
+  NAME pathguard_rules_desugarer_golden_test
+  COMMAND pathguard_rules_desugarer_golden_test
+)
+
+add_executable(pathguard_rules_desugar_fuzz_smoke
+  fuzz/rules_desugar_fuzz_smoke.cpp
+)
+target_include_directories(pathguard_rules_desugar_fuzz_smoke PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_compile_definitions(pathguard_rules_desugar_fuzz_smoke PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+target_link_libraries(pathguard_rules_desugar_fuzz_smoke PRIVATE pathguard_rules)
+add_test(
+  NAME pathguard_rules_desugar_fuzz_smoke
+  COMMAND pathguard_rules_desugar_fuzz_smoke
+)
+
 if(PATHGUARD_BUILD_FUZZERS)
   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "PATHGUARD_BUILD_FUZZERS requires Clang/libFuzzer")
@@ -179,7 +222,7 @@ if(PATHGUARD_BUILD_FUZZERS)
     -fsanitize=${pathguard_library_sanitizers}
     -fno-omit-frame-pointer
   )
-  foreach(target IN ITEMS string candidate)
+  foreach(target IN ITEMS string candidate desugar)
     add_executable(pathguard_rules_${target}_fuzzer
       fuzz/rules_${target}_fuzzer.cpp
     )
