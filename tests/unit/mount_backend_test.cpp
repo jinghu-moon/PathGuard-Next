@@ -33,5 +33,24 @@ int main() {
     capabilities.primitives = 0;
     selection = SelectMountBackend(kMountActionRedirect, capabilities, true);
     assert(selection.reason == MountBackendReason::kCapabilityMissing);
+
+    assert(NextMountBackend(
+        MountBackendKind::kStrictOpenTree, kMountActionDenyAnchor,
+        false, false) == MountBackendKind::kStrictProcFd);
+    assert(NextMountBackend(
+        MountBackendKind::kStrictProcFd, kMountActionRedirect,
+        true, true) == MountBackendKind::kLegacyString);
+    assert(NextMountBackend(
+        MountBackendKind::kStrictProcFd, kMountActionDenyAnchor,
+        true, true) == MountBackendKind::kUnsupported);
+    assert(NextMountBackend(
+        MountBackendKind::kStrictProcFd, kMountActionRedirect,
+        false, true) == MountBackendKind::kUnsupported);
+    assert(NextMountBackend(
+        MountBackendKind::kStrictProcFd, kMountActionRedirect,
+        true, false) == MountBackendKind::kUnsupported);
+    assert(NextMountBackend(
+        MountBackendKind::kLegacyString, kMountActionRedirect,
+        true, true) == MountBackendKind::kUnsupported);
     return 0;
 }

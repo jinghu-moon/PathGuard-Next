@@ -35,5 +35,21 @@ int main() {
         kStride, &argument_count));
     assert(!pathguard::media_query::BuildDenySelection(
         paths, 2, selection, 8, arguments[0], 8, kStride, &argument_count));
+
+    const char* maximum_paths[] = {
+        "/storage/emulated/0/A", "/storage/emulated/0/B",
+        "/storage/emulated/0/C", "/storage/emulated/0/D",
+        "/storage/emulated/0/E", "/storage/emulated/0/F",
+        "/storage/emulated/0/G", "/storage/emulated/0/H",
+    };
+    char maximum_selection[8192]{};
+    char maximum_arguments[16][kStride]{};
+    assert(pathguard::media_query::BuildDenySelection(
+        maximum_paths, 8, maximum_selection, sizeof(maximum_selection),
+        maximum_arguments[0], 16, kStride, &argument_count));
+    assert(argument_count == 16);
+    assert(strcmp(maximum_arguments[0], maximum_paths[0]) == 0);
+    assert(strcmp(maximum_arguments[15],
+                  "/storage/emulated/0/H/%") == 0);
     return 0;
 }

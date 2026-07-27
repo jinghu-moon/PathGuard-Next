@@ -41,7 +41,7 @@ for ($index = 1; $index -le $Samples; ++$index) {
     $log = & adb logcat -d -v threadtime
     $samplePath = Join-Path $output ("sample-{0:D3}.log" -f $index)
     $log | Set-Content -LiteralPath $samplePath -Encoding utf8
-    $log | Select-String -Pattern 'PathGuard.*(perf topology_candidate|perf probe_warm|perf probe_total|perf companion|perf zygisk_post|probe_runtime|mount_step)' |
+    $log | Select-String -Pattern 'PathGuard.*(perf topology_candidate|perf companion|perf zygisk_post|mount backend unavailable|mount backend preflight required|mount_pin_loop|mount_step)' |
         ForEach-Object { "sample=$index $($_.Line)" } |
         Add-Content -LiteralPath $summary -Encoding utf8
 }

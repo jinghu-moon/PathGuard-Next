@@ -50,14 +50,13 @@ constexpr uint32_t kBootstrapVersion = 5;
 constexpr uint32_t kCompanionResultMagic = 0x52534750;
 constexpr uint32_t kCompanionResultVersion = 1;
 constexpr uint32_t kSharedStateMagic = 0x53534750;
-constexpr uint32_t kSharedStateVersion = 3;
+constexpr uint32_t kSharedStateVersion = 4;
 constexpr size_t kMaxMountRules = 64;
 constexpr size_t kMaxPlanPathBytes = 64 * 1024;
 constexpr size_t kMaxProcessNameBytes = 256;
 constexpr int kProcessReadyTimeoutMs = 5000;
 constexpr int kCompanionIoTimeoutMs = 5000;
 constexpr int kAppResultTimeoutMs = 300;
-constexpr int kCapabilityProbeGraceMs = 500;
 constexpr int kApplyingCompletionGraceMs = 500;
 constexpr int kChildTerminateGraceMs = 1000;
 constexpr int kApplyingOwnerDeathTimeoutMs = 10000;
@@ -166,8 +165,6 @@ struct SharedMountState {
     uint32_t version = kSharedStateVersion;
     alignas(4) uint32_t status = static_cast<uint32_t>(
         pathguard::MountTransactionState::kPending);
-    alignas(4) uint32_t preflight_phase = static_cast<uint32_t>(
-        pathguard::MountPreflightPhase::kIdle);
     CompanionResult result;
 };
 
@@ -176,6 +173,12 @@ using MountMutationJournal =
 
 struct MountTransactionWorkspace {
     pathguard::PinnedIdentity sources[kMaxMountRules]{};
+    pathguard::PinnedIdentity targets[kMaxMountRules]{};
+    pathguard::CanonicalLocator source_locators[kMaxMountRules]{};
+    pathguard::CanonicalLocator target_locators[kMaxMountRules]{};
+    pathguard::MountApplyTiming timings[kMaxMountRules]{};
+    uint64_t target_pin_ns[kMaxMountRules]{};
+    uint8_t source_indexes[kMaxMountRules]{};
     MountMutationJournal journal;
 };
 
@@ -1213,18 +1216,6 @@ MountState LoadSharedStatus(const SharedMountState* state) {
         __atomic_load_n(&state->status, __ATOMIC_ACQUIRE));
 }
 
-pathguard::MountPreflightPhase LoadSharedPreflightPhase(
-        const SharedMountState* state) {
-    return static_cast<pathguard::MountPreflightPhase>(
-        __atomic_load_n(&state->preflight_phase, __ATOMIC_ACQUIRE));
-}
-
-void StoreSharedPreflightPhase(SharedMountState* state,
-                               pathguard::MountPreflightPhase phase) {
-    __atomic_store_n(&state->preflight_phase, static_cast<uint32_t>(phase),
-                     __ATOMIC_RELEASE);
-}
-
 bool IsCancelRequested(const SharedMountState* state) {
     return state != nullptr
         && LoadSharedStatus(state) == MountState::kCancelRequested;
@@ -1313,62 +1304,12 @@ pathguard::MountBackendProbe ProbeMountBackendsIsolated(
     const pid_t child = fork();
     if (child == 0) {
         close(sockets[0]);
-        probe.uid = static_cast<uint32_t>(getuid());
-        probe.euid = static_cast<uint32_t>(geteuid());
-        struct stat namespace_stat {};
-        if (stat("/proc/self/ns/mnt", &namespace_stat) == 0) {
-            probe.namespace_before = namespace_stat.st_ino;
-        }
-        FILE* status = fopen("/proc/self/status", "re");
-        if (status != nullptr) {
-            char line[256]{};
-            while (fgets(line, sizeof(line), status) != nullptr) {
-                unsigned long long value = 0;
-                if (sscanf(line, "CapEff:\t%llx", &value) == 1) {
-                    probe.cap_effective = value;
-                } else if (sscanf(line, "CapBnd:\t%llx", &value) == 1) {
-                    probe.cap_bounding = value;
-                }
-            }
-            fclose(status);
-        }
-        FILE* context = fopen("/proc/self/attr/current", "re");
-        if (context != nullptr) {
-            if (fgets(probe.selinux_context, sizeof(probe.selinux_context), context)) {
-                probe.selinux_context[strcspn(
-                    probe.selinux_context, "\r\n")] = '\0';
-            }
-            fclose(context);
-        }
-        if (unshare(CLONE_NEWNS) != 0) {
-            probe.unshare_error = errno;
-            probe.error = probe.unshare_error;
-        } else if (mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) {
-            probe.private_error = errno;
-            probe.error = probe.private_error;
+        if (unshare(CLONE_NEWNS) != 0
+            || mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) {
+            probe.error = errno;
         } else {
-            if (stat("/proc/self/ns/mnt", &namespace_stat) == 0) {
-                probe.namespace_after = namespace_stat.st_ino;
-            }
-            const uint32_t uid = probe.uid;
-            const uint32_t euid = probe.euid;
-            const uint64_t cap_effective = probe.cap_effective;
-            const uint64_t cap_bounding = probe.cap_bounding;
-            const uint64_t namespace_before = probe.namespace_before;
-            const uint64_t namespace_after = probe.namespace_after;
-            char selinux_context[sizeof(probe.selinux_context)]{};
-            memcpy(selinux_context, probe.selinux_context,
-                   sizeof(selinux_context));
             probe = pathguard::ProbeDirectoryMountBackends(
                 source_path, target_path);
-            probe.uid = uid;
-            probe.euid = euid;
-            probe.cap_effective = cap_effective;
-            probe.cap_bounding = cap_bounding;
-            probe.namespace_before = namespace_before;
-            probe.namespace_after = namespace_after;
-            memcpy(probe.selinux_context, selinux_context,
-                   sizeof(probe.selinux_context));
         }
         send(sockets[1], &probe, sizeof(probe), MSG_NOSIGNAL);
         close(sockets[1]);
@@ -1384,115 +1325,6 @@ pathguard::MountBackendProbe ProbeMountBackendsIsolated(
         while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) {}
     }
     return probe;
-}
-
-void LogProbeStep(const char* name,
-                  const pathguard::MountBackendProbeStep& step) {
-    LOGI("probe_step backend=%s before_errno=%d before_count=%llu "
-         "apply_errno=%d stat_errno=%d identity=%u after_errno=%d "
-         "after_count=%llu mount_id=%llu verify_errno=%d rollback_errno=%d "
-         "remaining_errno=%d remaining_id=%llu success=%u",
-         name, step.before_error,
-         static_cast<unsigned long long>(step.before_count), step.apply_error,
-         step.stat_error, step.identity_match, step.after_error,
-         static_cast<unsigned long long>(step.after_count),
-         static_cast<unsigned long long>(step.mounted_id), step.verify_error,
-         step.rollback_error, step.remaining_error,
-         static_cast<unsigned long long>(step.remaining_id), step.success);
-}
-
-// P0a: process-level capability probe cache. Per ADR-0005 the probe result
-// binds to boot identity, SELinux environment and policy flags; it does NOT
-// depend on the target namespace (ProbeDirectoryMountBackends forks its own
-// isolated unshare+MS_PRIVATE namespace). Verified on-device: probe run in the
-// companion global ns and inside an app ns produce identical primitives.
-// The cache lives in the persistent companion parent process so forked
-// per-request children inherit it via COW fork and never re-probe.
-struct ProbeCacheKey {
-    char boot_id[48];
-    int selinux_enforce;
-    uint32_t policy_flags;
-    uint64_t selinux_policy_identity;
-    uint64_t topology_generation;
-};
-
-struct ProbeCacheEntry {
-    bool valid = false;
-    ProbeCacheKey key{};
-    pathguard::MountBackendProbe probe{};
-};
-
-ProbeCacheEntry g_probe_cache;
-
-bool ReadBootId(char* output, size_t size) {
-    if (output == nullptr || size == 0) return false;
-    output[0] = '\0';
-    FILE* input = fopen("/proc/sys/kernel/random/boot_id", "re");
-    if (input == nullptr) return false;
-    const char* result = fgets(output, static_cast<int>(size), input);
-    fclose(input);
-    if (result == nullptr) return false;
-    output[strcspn(output, "\r\n")] = '\0';
-    return output[0] != '\0';
-}
-
-int ReadSelinuxEnforce() {
-    FILE* input = fopen("/sys/fs/selinux/enforce", "re");
-    if (input == nullptr) return -1;
-    int value = -1;
-    if (fscanf(input, "%d", &value) != 1) value = -1;
-    fclose(input);
-    return value;
-}
-
-uint64_t ReadSelinuxPolicyIdentity() {
-    struct stat value {};
-    if (stat("/sys/fs/selinux/policy", &value) != 0) return 0;
-    char canonical[192]{};
-    const int written = snprintf(
-        canonical, sizeof(canonical), "%llu:%llu:%llu:%llu",
-        static_cast<unsigned long long>(value.st_dev),
-        static_cast<unsigned long long>(value.st_ino),
-        static_cast<unsigned long long>(value.st_size),
-        static_cast<unsigned long long>(value.st_mtim.tv_sec));
-    return written > 0 && static_cast<size_t>(written) < sizeof(canonical)
-        ? pathguard::binary_format::Fnv1a64(
-            reinterpret_cast<const uint8_t*>(canonical),
-            static_cast<size_t>(written))
-        : 0;
-}
-
-bool ProbeKeyMatches(const ProbeCacheKey& a, const ProbeCacheKey& b) {
-    return a.selinux_enforce == b.selinux_enforce
-        && a.policy_flags == b.policy_flags
-        && a.selinux_policy_identity == b.selinux_policy_identity
-        && a.topology_generation == b.topology_generation
-        && strncmp(a.boot_id, b.boot_id, sizeof(a.boot_id)) == 0;
-}
-
-// Runs (or reuses) the isolated capability probe. Called from the persistent
-// companion parent so the result is cached across requests. source_path and
-// target_path only need to be a representative existing storage pair; the probe
-// mounts inside its own throwaway namespace and the capability outcome is path
-// independent on a given device/topology.
-const pathguard::MountBackendProbe& GetOrProbeMountBackends(
-        const char* source_path, const char* target_path,
-        uint32_t policy_flags, uint64_t topology_generation, bool* cache_hit) {
-    ProbeCacheKey key{};
-    ReadBootId(key.boot_id, sizeof(key.boot_id));
-    key.selinux_enforce = ReadSelinuxEnforce();
-    key.policy_flags = policy_flags;
-    key.selinux_policy_identity = ReadSelinuxPolicyIdentity();
-    key.topology_generation = topology_generation;
-    if (g_probe_cache.valid && ProbeKeyMatches(g_probe_cache.key, key)) {
-        if (cache_hit != nullptr) *cache_hit = true;
-        return g_probe_cache.probe;
-    }
-    g_probe_cache.probe = ProbeMountBackendsIsolated(source_path, target_path);
-    g_probe_cache.key = key;
-    g_probe_cache.valid = true;
-    if (cache_hit != nullptr) *cache_hit = false;
-    return g_probe_cache.probe;
 }
 
 bool StoragePropagationRequiresPrivate(
@@ -1669,59 +1501,14 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
             pathguard::RuntimeReason::kUnsupportedAction);
         return perf;
     }
-    const char* first_visible = PlanPath(plan, plan.mounts[0].visible_path);
-    if (!BuildPathUnderRoot(plan.topology.visible_root, first_visible,
-                            target_path, sizeof(target_path))
-        || !BuildMountSourcePath(plan, plan.mounts[0], deny_anchor_path,
-                                source_path, sizeof(source_path))) {
-        perf.result = EINVAL;
-        return perf;
-    }
-    const uint64_t probe_started = pathguard::perf::NowNs();
-    bool probe_cache_hit = false;
-    const pathguard::MountBackendProbe probe = GetOrProbeMountBackends(
-        source_path, target_path, plan.policy_flags,
-        plan.topology.generation, &probe_cache_hit);
-    LOGI("perf probe_total pid=%d probe_us=%llu cached=%d", pid,
-         static_cast<unsigned long long>(pathguard::perf::NsToUs(
-             pathguard::perf::ElapsedNs(probe_started))),
-         probe_cache_hit ? 1 : 0);
-    LOGI("probe_runtime uid=%u euid=%u context=%s cap_eff=%llx cap_bnd=%llx "
-         "ns_before=%llu ns_after=%llu unshare_errno=%d private_errno=%d "
-         "probe_errno=%d primitives=%llx source=%s target=%s",
-         probe.uid, probe.euid,
-         probe.selinux_context[0] == '\0' ? "<empty>" : probe.selinux_context,
-         static_cast<unsigned long long>(probe.cap_effective),
-         static_cast<unsigned long long>(probe.cap_bounding),
-         static_cast<unsigned long long>(probe.namespace_before),
-         static_cast<unsigned long long>(probe.namespace_after),
-         probe.unshare_error, probe.private_error, probe.error,
-         static_cast<unsigned long long>(probe.capabilities.primitives),
-         source_path, target_path);
-    LogProbeStep("open_tree", probe.open_tree);
-    LogProbeStep("proc_fd", probe.proc_fd);
-    LogProbeStep("legacy_string", probe.legacy_string);
-    pathguard::MountBackendCapabilities capabilities = probe.capabilities;
     const bool allow_legacy = (plan.policy_flags
         & pathguard::binary_format::kPolicyFlagAllowLegacyStringBind) != 0;
-    const auto selection = pathguard::SelectMountBackend(
-        required_actions, capabilities, allow_legacy);
-    perf.backend = static_cast<uint32_t>(selection.backend);
-    perf.backend_reason = static_cast<uint32_t>(selection.reason);
-    if (selection.backend == pathguard::MountBackendKind::kUnsupported) {
-        perf.result = probe.error != 0 ? probe.error : ENOTSUP;
-        return perf;
-    }
-    if (selection.backend == pathguard::MountBackendKind::kLegacyString
-        && !IsDisposableAppNamespace(pid, uid, namespace_identity.st_dev,
-                                     namespace_identity.st_ino)) {
-        perf.backend = static_cast<uint32_t>(
-            pathguard::MountBackendKind::kUnsupported);
-        perf.backend_reason = static_cast<uint32_t>(
-            pathguard::MountBackendReason::kCapabilityMissing);
-        perf.result = ENOTSUP;
-        return perf;
-    }
+    pathguard::MountBackendKind backend =
+        pathguard::MountBackendKind::kStrictOpenTree;
+    bool backend_locked = false;
+    perf.backend = static_cast<uint32_t>(backend);
+    perf.backend_reason = static_cast<uint32_t>(
+        pathguard::MountBackendReason::kNone);
     MountTransactionWorkspace* workspace = CreateMountTransactionWorkspace();
     if (workspace == nullptr) {
         perf.result = errno != 0 ? errno : ENOMEM;
@@ -1742,9 +1529,13 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
     perf.mountinfo_read_ns = current_mounts.read_ns;
     perf.mountinfo_parse_ns = current_mounts.parse_ns;
     size_t pinned_source_count = 0;
+    size_t pinned_target_count = 0;
     const auto finish_preflight = [&](int error) {
         for (size_t index = 0; index < pinned_source_count; ++index) {
             pathguard::ClosePinnedIdentity(&workspace->sources[index]);
+        }
+        for (size_t index = 0; index < pinned_target_count; ++index) {
+            pathguard::ClosePinnedIdentity(&workspace->targets[index]);
         }
         pathguard::DestroyMountInfoSnapshot(&current_mounts);
         DestroyMountTransactionWorkspace(workspace);
@@ -1753,43 +1544,59 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
     };
     const uint64_t src_pin_started = pathguard::perf::NowNs();
     for (size_t rule_index = 0; rule_index < plan.count; ++rule_index) {
-        if (!BuildMountSourcePath(
+        const char* visible_path = PlanPath(
+            plan, plan.mounts[rule_index].visible_path);
+        const char* backing_path = PlanPath(
+            plan, plan.mounts[rule_index].backing_path);
+        if (!IsExecutableMountAction(plan.mounts[rule_index].action)
+            || visible_path == nullptr || backing_path == nullptr
+            || !BuildPathUnderRoot(plan.topology.visible_root, visible_path,
+                                   target_path, sizeof(target_path))
+            || !BuildMountSourcePath(
                 plan, plan.mounts[rule_index], deny_anchor_path,
                 source_path, sizeof(source_path))) {
             return finish_preflight(EINVAL);
         }
-        const int pin_error = pathguard::PinDirectory(
-            current_mounts, source_path, &workspace->sources[rule_index]);
-        if (pin_error != 0) {
-            return finish_preflight(pin_error);
+
+        size_t source_index = 0;
+        while (source_index < pinned_source_count
+               && strcmp(workspace->source_locators[source_index].path,
+                         source_path) != 0) {
+            ++source_index;
         }
-        ++pinned_source_count;
+        if (source_index == pinned_source_count) {
+            const int source_pin_error = pathguard::PinDirectory(
+                current_mounts, source_path,
+                &workspace->sources[source_index]);
+            if (source_pin_error != 0) {
+                return finish_preflight(source_pin_error);
+            }
+            snprintf(workspace->source_locators[source_index].path,
+                     sizeof(workspace->source_locators[source_index].path),
+                     "%s", source_path);
+            ++pinned_source_count;
+        }
+        workspace->source_indexes[rule_index] =
+            static_cast<uint8_t>(source_index);
+
+        const uint64_t target_pin_started = pathguard::perf::NowNs();
+        const int target_pin_error = pathguard::PinDirectory(
+            current_mounts, target_path, &workspace->targets[rule_index]);
+        workspace->target_pin_ns[rule_index] =
+            pathguard::perf::ElapsedNs(target_pin_started);
+        if (target_pin_error != 0) {
+            return finish_preflight(target_pin_error);
+        }
+        ++pinned_target_count;
+        snprintf(workspace->target_locators[rule_index].path,
+                 sizeof(workspace->target_locators[rule_index].path),
+                 "%s", target_path);
     }
     perf.source_pin_ns = pathguard::perf::ElapsedNs(src_pin_started);
-    LOGI("perf_stage source_pin_loop_us=%llu count=%u",
+    LOGI("perf_stage mount_pin_loop_us=%llu sources=%zu targets=%zu",
          static_cast<unsigned long long>(pathguard::perf::NsToUs(
              perf.source_pin_ns)),
-         plan.count);
-    uint64_t actual_start_time = 0;
-    if (!ReadProcessUid(pid, uid)
-        || !ReadProcessStartTime(pid, &actual_start_time)
-        || actual_start_time != expected_start_time) {
-        return finish_preflight(ESRCH);
-    }
-    ProcessPlan current_plan;
-    const uint64_t current_policy_started = pathguard::perf::NowNs();
-    const bool current_policy_valid = LoadProcessPlan(
-        module_dir_fd, plan.process_name, static_cast<jint>(uid),
-        &current_plan, nullptr) && SameProcessPlan(plan, current_plan);
-    perf.policy_revalidate_ns = pathguard::perf::ElapsedNs(
-        current_policy_started);
-    if (!current_policy_valid) {
-        perf.result = ESTALE;
-        perf.runtime_reason = static_cast<uint32_t>(
-            pathguard::RuntimeReason::kPolicyChanged);
-        return finish_preflight(ESTALE);
-    }
-
+         pinned_source_count, pinned_target_count);
 #if PATHGUARD_TEST_PRE_LEASE_DELAY_MS > 0
     LOGI("transaction test pre-lease delay: pid=%d delay_ms=%d",
          pid, PATHGUARD_TEST_PRE_LEASE_DELAY_MS);
@@ -1812,7 +1619,7 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
         lease_policy_valid = LoadProcessPlan(
             module_dir_fd, plan.process_name, static_cast<jint>(uid),
             &lease_plan, nullptr) && SameProcessPlan(plan, lease_plan);
-        perf.policy_revalidate_ns += pathguard::perf::ElapsedNs(
+        perf.policy_revalidate_ns = pathguard::perf::ElapsedNs(
             lease_policy_started);
     }
     bool lease_topology_valid = false;
@@ -1830,6 +1637,37 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
             : !lease_policy_valid ? pathguard::RuntimeReason::kPolicyChanged
             : pathguard::RuntimeReason::kTopologyChanged);
         return finish_preflight(ESTALE);
+    }
+    if (propagation_requires_private) {
+        const size_t first_source_index = workspace->source_indexes[0];
+        const pathguard::MountBackendProbe probe = ProbeMountBackendsIsolated(
+            workspace->source_locators[first_source_index].path,
+            workspace->target_locators[0].path);
+        const pathguard::MountBackendSelection selection =
+            pathguard::SelectMountBackend(
+                required_actions, probe.capabilities, allow_legacy);
+        perf.backend = static_cast<uint32_t>(selection.backend);
+        perf.backend_reason = static_cast<uint32_t>(selection.reason);
+        if (selection.backend == pathguard::MountBackendKind::kUnsupported) {
+            perf.runtime_reason = static_cast<uint32_t>(
+                pathguard::RuntimeReason::kPreflightFailed);
+            return finish_preflight(
+                probe.error != 0 ? probe.error : ENOTSUP);
+        }
+        if (selection.backend == pathguard::MountBackendKind::kLegacyString
+            && !IsDisposableAppNamespace(
+                pid, uid, namespace_identity.st_dev,
+                namespace_identity.st_ino)) {
+            perf.backend = static_cast<uint32_t>(
+                pathguard::MountBackendKind::kUnsupported);
+            perf.backend_reason = static_cast<uint32_t>(
+                pathguard::MountBackendReason::kCapabilityMissing);
+            return finish_preflight(ENOTSUP);
+        }
+        backend = selection.backend;
+        backend_locked = true;
+        LOGI("mount backend preflight required: pid=%d backend=%u",
+             pid, static_cast<unsigned>(backend));
     }
     if (IsCancelRequested(state)) {
         return finish_preflight(ECANCELED);
@@ -1852,111 +1690,80 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
 
     const uint64_t mounts_started = pathguard::perf::NowNs();
     bool untracked_mutation = false;
+    pathguard::MountInfoSnapshot mutation_snapshot;
+    bool mutation_snapshot_ready = false;
     for (size_t rule_index = 0; rule_index < plan.count && error == 0; ++rule_index) {
         if (IsCancelRequested(state)) {
             error = ECANCELED;
             break;
         }
         const uint64_t mount_started = pathguard::perf::NowNs();
-        const char* visible_path = PlanPath(
-            plan, plan.mounts[rule_index].visible_path);
-        const char* backing_path = PlanPath(
-            plan, plan.mounts[rule_index].backing_path);
-        if (!IsExecutableMountAction(plan.mounts[rule_index].action)
-            || visible_path == nullptr || backing_path == nullptr
-            || !BuildPathUnderRoot(plan.topology.visible_root, visible_path,
-                                   target_path, sizeof(target_path))
-            || !BuildMountSourcePath(
-                plan, plan.mounts[rule_index], deny_anchor_path,
-                source_path, sizeof(source_path))) {
+        const size_t source_index = workspace->source_indexes[rule_index];
+        if (source_index >= pinned_source_count) {
             error = EINVAL;
             break;
         }
-        if (error == 0) {
-            pathguard::PinnedIdentity target;
-            const uint64_t target_pin_started = pathguard::perf::NowNs();
-            error = pathguard::PinDirectory(
-                current_mounts, target_path, &target);
-            const uint64_t target_pin_ns = pathguard::perf::ElapsedNs(target_pin_started);
-            if (error == 0) {
-                pathguard::CanonicalLocator source_locator;
-                pathguard::CanonicalLocator target_locator;
-                snprintf(source_locator.path, sizeof(source_locator.path), "%s", source_path);
-                snprintf(target_locator.path, sizeof(target_locator.path), "%s", target_path);
-                pathguard::MountApplyTiming apply_timing;
-                pathguard::MountApplyResult apply_result =
-                    pathguard::ApplyDirectoryMountRaw(
-                        selection.backend, static_cast<uint32_t>(rule_index),
-                        workspace->sources[rule_index], target, source_locator,
-                        target_locator, &apply_timing);
-                // Journal the mount the moment the syscall mutated the ns, even
-                // while its mount ID is not known yet. Verification fills the ID
-                // from the post-mutation snapshot and updates this same entry.
-                if (apply_result.mutation_happened()) {
-                    if (!workspace->journal.Push(apply_result.mount)) {
-                        error = EOVERFLOW;
-                        untracked_mutation = true;
-                    }
-                }
-#if PATHGUARD_TEST_CRASH_AFTER_MOUNT
-                if (workspace->journal.size() == 1) _exit(86);
-#endif
-                if (error == 0 && apply_result.ok()
-                    && apply_result.mutation_happened()) {
-                    pathguard::MountInfoSnapshot after_mounts;
-                    const int after_error = pathguard::CaptureMountInfoSnapshot(
-                        &after_mounts);
-                    if (after_error == 0) {
-                        ++perf.mountinfo_snapshot_count;
-                        perf.mountinfo_read_ns += after_mounts.read_ns;
-                        perf.mountinfo_parse_ns += after_mounts.parse_ns;
-                        apply_result.failure = pathguard::VerifyDirectoryMount(
-                            current_mounts, after_mounts,
-                            workspace->sources[rule_index], target,
-                            target_locator, &apply_result.mount, &apply_timing);
-                        if (!workspace->journal.UpdateLast(apply_result.mount)) {
-                            apply_result.failure.stage =
-                                pathguard::MountOperationStage::kVerify;
-                            apply_result.failure.error = EOVERFLOW;
-                            apply_result.failure.mutation_happened = 1;
-                            untracked_mutation = true;
-                        }
-                        if (apply_result.failure.error == 0) {
-                            pathguard::DestroyMountInfoSnapshot(&current_mounts);
-                            current_mounts = after_mounts;
-                            after_mounts = {};
-                        }
-                    } else {
-                        apply_result.failure.stage =
-                            pathguard::MountOperationStage::kVerify;
-                        apply_result.failure.error = after_error;
-                        apply_result.failure.mutation_happened = 1;
-                    }
-                    pathguard::DestroyMountInfoSnapshot(&after_mounts);
-                }
-                if (error == 0) error = apply_result.failure.error;
-                perf.failure_stage = static_cast<uint32_t>(
-                    apply_result.failure.stage);
-                LOGI("perf mount_step rule=%zu backend=%u target_pin_us=%llu "
-                     "verify_pinned_us=%llu before_scan_us=%llu apply_raw_us=%llu "
-                     "verify_us=%llu verify_stat_us=%llu verify_mi_read_us=%llu "
-                     "verify_mi_parse_us=%llu mutation=%d stage=%u errno=%d mount_id=%llu",
-                     rule_index, static_cast<uint32_t>(selection.backend),
-                     static_cast<unsigned long long>(target_pin_ns / 1000u),
-                     static_cast<unsigned long long>(apply_timing.verify_pinned_ns / 1000u),
-                     static_cast<unsigned long long>(apply_timing.before_scan_ns / 1000u),
-                     static_cast<unsigned long long>(apply_timing.apply_raw_ns / 1000u),
-                     static_cast<unsigned long long>(apply_timing.verify_ns / 1000u),
-                     static_cast<unsigned long long>(apply_timing.verify_stat_ns / 1000u),
-                     static_cast<unsigned long long>(apply_timing.verify_mountinfo_read_ns / 1000u),
-                     static_cast<unsigned long long>(apply_timing.verify_mountinfo_parse_ns / 1000u),
-                     apply_result.mutation_happened() ? 1 : 0,
-                     static_cast<unsigned>(apply_result.failure.stage),
-                     apply_result.failure.error,
-                     static_cast<unsigned long long>(apply_result.mount.mount_id));
+        pathguard::MountApplyResult apply_result;
+        while (true) {
+            apply_result = pathguard::ApplyDirectoryMountRaw(
+                backend, static_cast<uint32_t>(rule_index),
+                workspace->sources[source_index],
+                workspace->targets[rule_index],
+                workspace->source_locators[source_index],
+                workspace->target_locators[rule_index],
+                &workspace->timings[rule_index]);
+            if (apply_result.ok() || apply_result.mutation_happened()
+                || backend_locked || rule_index != 0) {
+                break;
             }
-            pathguard::ClosePinnedIdentity(&target);
+
+            bool legacy_namespace_allowed = false;
+            if (backend == pathguard::MountBackendKind::kStrictProcFd
+                && allow_legacy
+                && required_actions == pathguard::kMountActionRedirect) {
+                legacy_namespace_allowed = IsDisposableAppNamespace(
+                    pid, uid, namespace_identity.st_dev,
+                    namespace_identity.st_ino);
+            }
+            const pathguard::MountBackendKind next =
+                pathguard::NextMountBackend(
+                    backend, required_actions, allow_legacy,
+                    legacy_namespace_allowed);
+            LOGI("mount backend unavailable: pid=%d backend=%u errno=%d next=%u",
+                 pid, static_cast<unsigned>(backend),
+                 apply_result.failure.error, static_cast<unsigned>(next));
+            if (next == pathguard::MountBackendKind::kUnsupported) {
+                perf.backend = static_cast<uint32_t>(next);
+                perf.backend_reason = static_cast<uint32_t>(
+                    required_actions == pathguard::kMountActionRedirect
+                        && !allow_legacy
+                    ? pathguard::MountBackendReason::kLegacyNotAuthorized
+                    : pathguard::MountBackendReason::kCapabilityMissing);
+                break;
+            }
+            backend = next;
+            perf.backend = static_cast<uint32_t>(backend);
         }
+        if (apply_result.ok() && apply_result.mutation_happened()) {
+            backend_locked = true;
+            perf.backend = static_cast<uint32_t>(backend);
+            perf.backend_reason = static_cast<uint32_t>(
+                pathguard::MountBackendReason::kNone);
+        }
+        // Record every successful namespace mutation before any later work.
+        // The one final snapshot fills all mount IDs in this journal.
+        if (apply_result.mutation_happened()) {
+            if (!workspace->journal.Push(apply_result.mount)) {
+                error = EOVERFLOW;
+                untracked_mutation = true;
+            }
+        }
+#if PATHGUARD_TEST_CRASH_AFTER_MOUNT
+        if (workspace->journal.size() == 1) _exit(86);
+#endif
+        if (error == 0) error = apply_result.failure.error;
+        perf.failure_stage = static_cast<uint32_t>(
+            apply_result.failure.stage);
 #if PATHGUARD_TEST_MOUNT_DELAY_MS > 0
         if (workspace->journal.size() == 1) {
             usleep(static_cast<useconds_t>(PATHGUARD_TEST_MOUNT_DELAY_MS) * 1000u);
@@ -1966,6 +1773,76 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
         if (mount_ns > perf.mount_max_ns) perf.mount_max_ns = mount_ns;
     }
     if (error == 0 && IsCancelRequested(state)) error = ECANCELED;
+
+    if (!workspace->journal.empty()) {
+        const int final_snapshot_error = pathguard::CaptureMountInfoSnapshot(
+            &mutation_snapshot);
+        if (final_snapshot_error != 0) {
+            if (error == 0) error = final_snapshot_error;
+            perf.failure_stage = static_cast<uint32_t>(
+                pathguard::MountOperationStage::kVerify);
+        } else {
+            mutation_snapshot_ready = true;
+            ++perf.mountinfo_snapshot_count;
+            perf.mountinfo_read_ns += mutation_snapshot.read_ns;
+            perf.mountinfo_parse_ns += mutation_snapshot.parse_ns;
+            const size_t expected_mount_count = workspace->journal.size();
+            for (size_t journal_index = 0;
+                 journal_index < workspace->journal.size(); ++journal_index) {
+                const pathguard::AppliedMount* recorded =
+                    workspace->journal.At(journal_index);
+                if (recorded == nullptr
+                    || recorded->operation_id >= plan.count) {
+                    if (error == 0) error = EOVERFLOW;
+                    untracked_mutation = true;
+                    continue;
+                }
+                const size_t rule_index = recorded->operation_id;
+                const size_t source_index =
+                    workspace->source_indexes[rule_index];
+                if (source_index >= pinned_source_count) {
+                    if (error == 0) error = EOVERFLOW;
+                    untracked_mutation = true;
+                    continue;
+                }
+                pathguard::AppliedMount verified = *recorded;
+                pathguard::MountError verify = pathguard::VerifyDirectoryMount(
+                    current_mounts, mutation_snapshot,
+                    workspace->sources[source_index],
+                    workspace->targets[rule_index],
+                    workspace->target_locators[rule_index], &verified,
+                    expected_mount_count, &workspace->timings[rule_index]);
+                if (verify.identity_confirmed != 0
+                    && !workspace->journal.UpdateAt(journal_index, verified)) {
+                    verify.stage = pathguard::MountOperationStage::kVerify;
+                    verify.error = EOVERFLOW;
+                    verify.mutation_happened = 1;
+                    untracked_mutation = true;
+                }
+                if (error == 0 && verify.error != 0) error = verify.error;
+                if (verify.error != 0) {
+                    perf.failure_stage = static_cast<uint32_t>(verify.stage);
+                }
+                const pathguard::MountApplyTiming& timing =
+                    workspace->timings[rule_index];
+                LOGI("perf mount_step rule=%zu backend=%u target_pin_us=%llu "
+                     "verify_pinned_us=%llu apply_raw_us=%llu verify_us=%llu "
+                     "verify_stat_us=%llu mutation=1 stage=%u errno=%d mount_id=%llu",
+                     rule_index, static_cast<uint32_t>(backend),
+                     static_cast<unsigned long long>(
+                         workspace->target_pin_ns[rule_index] / 1000u),
+                     static_cast<unsigned long long>(
+                         timing.verify_pinned_ns / 1000u),
+                     static_cast<unsigned long long>(
+                         timing.apply_raw_ns / 1000u),
+                     static_cast<unsigned long long>(timing.verify_ns / 1000u),
+                     static_cast<unsigned long long>(
+                         timing.verify_stat_ns / 1000u),
+                     static_cast<unsigned>(verify.stage), verify.error,
+                     static_cast<unsigned long long>(verified.mount_id));
+            }
+        }
+    }
     perf.mount_total_ns = pathguard::perf::ElapsedNs(mounts_started);
     if (error == 0) {
         perf.result = 0;
@@ -1997,9 +1874,9 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
         };
         pathguard::MountInfoSnapshot rollback_before;
         pathguard::MountInfoSnapshot rollback_after;
-        const int rollback_snapshot_error =
-            workspace->journal.empty() ? 0
-            : pathguard::CaptureMountInfoSnapshot(&rollback_before);
+        const int rollback_snapshot_error = workspace->journal.empty()
+            || mutation_snapshot_ready
+            ? 0 : pathguard::CaptureMountInfoSnapshot(&rollback_before);
         if (rollback_snapshot_error == 0
             && rollback_before.mapping != nullptr) {
             ++perf.mountinfo_snapshot_count;
@@ -2014,6 +1891,8 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
             rollback.failure.mutation_happened = 1;
             record_rollback_failure(rollback);
         }
+        const pathguard::MountInfoSnapshot& rollback_identity_snapshot =
+            mutation_snapshot_ready ? mutation_snapshot : rollback_before;
         for (size_t index = workspace->journal.size();
              !rollback_failed && index > 0; --index) {
             const pathguard::AppliedMount* applied =
@@ -2029,7 +1908,7 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
             }
             record_rollback_failure(
                 pathguard::ValidateRollbackDirectoryMount(
-                    *applied, rollback_before));
+                    *applied, rollback_identity_snapshot));
         }
         for (size_t index = workspace->journal.size();
              !rollback_failed && index > 0; --index) {
@@ -2071,6 +1950,10 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
     for (size_t index = 0; index < pinned_source_count; ++index) {
         pathguard::ClosePinnedIdentity(&workspace->sources[index]);
     }
+    for (size_t index = 0; index < pinned_target_count; ++index) {
+        pathguard::ClosePinnedIdentity(&workspace->targets[index]);
+    }
+    pathguard::DestroyMountInfoSnapshot(&mutation_snapshot);
     pathguard::DestroyMountInfoSnapshot(&current_mounts);
     DestroyMountTransactionWorkspace(workspace);
     perf.result = error;
@@ -2161,7 +2044,6 @@ SharedMountState* MapSharedState(int shared_fd) {
 bool WaitForSharedResult(SharedMountState* state, int timeout_ms) {
     uint64_t deadline = pathguard::perf::NowNs()
         + static_cast<uint64_t>(timeout_ms) * 1000000u;
-    bool preflight_grace_used = false;
     bool applying_grace_used = false;
     while (true) {
         const MountState current = LoadSharedStatus(state);
@@ -2169,16 +2051,6 @@ bool WaitForSharedResult(SharedMountState* state, int timeout_ms) {
         if (current == MountState::kCancelled) return false;
         const uint64_t now = pathguard::perf::NowNs();
         if (now >= deadline) {
-            if (pathguard::ShouldExtendPendingMountWait(
-                    current, LoadSharedPreflightPhase(state),
-                    preflight_grace_used)) {
-                preflight_grace_used = true;
-                deadline = now
-                    + static_cast<uint64_t>(kCapabilityProbeGraceMs) * 1000000u;
-                LOGI("mount wait extended for capability probe: pid=%d grace_ms=%d",
-                     getpid(), kCapabilityProbeGraceMs);
-                continue;
-            }
             if (current == MountState::kPending) {
                 if (TransitionSharedState(state, MountState::kPending,
                                           MountState::kCancelRequested)) {
@@ -2707,43 +2579,6 @@ void CompanionHandler(int client) {
         close(module_dir_fd);
         munmap(state, sizeof(*state));
         return;
-    }
-
-    // P0a: warm the capability probe cache in the persistent parent process
-    // before forking, so the per-request child inherits it (COW) and skips the
-    // ~100ms isolated probe. The probe is namespace independent (verified on
-    // device) so a representative storage path pair built from the first rule
-    // and the requesting uid is sufficient; the outcome is path independent.
-    {
-        char warm_source[PATH_MAX]{};
-        char warm_target[PATH_MAX]{};
-        char deny_anchor_path[PATH_MAX]{};
-        const char* warm_visible = PlanPath(plan, plan.mounts[0].visible_path);
-        const bool needs_deny_anchor =
-            (RequiredMountActions(plan) & pathguard::kMountActionDenyAnchor) != 0;
-        if (warm_visible != nullptr
-            && (!needs_deny_anchor
-                || BuildDenyAnchorPath(module_dir_fd, deny_anchor_path,
-                                       sizeof(deny_anchor_path)))
-            && BuildPathUnderRoot(plan.topology.visible_root, warm_visible,
-                                  warm_target, sizeof(warm_target))
-            && BuildMountSourcePath(plan, plan.mounts[0], deny_anchor_path,
-                                    warm_source, sizeof(warm_source))) {
-            bool warm_hit = false;
-            const uint64_t warm_started = pathguard::perf::NowNs();
-            StoreSharedPreflightPhase(
-                state, pathguard::MountPreflightPhase::kCapabilityProbe);
-            GetOrProbeMountBackends(warm_source, warm_target,
-                                    plan.policy_flags, plan.topology.generation,
-                                    &warm_hit);
-            StoreSharedPreflightPhase(
-                state, pathguard::MountPreflightPhase::kIdle);
-            LOGI("perf probe_warm pid=%d warm_us=%llu cache_hit=%d",
-                 header.pid,
-                 static_cast<unsigned long long>(pathguard::perf::NsToUs(
-                     pathguard::perf::ElapsedNs(warm_started))),
-                 warm_hit ? 1 : 0);
-        }
     }
 
     int result_sockets[2];

@@ -110,7 +110,7 @@ int main() {
         return Fail(9, "apply");
     }
     applied.failure = VerifyDirectoryMount(
-        before, after, source, destination, target_locator, &applied.mount);
+        before, after, source, destination, target_locator, &applied.mount, 1);
     if (!applied.ok() || !DeniedForUnprivilegedUser(target)) {
         return Fail(10, "deny-semantics");
     }

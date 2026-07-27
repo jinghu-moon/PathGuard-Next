@@ -1,6 +1,7 @@
 #pragma once
 
 #include <limits.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -134,6 +135,7 @@ MountError VerifyDirectoryMount(
     const MountInfoSnapshot& after_snapshot,
     const PinnedIdentity& source, const PinnedIdentity& target,
     const CanonicalLocator& target_locator, AppliedMount* applied,
+    size_t expected_mount_count,
     MountApplyTiming* timing = nullptr);
 MountRollbackResult ValidateRollbackDirectoryMount(
     const AppliedMount& applied, const MountInfoSnapshot& snapshot);

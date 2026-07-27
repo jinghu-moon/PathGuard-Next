@@ -270,7 +270,7 @@ companion 在目标 app namespace 中再次验证候选 source plane 的 mount I
 mount ID、mount root、filesystem、major:minor，以及它与
 `/storage/emulated/<user>` 的对应关系。最终 identity 与
 `topology_generation` 一起进入事务；存储重挂载或 generation 变化后不得继续使用
-旧 snapshot 或旧 capability probe。
+旧 snapshot。设备能力报告中的 probe 结果只用于诊断，不作为生产 worker 的缓存输入。
 
 ### 7.3 预检
 
@@ -283,28 +283,34 @@ companion 在 `setns` 前后分别校验：
 - `openat2` 和 fallback 都必须返回并持有 `O_PATH`/目录 FD。strict source 与 target 的最终 mount 必须消费这些已固定对象；禁止“字符串预检成功后，再用原始字符串调用 mount”的 check-use 分离。classic mount 若通过 `/proc/self/fd/<n>` 实现 strict，必须独立证明 source FD 和 target FD 都被最终 mount 消费。
 - source/target 类型一致，目标目录已由 daemon 以正确 owner、group、mode 和 SELinux label 创建。
 
-source 可以在事务级预检时固定；target 不能在第一条 mount 前一次性全部打开。每个
-target 必须在其父级 mount 已完成后的当前 VFS 视图中 just-in-time 解析、固定并立即
-应用，使子路径确实覆盖新的父级视图。
+format 1 的编译器拒绝 redirect 之间的父子包含、deny 与 redirect 的包含关系，并把嵌套
+deny 折叠为最外层规则。因此当前可执行 `MountOp[]` 的 visible target 互不嵌套；worker
+必须在取得 mutation lease 前固定全部唯一 source 和全部 target。多个 deny 规则共享同一个
+deny anchor FD。未来 R2 引入 `isolation.allow` 后若允许父子覆盖，必须重新引入显式依赖层级
+和 just-in-time target 固定，不能把 format 1 的扁平优化无条件复用到嵌套计划。
 
 目标 namespace 的变更前 mountinfo 以有界 snapshot 捕获一次，绑定 namespace dev/inode；
-topology、source identity、propagation 与首条 target identity 均查询该 snapshot。
-每条 mount 后捕获的 post-snapshot 完成 strict/legacy 身份验证，并成为下一条规则的
-当前 VFS 视图。snapshot 原始文本和条目数必须有硬上限，存储不得进入 Zygisk 线程栈。
+topology、全部 source/target identity 和 propagation 均查询该 snapshot。取得 lease 后连续
+执行扁平 `MountOp[]`，所有成功 syscall 立即以未知 mount ID 写入 journal；循环结束只捕获
+一次最终 snapshot，并用同一对 before/final snapshot 批量校验全部 mount。正常 worker
+路径的 snapshot 数固定为 2，与规则数无关。snapshot 原始文本和条目数必须有硬上限，
+存储不得进入 Zygisk 线程栈。
 
 legacy 后端仍执行上述 FD 预检，但最终 mount 使用由规范相对路径重新生成的
 canonical string。mount 前后必须复验设备、inode 与 mount ID；该检查只能缩小
 TOCTOU，不能把 legacy 提升为 FD-safe。
 
-legacy 每次 mount 前后还必须比较 mountinfo delta：恰好出现一个预期 mount，且
-mountpoint、parent mount ID、mount root、filesystem 与 major:minor 符合计划，不得
+legacy 还必须比较事务级 mountinfo delta：最终条目数恰好增加本事务成功 mutation 数，且
+每个 mountpoint、parent mount ID、mount root、filesystem 与 major:minor 均符合计划，不得
 出现额外 mount。旧内核没有 `STATX_MNT_ID` 时从 mountinfo 获取 mount ID；回滚前
 必须确认记录的 mount 仍是 canonical target 的最顶层 mount，身份不明时禁止盲目
 `umount2(path)`。
 
-mount syscall 成功后先把 canonical target 和未知 mount ID 写入 journal；post-snapshot
-取得并验证实际 ID 后回填同一 journal 项。回滚先用一个 fresh snapshot 确认全部记录仍为
-各自 target 的顶层 mount，再逆序卸载，最后用一个 snapshot 批量确认全部记录 ID 消失。
+mount syscall 成功后先把 canonical target 和未知 mount ID 写入 journal；最终 snapshot
+取得并完整验证实际身份后才按 operation index 回填各 journal 项。root/device/filesystem/parent
+任一项未确认时保留未知 ID，禁止回滚该路径。失败路径优先复用该最终 snapshot
+确认全部记录仍为各自 target 的顶层 mount，再逆序卸载，最后用一个 snapshot 批量确认全部
+记录 ID 消失。最终 snapshot 捕获失败时允许为回滚重试一次 fresh snapshot。
 任何阶段无法确认身份都必须 taint namespace，禁止逐路径盲目回滚。
 
 legacy 还必须固定 PID、PID start time、UID、package/process、mount namespace
@@ -381,15 +387,20 @@ actions:
   restore
 ```
 
-`open_tree_move_mount` probe 必须覆盖实际 empty-path flags、detached mount、target
-attach、验证和回滚；`proc_fd_mount` 必须实际证明 source/target 双 FD。
-`string_bind_mount` 必须在一次性私有 namespace 中，以实际 companion 的 UID、
-SELinux domain 和权限环境完成 bind、mountinfo delta 验证与精确回滚。
+标准的、已经隔离 propagation 的 namespace 不再运行独立 capability probe。第一条真实
+MountOp 依次尝试 `open_tree_move_mount`、`proc_fd_mount`；失败结果只有在 executor 明确报告
+`mutation_happened == false` 时才能进入下一后端。首个成功后端立即锁定整个事务，后续
+MountOp 失败不得切换后端。`open_tree` 的 detached mount FD 在 attach 失败时关闭，
+`proc_fd` 的失败 mount syscall 不产生 namespace mutation。
 
-后端选择输入为整个计划的 action mask、目标 namespace topology、capability snapshot
-和 `allow_legacy_string_bind`。probe 结果至少绑定 boot identity、SELinux 环境和
-topology generation；daemon 重启、存储重挂载或 generation 改变后重新探测。
-生产配置不提供强制 backend；强制 strict/legacy 仅作为测试或 debug override。
+若 `/storage` 仍需先执行 `MS_PRIVATE`，则该传播变更本身是不可逆 mutation。worker 必须在
+取得 lease 前于一次性私有子 namespace 中完成端到端 probe 并锁定 backend，避免 propagation
+改变后才发现没有可用 attach 后端。该慢路径不缓存，也不为应用侧增加专用等待宽限。
+
+`string_bind_mount` 只在策略显式授权、action mask 仅含 redirect 且目标 namespace 的
+disposable 成员关系可确认时作为最后 fallback；deny 永远不得进入 legacy。生产配置不提供
+强制 backend。独立的端到端 capability probe 仍保留在设备诊断工具中，用于 ROM/内核
+兼容矩阵，不再参与每次应用启动的 backend 决策。
 
 ## 8. 挂载事务与故障模型
 
@@ -593,13 +604,13 @@ media = hide_denied
 
 - [x] ADR-0003 已实现 `namespace_tainted`、propagation 预检、回滚失败与 worker
   owner-death 终止路径；namespace member 终止和重新启动仍需真机测试。
-- [x] 冻结 plan-wide backend selector、action mask 和“strict 运行时失败不自动重试
-  legacy”协议。
-- [x] companion namespace 与目标 namespace 两阶段 topology 已接入，probe cache 绑定
-  boot、SELinux policy identity 与 topology generation；daemon authoritative snapshot
+- [x] 冻结 plan-wide action mask 和首条真实 MountOp fallback；首个成功 backend 锁定整个
+  事务，后续失败不切换，legacy 仍受显式授权/action/namespace 三重门控。
+- [x] companion namespace 与目标 namespace 两阶段 topology 已接入；worker 在 lease 前
+  复核 PID start time、policy 和 topology generation。daemon authoritative snapshot
   与存储重挂载主动通知留到状态控制面后续迭代。
-- [x] capability probe 覆盖实际 attach flags、source/target 双 FD、mountinfo delta
-  和 rollback，不使用 syscall 存在性代替端到端能力。
+- [x] 标准已隔离 namespace 已移除冷 capability probe；需要先修改 propagation 的慢路径保留
+  一次性隔离 probe。独立设备 probe 继续作为兼容矩阵工具。
 - [x] 统一事务 journal 区分 apply/verify/rollback 阶段，并提供 worker crash、rollback
   failure 与 pending/applying delay 注入构建开关；真机矩阵待执行。
 
@@ -607,8 +618,8 @@ media = hide_denied
 
 - [x] topology probe 与 backend path resolver；Alioth Android 13 真机 topology 识别 `/storage/emulated/0 -> /data/media/0`。
 - [x] openat2/逐组件 FD walk resolver 与 symlink/magic-link 拒绝；Alioth 4.19 内核走 `component_fd_walk` capability。
-- [x] 基于 pinned identity/`AppliedMount` 完成双后端通用 executor；target 在父级
-  mount 后 just-in-time 解析。
+- [x] 基于 pinned identity/`AppliedMount` 完成双后端通用 executor；format 1 扁平计划在
+  lease 前固定全部 target，并以初始/最终两个 snapshot 批量验证。
 - [ ] Alioth 完成 legacy redirect-only 垂直链路：私有 namespace probe、两阶段
   topology、mountinfo delta、PID/namespace identity 和 mount ID 保护回滚。
 - [ ] 在支持设备上立即完成 strict redirect-only 垂直链路，分别验证

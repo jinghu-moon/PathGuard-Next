@@ -74,4 +74,18 @@ constexpr MountBackendSelection SelectMountBackend(
     return {MountBackendKind::kLegacyString, MountBackendReason::kNone};
 }
 
+constexpr MountBackendKind NextMountBackend(
+        MountBackendKind current, MountActionMask required_actions,
+        bool allow_legacy_string_bind, bool legacy_namespace_allowed) {
+    if (current == MountBackendKind::kStrictOpenTree) {
+        return MountBackendKind::kStrictProcFd;
+    }
+    if (current == MountBackendKind::kStrictProcFd
+        && allow_legacy_string_bind && legacy_namespace_allowed
+        && SupportsAllActions(kMountActionRedirect, required_actions)) {
+        return MountBackendKind::kLegacyString;
+    }
+    return MountBackendKind::kUnsupported;
+}
+
 }  // namespace pathguard

@@ -32,6 +32,9 @@ TransactNative g_original_transact = nullptr;
 constexpr jint kQueryTransaction = 1;
 char g_deny_paths[kMaxDenyPaths][PATH_MAX]{};
 size_t g_deny_path_count = 0;
+char g_deny_filter[kMaxSelectionSize]{};
+char g_deny_arguments[kMaxDenyArguments][PATH_MAX + 4]{};
+size_t g_deny_argument_count = 0;
 unsigned g_user_id = 0;
 uint32_t g_rewrite_log_count = 0;
 uint64_t g_query_total = 0;
@@ -49,6 +52,8 @@ jobject g_attribution_source_creator = nullptr;
 jstring g_provider_descriptor = nullptr;
 jstring g_selection_key = nullptr;
 jstring g_selection_args_key = nullptr;
+jstring g_cached_deny_filter = nullptr;
+jobjectArray g_cached_deny_arguments = nullptr;
 jobject g_cached_descriptor_binder = nullptr;
 
 jmethodID g_binder_get_interface_descriptor = nullptr;
@@ -153,11 +158,16 @@ bool IsMediaUri(JNIEnv* env, jobject uri) {
     return matches;
 }
 
-jobjectArray MergeArguments(JNIEnv* env, jobjectArray original,
-                            char extra[][PATH_MAX + 4], size_t extra_count) {
+jobjectArray MergeArguments(JNIEnv* env, jobjectArray original) {
+    if (g_cached_deny_arguments == nullptr) return nullptr;
     const jsize original_count = original == nullptr ? 0 : env->GetArrayLength(original);
+    if (original_count == 0) {
+        return static_cast<jobjectArray>(
+            env->NewLocalRef(g_cached_deny_arguments));
+    }
     auto merged = env->NewObjectArray(
-        original_count + static_cast<jsize>(extra_count), g_string_class, nullptr);
+        original_count + static_cast<jsize>(g_deny_argument_count),
+        g_string_class, nullptr);
     if (merged == nullptr || ClearException(env)) return nullptr;
 
     for (jsize index = 0; index < original_count; ++index) {
@@ -165,8 +175,9 @@ jobjectArray MergeArguments(JNIEnv* env, jobjectArray original,
         env->SetObjectArrayElement(merged, index, value);
         if (value != nullptr) env->DeleteLocalRef(value);
     }
-    for (size_t index = 0; index < extra_count; ++index) {
-        jstring value = env->NewStringUTF(extra[index]);
+    for (size_t index = 0; index < g_deny_argument_count; ++index) {
+        jobject value = env->GetObjectArrayElement(
+            g_cached_deny_arguments, static_cast<jsize>(index));
         if (value == nullptr || ClearException(env)) {
             if (value != nullptr) env->DeleteLocalRef(value);
             env->DeleteLocalRef(merged);
@@ -184,20 +195,6 @@ jobjectArray MergeArguments(JNIEnv* env, jobjectArray original,
 }
 
 bool ApplyFilterToBundle(JNIEnv* env, jobject bundle) {
-    char filter[kMaxSelectionSize]{};
-    char extra_arguments[kMaxDenyArguments][PATH_MAX + 4]{};
-    const char* deny_paths[kMaxDenyPaths]{};
-    for (size_t index = 0; index < g_deny_path_count; ++index) {
-        deny_paths[index] = g_deny_paths[index];
-    }
-    size_t extra_count = 0;
-    if (!BuildDenySelection(
-            deny_paths, g_deny_path_count, filter, sizeof(filter),
-            extra_arguments[0], kMaxDenyArguments, sizeof(extra_arguments[0]),
-            &extra_count)) {
-        return false;
-    }
-
     auto original_selection = static_cast<jstring>(
         env->CallObjectMethod(bundle, g_bundle_get_string, g_selection_key));
     auto original_arguments = static_cast<jobjectArray>(
@@ -211,23 +208,31 @@ bool ApplyFilterToBundle(JNIEnv* env, jobject bundle) {
     const char* original_text = original_selection == nullptr
         ? nullptr
         : env->GetStringUTFChars(original_selection, nullptr);
+    if (original_selection != nullptr && original_text == nullptr) {
+        ClearException(env);
+        env->DeleteLocalRef(original_selection);
+        if (original_arguments != nullptr) env->DeleteLocalRef(original_arguments);
+        return false;
+    }
     char merged_selection[kMaxSelectionSize]{};
+    jstring merged_selection_string = nullptr;
     if (original_text != nullptr && original_text[0] != '\0') {
         const int length = snprintf(
             merged_selection, sizeof(merged_selection), "(%s) AND (%s)",
-            original_text, filter);
+            original_text, g_deny_filter);
         if (length <= 0 || static_cast<size_t>(length) >= sizeof(merged_selection)) {
             env->ReleaseStringUTFChars(original_selection, original_text);
             env->DeleteLocalRef(original_selection);
             if (original_arguments != nullptr) env->DeleteLocalRef(original_arguments);
             return false;
         }
+        merged_selection_string = env->NewStringUTF(merged_selection);
     } else {
-        strcpy(merged_selection, filter);
+        merged_selection_string = static_cast<jstring>(
+            env->NewLocalRef(g_cached_deny_filter));
     }
 
-    auto merged_arguments = MergeArguments(env, original_arguments, extra_arguments, extra_count);
-    auto merged_selection_string = env->NewStringUTF(merged_selection);
+    auto merged_arguments = MergeArguments(env, original_arguments);
     const bool valid = merged_arguments != nullptr
         && merged_selection_string != nullptr
         && !ClearException(env);
@@ -537,6 +542,62 @@ bool InitializeJni(JNIEnv* env) {
         && g_bundle_put_string_array != nullptr;
 }
 
+bool InitializeDenyFilter(JNIEnv* env) {
+    const char* deny_paths[kMaxDenyPaths]{};
+    for (size_t index = 0; index < g_deny_path_count; ++index) {
+        deny_paths[index] = g_deny_paths[index];
+    }
+    if (!BuildDenySelection(
+            deny_paths, g_deny_path_count,
+            g_deny_filter, sizeof(g_deny_filter),
+            g_deny_arguments[0], kMaxDenyArguments,
+            sizeof(g_deny_arguments[0]), &g_deny_argument_count)) {
+        return false;
+    }
+
+    jstring filter = env->NewStringUTF(g_deny_filter);
+    jobjectArray arguments = env->NewObjectArray(
+        static_cast<jsize>(g_deny_argument_count), g_string_class, nullptr);
+    if (filter == nullptr || arguments == nullptr || ClearException(env)) {
+        DeleteLocal(env, filter);
+        DeleteLocal(env, arguments);
+        return false;
+    }
+    for (size_t index = 0; index < g_deny_argument_count; ++index) {
+        jstring value = env->NewStringUTF(g_deny_arguments[index]);
+        if (value == nullptr || ClearException(env)) {
+            DeleteLocal(env, value);
+            DeleteLocal(env, filter);
+            DeleteLocal(env, arguments);
+            return false;
+        }
+        env->SetObjectArrayElement(
+            arguments, static_cast<jsize>(index), value);
+        env->DeleteLocalRef(value);
+        if (ClearException(env)) {
+            DeleteLocal(env, filter);
+            DeleteLocal(env, arguments);
+            return false;
+        }
+    }
+    g_cached_deny_filter = static_cast<jstring>(GlobalRef(env, filter));
+    g_cached_deny_arguments = static_cast<jobjectArray>(
+        GlobalRef(env, arguments));
+    if (g_cached_deny_filter == nullptr
+        || g_cached_deny_arguments == nullptr || ClearException(env)) {
+        if (g_cached_deny_filter != nullptr) {
+            env->DeleteGlobalRef(g_cached_deny_filter);
+            g_cached_deny_filter = nullptr;
+        }
+        if (g_cached_deny_arguments != nullptr) {
+            env->DeleteGlobalRef(g_cached_deny_arguments);
+            g_cached_deny_arguments = nullptr;
+        }
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 bool Install(zygisk::Api* api, JNIEnv* env, const char* const* deny_paths,
@@ -574,8 +635,8 @@ bool Install(zygisk::Api* api, JNIEnv* env, const char* const* deny_paths,
         ++g_deny_path_count;
     }
 
-    if (!InitializeJni(env)) {
-        LOGE("media query hook JNI initialization failed");
+    if (!InitializeJni(env) || !InitializeDenyFilter(env)) {
+        LOGE("media query hook initialization failed");
         return false;
     }
     JNINativeMethod methods[] = {

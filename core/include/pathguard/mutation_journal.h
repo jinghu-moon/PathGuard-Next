@@ -25,6 +25,12 @@ public:
         return true;
     }
 
+    bool UpdateAt(size_t index, const Entry& entry) {
+        if (index >= size_) return false;
+        entries_[index] = entry;
+        return true;
+    }
+
     const Entry* At(size_t index) const {
         return index < size_ ? &entries_[index] : nullptr;
     }

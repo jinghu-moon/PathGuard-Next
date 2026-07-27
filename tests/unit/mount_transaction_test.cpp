@@ -9,7 +9,6 @@
 namespace {
 
 using pathguard::MountTransactionState;
-using pathguard::MountPreflightPhase;
 
 std::uint32_t Value(MountTransactionState state) {
     return static_cast<std::uint32_t>(state);
@@ -26,21 +25,6 @@ bool Transition(std::atomic<std::uint32_t>* state, MountTransactionState from,
 }  // namespace
 
 int main() {
-    static_assert(!pathguard::ShouldExtendPendingMountWait(
-        MountTransactionState::kPending, MountPreflightPhase::kIdle, false));
-    static_assert(pathguard::ShouldExtendPendingMountWait(
-        MountTransactionState::kPending,
-        MountPreflightPhase::kCapabilityProbe, false));
-    static_assert(!pathguard::ShouldExtendPendingMountWait(
-        MountTransactionState::kPending,
-        MountPreflightPhase::kCapabilityProbe, true));
-    static_assert(!pathguard::ShouldExtendPendingMountWait(
-        MountTransactionState::kApplying,
-        MountPreflightPhase::kCapabilityProbe, false));
-    static_assert(!pathguard::ShouldExtendPendingMountWait(
-        MountTransactionState::kComplete,
-        MountPreflightPhase::kCapabilityProbe, false));
-
     static_assert(pathguard::IsMountTransitionAllowed(
         MountTransactionState::kPending, MountTransactionState::kApplying));
     static_assert(pathguard::IsMountTransitionAllowed(
@@ -139,6 +123,9 @@ int main() {
     assert(bounded.UpdateLast({7}));
     assert(bounded.At(0) != nullptr);
     assert(bounded.At(0)->operation == 7);
+    assert(bounded.UpdateAt(0, {11}));
+    assert(bounded.At(0)->operation == 11);
+    assert(!bounded.UpdateAt(1, {13}));
     assert(bounded.At(1) == nullptr);
     assert(!bounded.Push({2}));
     bounded.Clear();

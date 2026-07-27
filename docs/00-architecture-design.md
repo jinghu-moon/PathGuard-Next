@@ -496,11 +496,15 @@ format 1 不支持 `{user}`、`{package}`、环境变量、命令替换或任意
 - 超过长度、应用数或规则数上限的配置。
 - 未知字段和未知 `rules.toml format` 版本。
 
-编译器构建规则依赖图：
+format 1 只生成扁平挂载计划：
 
-- 父 redirect 必须先于其视图内的子规则应用。
-- deny 覆盖其子树时，子规则视为冲突而不是隐式失效。
-- 无法得到唯一挂载顺序时拒绝发布。
+- redirect 之间存在父子包含时拒绝发布。
+- deny 与 redirect 存在包含关系时拒绝发布。
+- 嵌套 deny 折叠为最外层规则。
+- 因此 worker 可以在 mutation 前固定全部 target，并批量执行和验证。
+
+未来 `isolation.allow` 若引入父子覆盖，必须在新能力中显式构建依赖图和应用顺序，不能静默
+改变 format 1 的冲突语义。
 
 路径验证尽量使用目录文件描述符和 `openat2` 的约束解析能力；设备不支持 `openat2` 时使用经过审计的 fallback，并在能力报告中体现。
 
@@ -791,7 +795,9 @@ T_total           对应用启动的总影响
 - KernelSU 的“Umount modules”行为受内核版本和实现能力影响；官方文档说明旧于 5.10 的内核可能需要回移 `path_umount` 才执行实际卸载。[S5]
 - NeoZygisk 的公开设计同时使用直接卸载和缓存 clean namespace + `setns`，并公开记录过 SELinux 规则未生效等设备/Root 实现差异。[S11]
 
-这些资料支持技术方向，也证明不能用“Android 12+”替代实际 capability probe。
+这些资料支持技术方向，也证明不能用“Android 12+”替代实际设备验证。标准已隔离 namespace
+通过首条真实 MountOp 的无 mutation fallback 选择 backend；需要先修改 propagation 的慢路径
+必须在 lease 前隔离探测。独立 capability probe 还服务 CLI、Manager 能力报告和兼容矩阵。
 
 ## 20. 测试策略
 

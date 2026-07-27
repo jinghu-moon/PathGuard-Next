@@ -109,7 +109,7 @@ bool ProbeOne(MountBackendKind backend, const PinnedIdentity& source,
     if (telemetry->after_error == 0) {
         const MountError verify = VerifyDirectoryMount(
             before_snapshot, after_snapshot, source, target,
-            target_locator, &applied, nullptr);
+            target_locator, &applied, 1, nullptr);
         telemetry->verify_error = verify.error;
         if (telemetry->verify_error == 0
             && after_snapshot.entry_count != before_snapshot.entry_count + 1) {
@@ -315,6 +315,7 @@ MountError VerifyDirectoryMount(
     const MountInfoSnapshot& after_snapshot,
     const PinnedIdentity& source, const PinnedIdentity& target,
     const CanonicalLocator& target_locator, AppliedMount* applied,
+    size_t expected_mount_count,
     MountApplyTiming* timing) {
     MountError failure;
     failure.stage = MountOperationStage::kVerify;
@@ -356,7 +357,9 @@ MountError VerifyDirectoryMount(
             timing->verify_stat_ns = NowNsLocal() - stat_started;
         }
         if (error == 0
-            && after_snapshot.entry_count != before_snapshot.entry_count + 1) {
+            && (expected_mount_count == 0
+                || after_snapshot.entry_count
+                    != before_snapshot.entry_count + expected_mount_count)) {
             error = EBADMSG;
         }
     }

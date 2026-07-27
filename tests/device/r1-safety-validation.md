@@ -41,9 +41,15 @@ Run:
 ./tests/device/collect_r1_evidence.ps1 -Package <package> -Samples 50
 ```
 
-Report cold and warm P50/P95/P99/max for readiness, topology capture, probe, setns,
-per-mount apply/verify, rollback, and total wait. Results collected before the full
-root/filesystem/device/parent verification change must not be mixed with current data.
+Report cold and warm P50/P95/P99/max for readiness, topology capture, backend fallback,
+setns, transaction-level pin/apply/verify, rollback, and total wait. Results collected
+before the full root/filesystem/device/parent verification change must not be mixed with
+current data.
+
+The 2026-07-27 executor no longer emits production capability-probe timings. New
+collections must report first-operation backend fallback, transaction-level pin time,
+the fixed initial/final snapshot pair, and batch verification. Keep the older probe
+columns only when comparing historical evidence.
 
 ## Alioth production snapshot result (2026-07-26)
 

@@ -68,9 +68,13 @@ hash 只用于索引，等值区间内仍校验完整 package name，避免碰�
 
 ### 2.3 MediaStore Binder Hook
 
-Hook 位于 `BinderProxy.transactNative`，只在显式 `media=hide_denied` 且 mount 成功后安装。Binder descriptor 对 provider binder 做一次性缓存；provider query 先解析 AttributionSource 和 Uri，确认 authority 后才解析 projection、Bundle 和两个 Binder。
+Hook 位于 `BinderProxy.transactNative`，只在显式 `file_picker = true`、存在 deny 且 mount
+成功后安装。Binder descriptor 对 provider binder 做一次性缓存；provider query 先解析
+AttributionSource 和 Uri，确认 authority 后才解析 projection、Bundle 和两个 Binder。
 
-命中媒体查询后还会创建新的 String[]、Bundle、Parcel 并重新序列化请求：[zygisk/src/media_query_hook.cpp:119](../zygisk/src/media_query_hook.cpp#L119)、[zygisk/src/media_query_hook.cpp:275](../zygisk/src/media_query_hook.cpp#L275)。
+deny SQL、参数文本和无原始参数时复用的 JNI `String[]` 已在 Hook 安装时预计算。命中且原
+query 自带 selection/args 时仍需创建合并后的 String[]、Bundle、Parcel 并重新序列化请求；
+这是保持原查询语义所需的分配，不能缓存跨 query 的用户参数。
 
 这是高频媒体查询场景的重点观测路径。之前“图片选择界面全部显示加载失败”属于逻辑错误，已修复；当前设备的纯 Hook 计时与 UI 回归已通过，但该 Hook 仍需要比 mount 路径更高密度的跨 ROM 回归。
 
@@ -286,11 +290,9 @@ major:minor 和 parent identity 比对；下述 4ms 是补强前样本，必须�
 - 不能用 `fstat(target.fd)` 替代 target 路径 stat：`target.fd` 是 mount 前 pin 的 O_PATH fd，
   指向被覆盖前的目录，用它验证会拿到 mount 前的 inode，语义错误。
 
-多规则（16 条 redirect）实测 mount_total 约 25.6ms、单条 max 约 1.6ms，随规则数线性增长，
-每条 verify 稳定约 0.8ms 无累积恶化。此前 ADR-0005 批评意见提议的 strict group verify
-（N 条 mount 合并为一次 mountinfo 读）在上述优化后收益从"省 N×64ms"缩水到 16 条约省 9ms，
-且需重构失败回滚边界并补充 ADR 合规论证，性价比不成立，暂不实施；仅在未来出现远多于 16 条
-规则或 stat 成本重新成为瓶颈时再评估。
+多规则（16 条 redirect）旧样本的 mount_total 约 25.6ms、单条 max 约 1.6ms，随规则数线性
+增长，每条 verify 约 0.8ms。该样本形成时内核生成 mountinfo 的成本尚未稳定暴露；2026-07-26
+后续测量确认每次完整读取约 66-75ms，因此“暂不实施 group verify”的旧结论已由 6.7 取代。
 
 legacy 后端**不适用**上述 strict verify 简化：它仍保留 mount 前后的 mountinfo delta 校验和
 `stat` + `SameObject` 身份比对（ADR-0005 legacy 条目），因为字符串 bind 无固定 FD 保证。
@@ -339,9 +341,45 @@ target pin 和 verify 中重复生成整表，mount syscall 仍只有约 50us。
 FD pin 或 mount syscall。证据保存在 `build/device-evidence/snapshot-prod-50-20260726-120101/`；
 该目录是本地测试产物，不作为跨 ROM 结论。
 
+### 6.7 扁平 MountOp 批处理与真实操作选后端（2026-07-27）
+
+format 1 已在编译期拒绝 redirect 父子包含和 deny/redirect 包含，并折叠嵌套 deny，因此当前
+visible target 互不嵌套。实现据此完成以下改造：
+
+- worker 用初始 snapshot 固定全部唯一 source 和全部 target；多个 deny 规则只固定一次
+  deny anchor；
+- 取得 mutation lease 后连续执行全部 MountOp，每次成功 syscall 立即写入未知 mount ID 的
+  固定容量 journal；
+- 循环结束只捕获一次最终 snapshot，用同一对 initial/final snapshot 验证全部 mount；只有
+  完整身份确认的 mount 才按 operation index 回填 journal。正常 worker 路径固定为两次
+  snapshot，与规则数无关；
+- 失败路径复用最终 snapshot 做 rollback identity 验证，最终 snapshot 不可用时才为回滚重试；
+  无法确认身份、journal 溢出、rollback 失败和 owner death 仍进入 `namespace_tainted`；
+- 标准已隔离 namespace 删除隔离 capability probe、probe cache 和专用 500ms 等待。首条
+  真实 MountOp 依次尝试 `open_tree`、`proc_fd`，只有明确未发生 mutation 的失败才允许继续；
+  首个成功 backend 锁定整个事务。若 `/storage` 必须先改为 private，则在 lease 前保留一次
+  不缓存的隔离 probe，避免不可逆 propagation 后才发现 backend 不可用。legacy 仍只允许
+  显式授权的 redirect-only disposable namespace，deny 不降级；
+- worker 的两次连续 policy 读取合并为 lease 前一次 PID start time、policy、topology 联合复核；
+- MediaStore deny SQL、参数文本和 JNI `String[]` 改为 Hook 安装时生成一次。无原始 query
+  selection/args 时直接复用 global reference，有原参数时只构建合并结果。
+
+当前验证证据仅包括 48/48 Host 测试、arm64-v8a/armeabi-v7a NDK 构建、Zygisk ELF 隔离检查
+和 universal 模块打包。尚未将下列项目标记为完成：
+
+- LocalSend 的 2 deny + 1 redirect 组合功能回归；
+- `open_tree -> proc_fd` 首条 fallback、`mi_snapshots=2` 和最终 mount identity 真机确认；
+- 50 次冷启动 P50/P95/P99 与 2026-07-26 基线对比；
+- applying cancel、worker crash、rollback failure 三个注入构建回归；
+- MediaStore 512 次 query 的 rewrite/fallback/CPU 聚合指标复测。
+
+在这些真机数据完成前，不宣称具体毫秒收益。预期变化是多规则 worker 的 snapshot 数从
+`1 + N` 收敛为 `2`，但 companion 候选 topology snapshot 和设备调度抖动仍存在。
+
 工程注意：修改 Zygisk `.so` 后必须全清 `native/obj` 与 `native/libs` 再重编，否则增量构建
 可能因某个编译单元失败而静默复用陈旧 `.o`，导致产物 md5 不变、改动不生效。部署后需重启
-且 zygote 换库存在延迟，应以新增日志字符串（如 `probe_warm`/`verify_row`）门控确认新库生效
+且 zygote 换库存在延迟，应以新增日志字符串（如 `mount backend unavailable`、
+`mount_pin_loop`）门控确认新库生效
 再采样。冷启动首次挂载有抖动（mount_total 可能回到 130ms 量级），需采多次取稳态。
 
 ## 7. 执行顺序
@@ -365,7 +403,8 @@ FD pin 或 mount syscall。证据保存在 `build/device-evidence/snapshot-prod-
 ### Phase 2：针对测量结果优化
 
 - 调整 readiness 退避曲线。（已完成，1/2/4/8/10ms）
-- 优化 MediaStore 最小 Parcel 解析和 descriptor 缓存。（已完成，纯 Hook 计时和 UI 回归通过）
+- 优化 MediaStore 最小 Parcel 解析、descriptor 缓存和 deny filter 安装时预计算。（代码与
+  Host/NDK 验证完成，新增缓存路径待真机 UI/性能回归）
 - 评估 `APP_STL := none`。（已完成并采用，双 ABI 构建和 arm64 真机加载通过）
 - 优化规则冲突检测的数据结构。（已完成并增加 redirect-heavy 基准）
 
