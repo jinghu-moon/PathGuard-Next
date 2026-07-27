@@ -1,6 +1,5 @@
 #include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -21,11 +20,10 @@
 #endif
 
 #include "pathguard/binary.h"
-#include "pathguard/legacy_rules_control.h"
 #include "pathguard/path.h"
 #include "pathguard/policy.h"
+#include "pathguard/rules_control.h"
 #include "pathguard/topology.h"
-#include "pathguard/validation.h"
 
 #if defined(PATHGUARD_ANDROID)
 #include <sched.h>
@@ -38,38 +36,22 @@
 
 namespace fs = std::filesystem;
 
-using PerfClock = std::chrono::steady_clock;
-using pathguard::legacy_rules::CompileFile;
-using pathguard::legacy_rules::CompilePerf;
-using pathguard::legacy_rules::CompileText;
-
-static std::uint64_t NowNs() {
-    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        PerfClock::now().time_since_epoch()).count());
-}
-
-static std::uint64_t ElapsedNs(std::uint64_t start) {
-    const std::uint64_t now = NowNs();
-    return now >= start ? now - start : 0;
-}
-
-static std::uint64_t NsToUs(std::uint64_t value) { return value / 1000ULL; }
-
-static void LogCompilePerf(const char* phase, std::uint64_t read_ns,
-                           std::uint64_t debounce_ns, std::uint64_t stable_read_ns,
-                           const CompilePerf& perf) {
-    std::cout << "perf compile phase=" << phase
-              << " read_us=" << NsToUs(read_ns)
-              << " debounce_us=" << NsToUs(debounce_ns)
-              << " stable_read_us=" << NsToUs(stable_read_ns)
-              << " parse_us=" << NsToUs(perf.parse_ns)
-              << " validate_us=" << NsToUs(perf.validate_ns)
-              << " encode_us=" << NsToUs(perf.encode_ns)
-              << " compare_us=" << NsToUs(perf.compare_ns)
-              << " publish_us=" << NsToUs(perf.publish_ns)
-              << " unchanged=" << (perf.unchanged ? 1 : 0)
-              << " published=" << (perf.published ? 1 : 0)
-              << '\n' << std::flush;
+static void LogReconcile(const char* phase,
+                         const pathguard::control::ReconcileResult& result) {
+    std::cout << "rules reconcile phase=" << phase
+              << " candidate_sequence=" << result.state.candidate_sequence
+              << " active_content_generation="
+              << result.state.active_content_generation
+              << " deployment_epoch=" << result.state.deployment_epoch
+              << " compiled=" << (result.compiled ? 1 : 0)
+              << " unchanged=" << (result.unchanged ? 1 : 0)
+              << " published=" << (result.published ? 1 : 0) << '\n';
+    if (!result.ok()) {
+        std::cerr << result.state.error_code << ": "
+                  << result.state.message << '\n';
+    }
+    std::cout << std::flush;
+    std::cerr << std::flush;
 }
 
 static bool ReadAll(const fs::path& path, std::string* output) {
@@ -210,51 +192,10 @@ static bool ProbeProcFdMount(const char* source_root_path, const char* source_pa
 }
 #endif
 
-static void ReloadIfChanged(const fs::path& config, const fs::path& policy,
-                            std::string* active_config,
-                            std::string* rejected_config) {
-    const std::uint64_t reload_started = NowNs();
-    const std::uint64_t candidate_read_started = NowNs();
-    std::string candidate;
-    if (!ReadAll(config, &candidate)
-        || !pathguard::legacy_rules::IsCandidateNew(
-            candidate, *active_config, *rejected_config)) {
-        return;
-    }
-    const std::uint64_t candidate_read_ns = ElapsedNs(candidate_read_started);
-
-    const std::uint64_t debounce_started = NowNs();
-    std::this_thread::sleep_for(pathguard::legacy_rules::kReloadDebounce);
-    const std::uint64_t debounce_ns = ElapsedNs(debounce_started);
-    const std::uint64_t stable_read_started = NowNs();
-    std::string stable_candidate;
-    if (!ReadAll(config, &stable_candidate) || stable_candidate != candidate) {
-        return;
-    }
-    const std::uint64_t stable_read_ns = ElapsedNs(stable_read_started);
-
-    std::string error;
-    CompilePerf perf;
-    if (CompileText(stable_candidate, policy, &perf, &error)) {
-        *active_config = std::move(stable_candidate);
-        rejected_config->clear();
-        LogCompilePerf("reload", candidate_read_ns, debounce_ns, stable_read_ns, perf);
-        std::cout << (perf.published ? "policy reloaded\n" : "policy unchanged\n")
-                  << "perf reload_total_us=" << NsToUs(ElapsedNs(reload_started))
-                  << '\n' << std::flush;
-    } else {
-        *rejected_config = std::move(stable_candidate);
-        LogCompilePerf("reload_failed", candidate_read_ns, debounce_ns, stable_read_ns, perf);
-        std::cerr << "policy reload failed: " << error << '\n' << std::flush;
-    }
-}
-
-static void RunPollingLoop(const fs::path& config, const fs::path& policy,
-                           std::string* active_config) {
-    std::string rejected_config;
+static void RunPollingLoop(pathguard::control::Reconciler* reconciler) {
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        ReloadIfChanged(config, policy, active_config, &rejected_config);
+        LogReconcile("poll", reconciler->Reconcile());
     }
 }
 
@@ -266,10 +207,9 @@ static bool IsRulesEvent(const inotify_event* event, const std::string& file_nam
     return (event->mask & kRelevantMask) != 0;
 }
 
-static bool RunInotifyLoop(const fs::path& config, const fs::path& policy,
-                           std::string* active_config) {
-    const fs::path directory = config.parent_path();
-    const std::string file_name = config.filename().string();
+static bool RunInotifyLoop(const fs::path& config_directory,
+                           pathguard::control::Reconciler* reconciler) {
+    const std::string file_name = pathguard::control::kRulesFileName;
     const int fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
     if (fd < 0) {
         std::cerr << "inotify initialization failed; falling back to polling: errno="
@@ -277,7 +217,7 @@ static bool RunInotifyLoop(const fs::path& config, const fs::path& policy,
         return false;
     }
     const int watch = inotify_add_watch(
-        fd, directory.c_str(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE
+        fd, config_directory.c_str(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE
             | IN_ATTRIB | IN_DELETE | IN_MOVED_FROM);
     if (watch < 0) {
         std::cerr << "inotify watch failed; falling back to polling: errno="
@@ -285,10 +225,10 @@ static bool RunInotifyLoop(const fs::path& config, const fs::path& policy,
         close(fd);
         return false;
     }
-    std::cout << "inotify watching: " << directory.string() << "\n" << std::flush;
+    std::cout << "inotify watching: " << config_directory.string()
+              << "\n" << std::flush;
 
     std::vector<char> buffer(16 * (sizeof(inotify_event) + NAME_MAX + 1));
-    std::string rejected_config;
     while (true) {
         pollfd descriptor{fd, POLLIN, 0};
         if (poll(&descriptor, 1, -1) < 0) {
@@ -319,11 +259,26 @@ static bool RunInotifyLoop(const fs::path& config, const fs::path& policy,
             }
         }
         if (config_changed) {
-            ReloadIfChanged(config, policy, active_config, &rejected_config);
+            LogReconcile("inotify", reconciler->Reconcile());
         }
     }
 }
 #endif
+
+static pathguard::rules::DeviceSnapshot MakeDeviceSnapshot(
+        bool topology_supported) {
+    pathguard::rules::DeviceSnapshot snapshot;
+    snapshot.mount.primitives = pathguard::kCapabilityOpenTreeMoveMount
+        | pathguard::kCapabilityProcFdMount
+        | pathguard::kCapabilityStringBindMount;
+    snapshot.mount.strict_actions = pathguard::kMountActionRedirect;
+    snapshot.mount.legacy_actions = pathguard::kMountActionRedirect;
+    snapshot.provider_supported = topology_supported;
+    snapshot.topology_supported = topology_supported;
+    snapshot.capability_generation = 1;
+    snapshot.topology_generation = topology_supported ? 1 : 0;
+    return snapshot;
+}
 
 int main(int argc, char** argv) {
     fs::path module_dir = ".";
@@ -389,39 +344,30 @@ int main(int argc, char** argv) {
         return 0;
     }
 #endif
-    const fs::path config =
-        module_dir / "config" / pathguard::legacy_rules::kRulesFileName;
-    const fs::path policy = module_dir / "run" / "policy.bin";
+    const fs::path config_directory = module_dir / "config";
+    const fs::path run_directory = module_dir / "run";
+#if defined(PATHGUARD_ANDROID)
+    const bool topology_supported = ProbeStorageTopology();
+#else
+    const bool topology_supported = true;
+#endif
+    pathguard::control::Reconciler reconciler(
+        config_directory, run_directory, pathguard::rules::RulesLimits{},
+        MakeDeviceSnapshot(topology_supported));
     if (compile || self_check) {
-        std::string error;
-        CompilePerf perf;
-        std::uint64_t read_ns = 0;
-        const bool ok = CompileFile(config, policy, &perf, &read_ns, &error);
-        LogCompilePerf(self_check ? "self_check" : "compile", read_ns, 0, 0, perf);
-        if (!ok) { std::cerr << error << '\n'; return 1; }
+        const pathguard::control::ReconcileResult result = reconciler.Reconcile();
+        LogReconcile(self_check ? "self_check" : "compile", result);
+        if (!result.ok()) return 1;
         std::cout << (self_check ? "ok" : "compiled") << '\n';
         return 0;
     }
-    std::string active_config;
-    if (!ReadAll(config, &active_config)) {
-        std::cerr << "initial compile failed: cannot read rules.ini\n";
-        return 1;
-    }
-    {
-        std::string error;
-        CompilePerf perf;
-        if (!CompileText(active_config, policy, &perf, &error)) {
-            std::cerr << "initial compile failed: " << error << '\n';
-            return 1;
-        }
-        LogCompilePerf("initial", 0, 0, 0, perf);
-    }
-    ProbeStorageTopology();
+    const pathguard::control::ReconcileResult initial = reconciler.Reconcile();
+    LogReconcile("initial", initial);
     std::cout << "pathguardd ready; module-dir=" << module_dir.string() << '\n'
               << std::flush;
 #if PATHGUARD_HAS_INOTIFY
-    if (RunInotifyLoop(config, policy, &active_config)) return 0;
+    if (RunInotifyLoop(config_directory, &reconciler)) return 0;
 #endif
-    RunPollingLoop(config, policy, &active_config);
+    RunPollingLoop(&reconciler);
     return 0;
 }

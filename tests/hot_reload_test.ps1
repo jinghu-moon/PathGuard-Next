@@ -8,21 +8,18 @@ $root = Join-Path $env:TEMP ("pathguard-hot-reload-" + [guid]::NewGuid())
 $configDir = Join-Path $root 'config'
 $runDir = Join-Path $root 'run'
 New-Item -ItemType Directory -Path $configDir, $runDir | Out-Null
-$config = Join-Path $configDir 'rules.ini'
+$config = Join-Path $configDir 'rules.toml'
 $policy = Join-Path $runDir 'policy.bin'
 $stdout = Join-Path $root 'stdout.log'
 $stderr = Join-Path $root 'stderr.log'
 
 $initial = @"
-schema = 2
-failure = open
-[org.localsend.localsend_app]
-users = 0
-processes = *
-deny Pictures/Nagram
+format = 1
+[apps."org.localsend.localsend_app"]
+redirect = ["Pictures/Nagram" -> "PathGuard/Nagram"]
 "@
 $comment_only = $initial + "`n# comment-only-change`n"
-$updated = $comment_only + "deny DCIM`n"
+$updated = $comment_only.Replace('PathGuard/Nagram', 'PathGuard/Updated')
 Set-Content -LiteralPath $config -Value $initial -NoNewline
 
 $process = Start-Process -FilePath $Daemon -ArgumentList '--module-dir', $root `
@@ -55,8 +52,8 @@ try {
     if ($updatedHash -eq $initialHash) { throw 'policy was not reloaded' }
     Start-Sleep -Milliseconds 200
     $log = Get-Content -Raw -LiteralPath $stdout
-    if ($log -notmatch 'policy unchanged') { throw 'unchanged policy was not logged' }
-    if ($log -notmatch 'policy reloaded') { throw 'reload was not logged' }
+    if ($log -notmatch 'unchanged=1') { throw 'unchanged policy was not logged' }
+    if ($log -notmatch 'published=1') { throw 'reload was not logged' }
 } finally {
     if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
     Write-Output "Hot reload test data: $root"

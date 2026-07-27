@@ -2,12 +2,15 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "pathguard/binary.h"
 #include "pathguard/policy.h"
-#include "pathguard/validation.h"
+#include "pathguard/rules/diagnostic.h"
+#include "pathguard/rules/semantic.h"
+#include "pathguard/rules/source.h"
 
 namespace fs = std::filesystem;
 
@@ -29,6 +32,10 @@ static int PrintStatus(const fs::path& module_dir, const char* pid) {
         std::cout << text;
         return 0;
     }
+    std::string rules_status;
+    if (Read(module_dir / "run" / "rules-status.txt", &rules_status)) {
+        std::cout << rules_status;
+    }
     std::error_code error;
     if (!fs::is_directory(directory, error)) {
         std::cout << "no runtime status\n";
@@ -46,6 +53,90 @@ static int PrintStatus(const fs::path& module_dir, const char* pid) {
         if (Read(entry, &text)) std::cout << "[" << entry.stem().string() << "]\n" << text;
     }
     return error ? 1 : 0;
+}
+
+static pathguard::rules::RulesBuildResult CompileRulesFile(
+        const fs::path& path, std::optional<pathguard::rules::SourceBuffer>* source,
+        std::string* load_error) {
+    using namespace pathguard::rules;
+    std::string text;
+    if (!Read(path, &text)) {
+        *load_error = "cannot read rules.toml";
+        return {};
+    }
+    Diagnostic diagnostic;
+    *source = SourceBuffer::Create(
+        path.filename().string(), std::move(text), RulesLimits{}, &diagnostic);
+    if (!source->has_value()) {
+        RulesBuildResult result;
+        result.diagnostics.push_back(std::move(diagnostic));
+        return result;
+    }
+    return CompileRules(**source, RulesLimits{});
+}
+
+static int ValidateOrCompile(const std::string& command, int argc, char** argv) {
+    using namespace pathguard::rules;
+    if (argc < 3) {
+        std::cerr << "missing rules.toml\n";
+        return 2;
+    }
+    bool json = false;
+    bool device = false;
+    for (int index = 3; index < argc; ++index) {
+        const std::string option = argv[index];
+        if (option == "--json") json = true;
+        if (option == "--device") device = true;
+    }
+    std::optional<SourceBuffer> source;
+    std::string load_error;
+    RulesBuildResult result = CompileRulesFile(argv[2], &source, &load_error);
+    if (!load_error.empty()) {
+        std::cerr << load_error << '\n';
+        return 1;
+    }
+    if (!result.ok()) {
+        if (source.has_value()) {
+            for (const Diagnostic& diagnostic : result.diagnostics) {
+                std::cerr << (json ? RenderDiagnosticJson(diagnostic, *source)
+                                  : RenderDiagnosticText(diagnostic, *source))
+                          << '\n';
+            }
+        }
+        return 1;
+    }
+    if (device) {
+        std::cerr << "environment_unsupported: use reload so the daemon can "
+                     "validate the current device snapshot\n";
+        return 1;
+    }
+    if (command == "validate") {
+        std::cout << "valid: " << result.canonical->apps.size()
+                  << " package(s), content_generation="
+                  << result.blob->content_generation << '\n';
+        return 0;
+    }
+    if (argc < 4 || std::string(argv[3]).starts_with("--")) {
+        std::cerr << "missing policy.bin output\n";
+        return 2;
+    }
+    const fs::path output_path = argv[3];
+    if (output_path.filename() == "policy.bin"
+        && output_path.parent_path().filename() == "run") {
+        std::cerr << "refusing to write an active policy path; use reload\n";
+        return 1;
+    }
+    std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(result.blob->bytes.data()),
+                 static_cast<std::streamsize>(result.blob->bytes.size()));
+    if (!output) {
+        std::cerr << "cannot write policy.bin\n";
+        return 1;
+    }
+    std::cout << "compiled: " << result.blob->bytes.size()
+              << " bytes, content_generation="
+              << result.blob->content_generation << '\n';
+    return 0;
 }
 
 static const char* MountActionName(pathguard::MountAction action) {
@@ -97,7 +188,9 @@ static int ExplainPolicy(const fs::path& policy, const std::string& package) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "usage: pathguardctl validate|compile <rules.ini> [policy.bin]\n"
+        std::cerr << "usage: pathguardctl validate <rules.toml> --host|--device [--json]\n"
+                     "       pathguardctl compile <rules.toml> <output-policy.bin>\n"
+                     "       pathguardctl reload <module-dir>\n"
                      "       pathguardctl explain <policy.bin> <package>\n"
                      "       pathguardctl status <module-dir> [pid]\n";
         return 2;
@@ -111,21 +204,21 @@ int main(int argc, char** argv) {
         if (argc < 4) { std::cerr << "missing policy.bin or package\n"; return 2; }
         return ExplainPolicy(argv[2], argv[3]);
     }
-    if (command != "validate" && command != "compile") { std::cerr << "unknown command\n"; return 2; }
-    if (argc < 3) { std::cerr << "missing rules.ini\n"; return 2; }
-    std::string text;
-    if (!Read(argv[2], &text)) { std::cerr << "cannot read rules.ini\n"; return 1; }
-    pathguard::PolicyDocument document;
-    pathguard::ParseError error;
-    if (!pathguard::ParseRulesIni(text, &document, &error)) { std::cerr << "line " << error.line << ": " << error.message << '\n'; return 1; }
-    for (auto& app : document.apps) if (!pathguard::ValidatePolicy(&app, &error)) { std::cerr << "line " << error.line << ": " << error.message << '\n'; return 1; }
-    if (command == "validate") { std::cout << "valid: " << document.apps.size() << " package(s)\n"; return 0; }
-    if (argc < 4) { std::cerr << "missing policy.bin output\n"; return 2; }
-    std::vector<std::uint8_t> bytes;
-    if (!pathguard::EncodePolicy(document, &bytes, &error)) { std::cerr << error.message << '\n'; return 1; }
-    std::ofstream output(argv[3], std::ios::binary | std::ios::trunc);
-    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!output) { std::cerr << "cannot write policy.bin\n"; return 1; }
-    std::cout << "compiled: " << bytes.size() << " bytes\n";
-    return 0;
+    if (command == "reload") {
+        if (argc < 3) { std::cerr << "missing module directory\n"; return 2; }
+        const fs::path source = fs::path(argv[2]) / "config" / "rules.toml";
+        std::error_code error;
+        fs::last_write_time(source, fs::file_time_type::clock::now(), error);
+        if (error) {
+            std::cerr << "cannot request reload: " << error.message() << '\n';
+            return 1;
+        }
+        std::cout << "reload requested\n";
+        return 0;
+    }
+    if (command == "validate" || command == "compile") {
+        return ValidateOrCompile(command, argc, argv);
+    }
+    std::cerr << "unknown command\n";
+    return 2;
 }

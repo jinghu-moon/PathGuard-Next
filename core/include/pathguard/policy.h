@@ -64,6 +64,4 @@ struct ParseError {
     std::string message;
 };
 
-bool ParseRulesIni(std::string_view text, PolicyDocument* document, ParseError* error);
-
 }  // namespace pathguard

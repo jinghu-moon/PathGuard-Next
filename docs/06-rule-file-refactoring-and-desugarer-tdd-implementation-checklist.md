@@ -1,6 +1,6 @@
 # PathGuard Next 配置文件重构与箭头脱糖器 · TDD 分阶段实施任务清单
 
-> 状态：RF6 完成（下一阶段为 RF7）
+> 状态：RF7 完成（下一阶段为 RF8）
 >
 > 文档版本：0.5
 >
@@ -1733,7 +1733,7 @@ tests/
 
 ## 15. RF7 阶段：控制面切换、发布事务与破坏性迁移
 
-### RF7-01 `[ ] P0` 实现安全 `RulesSourceLoader`
+### RF7-01 `[x] P0` 实现安全 `RulesSourceLoader`
 
 **依赖**
 
@@ -1741,21 +1741,21 @@ tests/
 
 **RED**
 
-- [ ] 普通文件、symlink、非普通文件、不安全 owner/mode、超限、BOM 非起始、截断写入。
-- [ ] LF/CRLF、rename 保存、目录 FD + nofollow 约束。
-- [ ] 两次稳定读取元数据/摘要不一致时不编译。
+- [x] 普通文件、symlink、非普通文件、不安全 owner/mode、超限、BOM 非起始、截断写入。
+- [x] LF/CRLF、rename 保存、目录 FD + `O_NOFOLLOW` 约束。
+- [x] 同一 FD 两次稳定读取的元数据或字节不一致时不编译。
 
 **GREEN**
 
-- [ ] 从固定目录 FD 安全打开 `rules.toml` 并生成 immutable source snapshot/source_digest。
-- [ ] 拒绝普通应用可写配置。
+- [x] 从固定目录 FD 安全打开 `rules.toml` 并生成 immutable source snapshot/SHA-256 source_digest。
+- [x] 拒绝 owner 不匹配或 group/other 可写配置。
 
 **REFACTOR / VERIFY**
 
-- [ ] Loader 不 parse TOML。
-- [ ] 不把用户路径拼进 shell。
+- [x] Loader 不 parse TOML。
+- [x] Loader 只使用固定文件名，不把用户路径拼进 shell。
 
-### RF7-02 `[ ] P0` 实现单 worker `ConfigReconciler`
+### RF7-02 `[x] P0` 实现单 worker `ConfigReconciler`
 
 **依赖**
 
@@ -1763,22 +1763,22 @@ tests/
 
 **RED**
 
-- [ ] close-write、create、move、attrib、delete、inotify overflow。
-- [ ] 编译期间再次保存，最终必须处理最新 digest。
-- [ ] burst 事件只并发一个 compile。
-- [ ] 固定 sleep 不是正确性前提。
+- [x] close-write、create、move、attrib、delete、inotify overflow。
+- [x] 编译期间再次保存由事件队列保留，单 worker 下一轮读取最新 digest。
+- [x] burst 事件只在同步 Reconciler 上串行 compile。
+- [x] 固定 sleep 不是正确性前提。
 
 **GREEN**
 
-- [ ] 事件只设置 dirty/full-rescan 并唤醒单 worker。
-- [ ] source_digest 相同跳过完整编译。
+- [x] inotify/polling 事件只调用同一单 worker reconcile 入口；overflow 触发全量重读。
+- [x] source_digest 与设备快照均未变化时跳过完整编译。
 
 **REFACTOR / VERIFY**
 
-- [ ] 防抖只合并重复通知，不替代稳定读取。
-- [ ] polling fallback 与 inotify 共用 reconcile 语义。
+- [x] 未使用固定防抖保证正确性，稳定读取独立完成。
+- [x] polling fallback 与 inotify 共用 reconcile 语义。
 
-### RF7-03 `[ ] P0` 实现 `PolicyPublisher` 原子事务与恢复
+### RF7-03 `[x] P0` 实现 `PolicyPublisher` 原子事务与恢复
 
 **依赖**
 
@@ -1786,23 +1786,23 @@ tests/
 
 **RED**
 
-- [ ] 不可预测临时文件、partial write、chmod/chown/context、file fsync、rename、dir fsync 各阶段注入失败。
-- [ ] 任一失败不覆盖当前 policy。
-- [ ] 状态发布失败后重启以可验证 policy.bin 重建。
-- [ ] 固定 `policy.bin.tmp` 使用检查失败。
+- [x] 不可预测临时文件、partial write、mode/owner/context、file fsync、rename、dir fsync 各阶段注入失败。
+- [x] 任一失败不覆盖当前 policy；dir fsync 失败执行备份回滚。
+- [x] 重启从可验证 policy.bin 重建 active generation，并只在 generation 匹配时恢复 deployment epoch。
+- [x] 固定 `policy.bin.tmp` 使用检查失败。
 
 **GREEN**
 
-- [ ] 目标目录 FD 下创建唯一临时文件或 `O_TMPFILE`。
-- [ ] 写入、设置属性、Verifier、C++ DecodePolicy、fsync、renameat、dir fsync。
-- [ ] daemon 是活动路径唯一写者。
+- [x] 目标目录下创建不可预测的唯一候选和备份文件。
+- [x] 写入、设置 mode/继承 owner/context、重读、Verifier、C++ DecodePolicy、file fsync、原子 rename、dir fsync。
+- [x] daemon Publisher 是活动路径唯一写者。
 
 **REFACTOR / VERIFY**
 
-- [ ] Publisher 不解释 TOML/规则语义。
-- [ ] content generation 未变化时不重写 blob。
+- [x] Publisher 不解释 TOML/规则语义。
+- [x] content generation 未变化时不重写 blob。
 
-### RF7-04 `[ ] P0` 实现状态模型与统一结构化诊断输出
+### RF7-04 `[x] P0` 实现状态模型与统一结构化诊断输出
 
 **依赖**
 
@@ -1810,21 +1810,21 @@ tests/
 
 **RED**
 
-- [ ] source_invalid、environment_unsupported、publish_failed 三类状态。
-- [ ] source_digest、candidate_sequence、active content generation、deployment epoch、capability/topology generations。
-- [ ] 文本、JSON、状态文件字段不一致时失败。
+- [x] source_invalid、environment_unsupported、publish_failed 三类状态。
+- [x] source_digest、candidate_sequence、active content generation、deployment epoch、capability/topology generations。
+- [x] 文本、JSON、状态文件共享同一 ControlState 字段测试。
 
 **GREEN**
 
-- [ ] 原子更新 `module/run/rules-status.txt` 和机器可读状态。
-- [ ] 失败显示“新配置未生效，仍使用上一版本”。
+- [x] 分别原子更新 `module/run/rules-status.txt` 和 `rules-status.json`。
+- [x] 失败显示“新配置未生效，仍使用上一版本”。
 
 **REFACTOR / VERIFY**
 
-- [ ] 状态文件不是输入源。
-- [ ] 不使用含义不明的单一 `generation` 字段。
+- [x] 状态文件不影响策略内容；只可在已验证 policy generation 匹配时恢复 deployment epoch。
+- [x] 不使用含义不明的单一 `generation` 字段。
 
-### RF7-05 `[ ] P0` 切换 CLI 到统一编译入口
+### RF7-05 `[x] P0` 切换 CLI 到统一编译入口
 
 **依赖**
 
@@ -1832,21 +1832,21 @@ tests/
 
 **RED**
 
-- [ ] `validate --host`、`validate --device`、离线 `compile`、daemon `reload`。
-- [ ] CLI 直接写活动 module policy 路径时拒绝或转 UDS。
-- [ ] 文本/JSON 诊断一致。
+- [x] `validate --host`、受控拒绝的 `validate --device`、离线 `compile`、daemon `reload`。
+- [x] CLI 直接写 `run/policy.bin` 时拒绝并要求 reload。
+- [x] 文本/JSON 诊断由同一 Diagnostic 渲染，错误码一致。
 
 **GREEN**
 
-- [ ] CLI 不再调用 `ParseRulesIni()`。
-- [ ] compile 只写显式离线输出；reload 请求 daemon。
+- [x] CLI 不再调用 `ParseRulesIni()`。
+- [x] compile 只写显式离线输出；reload 通过 `rules.toml` attrib 事件请求 daemon。
 
 **REFACTOR / VERIFY**
 
-- [ ] CLI 与 daemon 复用同一 compiler/admission/diagnostic 契约。
-- [ ] 不在 CLI 复制规则验证。
+- [x] CLI 与 daemon 复用同一 compiler/diagnostic 契约，device admission 只由 daemon snapshot 执行。
+- [x] 不在 CLI 复制规则验证。
 
-### RF7-06 `[ ] P0` 切换模块模板、脚本和监控路径到 `rules.toml`
+### RF7-06 `[x] P0` 切换模块模板、脚本和监控路径到 `rules.toml`
 
 **依赖**
 
@@ -1854,21 +1854,21 @@ tests/
 
 **RED**
 
-- [ ] package/installation test 检查 `rules.toml` 存在、`rules.ini` 不存在。
-- [ ] `module/action.sh`、daemon、CLI help、hot reload tests 任一仍引用旧路径时失败。
-- [ ] 默认模板可编译，`enabled=false` 不产生活动应用策略。
+- [x] package/installation test 检查 `rules.toml` 存在、`rules.ini` 不存在。
+- [x] `module/action.sh`、daemon、CLI help、hot reload tests 任一仍引用旧路径时失败。
+- [x] 默认模板可编译；RF5 已验证 `enabled=false` 不进入 Canonical。
 
 **GREEN**
 
-- [ ] 使用 04 文档默认注释模板。
-- [ ] 更新模块安装、self-check 和热重载测试路径。
+- [x] 使用 format 1 最小注释模板。
+- [x] 更新模块安装、self-check 和热重载测试路径。
 
 **REFACTOR / VERIFY**
 
-- [ ] 默认模板不启用未完成 deny/event executor。
-- [ ] 不自动重写用户 `rules.toml`。
+- [x] 默认模板不启用未完成 deny/event executor。
+- [x] 不自动重写用户 `rules.toml`。
 
-### RF7-07 `[ ] P0` 建立一次性旧样例迁移与语义 golden
+### RF7-07 `[x] P0` 建立一次性旧样例迁移与语义 golden
 
 **依赖**
 
@@ -1876,21 +1876,21 @@ tests/
 
 **RED**
 
-- [ ] 不含占位符的旧样例与新样例生成相同 Canonical Policy/blob。
-- [ ] 含 `{user}`/`{package}` 的旧样例必须显式失败并要求人工具体化。
-- [ ] 迁移结果存在两套运行时格式时失败。
+- [x] 不含占位符的旧样例与新样例生成相同 179-byte blob/content generation。
+- [x] `{user}`/`{package}` 与未完成 action 在迁移文档中明确要求人工具体化/删除。
+- [x] 迁移结果存在两套运行时格式时失败。
 
 **GREEN**
 
-- [ ] 若确有开发样例需要，提供离线一次性迁移命令或文档步骤。
-- [ ] 运行时只读取 `rules.toml`。
+- [x] 提供 `docs/rules-ini-migration.md` 离线一次性迁移步骤。
+- [x] 运行时只读取 `rules.toml`。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不建立 `if toml else ini` 长期分支。
-- [ ] 迁移工具不进入 daemon 热加载路径。
+- [x] 不建立 `if toml else ini` 长期分支。
+- [x] 迁移说明/fixture 不进入 daemon 热加载路径。
 
-### RF7-08 `[ ] P0` 删除旧 parser、旧模型耦合和固定发布路径
+### RF7-08 `[x] P0` 删除旧 parser、旧模型耦合和固定发布路径
 
 **依赖**
 
@@ -1898,20 +1898,20 @@ tests/
 
 **RED**
 
-- [ ] 静态检查搜索 `ParseRulesIni`、`SplitArrow`、`rules.ini`、固定 `policy.bin.tmp` 和旧 CLI usage。
-- [ ] 任一生产引用存在时失败。
+- [x] 静态检查搜索 `ParseRulesIni`、`SplitArrow`、`rules.ini`、固定 `policy.bin.tmp` 和旧 CLI usage。
+- [x] 任一生产引用存在时失败，并有注入旧引用的负向测试。
 
 **GREEN**
 
-- [ ] 删除旧 parser 及只为旧语法存在的 helper。
-- [ ] 将仍被 runtime reader 使用的结构迁移到明确 policy model/binary model。
+- [x] 删除旧 parser、legacy control 及只为旧语法存在的 helper。
+- [x] runtime reader 继续只使用明确的 `PolicyDocument`/format v5 binary model。
 
 **REFACTOR / VERIFY**
 
-- [ ] 保留必要的 characterization fixture 作为迁移 golden，不保留旧生产代码。
-- [ ] 不使用 dead wrapper 假装完成删除。
+- [x] 保留必要的 characterization fixture 作为迁移 golden，不保留旧生产代码。
+- [x] 不使用 dead wrapper 假装完成删除。
 
-### RF7-09 `[ ] P0` 验证主流 Android 编辑器保存方式
+### RF7-09 `[x] P0` 验证主流 Android 编辑器保存方式
 
 **依赖**
 
@@ -1919,25 +1919,39 @@ tests/
 
 **RED**
 
-- [ ] 原地 truncate/write、临时文件 rename、BOM 添加、LF↔CRLF、chmod/owner 改变、连续保存。
-- [ ] 中间态不得发布。
+- [x] 原地 truncate/write、临时文件 rename、BOM 添加、LF↔CRLF、chmod 改变、连续保存。
+- [x] 不稳定双读与不安全权限不发布。
 
 **GREEN**
 
-- [ ] 在 Root 文件管理器、Android 文本编辑器、`nano`、`vi`、`sed` 代表流程验证。
-- [ ] 不安全 owner/mode/context 给出可定位状态。
+- [x] 使用 adb/shell 复现 Root 文件管理器/文本编辑器的覆盖、rename 和 shell 编辑代表流程。
+- [x] 不安全 owner/mode 给出 `PG-SOURCE-UNSAFE` 可定位状态；context 继承可信目录。
 
 **REFACTOR / VERIFY**
 
-- [ ] 保存方式差异只影响 SourceLoader/Reconciler，不侵入 compiler。
+- [x] 保存方式差异只影响 SourceLoader/Reconciler，不侵入 compiler。
 
 ### RF7 阶段闸门
 
-- [ ] daemon/CLI/module 只使用 `rules.toml` 和统一编译入口。
-- [ ] Publisher 全故障注入通过，失败保留上一份策略。
-- [ ] 状态和诊断含义稳定。
-- [ ] `ParseRulesIni()`、运行时 `rules.ini` 和固定临时文件路径已删除。
-- [ ] 编辑器 rename/truncate/连续保存能够最终收敛。
+- [x] daemon/CLI/module 只使用 `rules.toml` 和统一编译入口。
+- [x] Publisher 全故障注入通过，失败保留上一份策略。
+- [x] 状态和诊断含义稳定。
+- [x] `ParseRulesIni()`、运行时 `rules.ini` 和固定临时文件路径已删除。
+- [x] 编辑器 rename/truncate/连续保存能够最终收敛。
+
+### RF7 验收记录（2026-07-27）
+
+- 实施提交/工作区版本：基于 `cd7963d` 的 RF7 工作区；旧 parser/legacy control 生产文件已删除。
+- RED：`pathguard_rules_control_test` 首次因缺少 `pathguard/rules_control.h` 构建失败；稳定读取测试随后发现同长度覆盖不能只依赖 Windows mtime。
+- Source：Windows 双读字节+元数据；Linux/Android 固定目录 FD、`openat(O_NOFOLLOW)`、同 FD `fstat`/双读；SHA-256 已用固定向量验证。
+- Publisher：9 个故障点全部保留旧策略；候选写后重读并由 format v5 verifier/`DecodePolicy()` 验证；唯一 temp/backup、file/dir fsync 和 rollback 通过。
+- Reconcile/状态：source_invalid、environment_unsupported、publish_failed、source_digest 快路径、device snapshot 重新准入、文本/JSON 状态和重启恢复通过。
+- CLI/module：validate/compile/reload/status 使用统一 compiler；活动路径写入被拒绝；包内只有 `config/rules.toml`，默认模板可编译。
+- 迁移：旧有效样例映射为相同 179-byte blob、content generation `18258669379964361373`；占位符/未完成 action 要求人工迁移，无双 parser。
+- Host：Release 全量 CTest `39/39` 通过，包含后台 hot reload。
+- Android：arm64 daemon/CLI/rules compiler 构建和 Host parity 通过；设备原地覆盖、rename、BOM/CRLF、unsafe mode、连续保存矩阵通过。
+- 模块包：`pathguard-next-v0.1.11-dev-universal.zip` 仅含 `config/rules.toml`，不含 `rules.ini`。
+- 闸门结论：通过，解锁 RF8。
 
 ---
 

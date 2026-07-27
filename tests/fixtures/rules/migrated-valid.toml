@@ -1,0 +1,7 @@
+format = 1
+
+[apps."com.example.redirect"]
+users = [0]
+redirect = [
+    "Download/Source" -> "PathGuard/Target",
+]

@@ -1,7 +1,6 @@
 add_library(pathguard_core STATIC
   src/binary.cpp
   src/path.cpp
-  src/policy.cpp
   src/topology.cpp
   src/validation.cpp
   src/version.cpp

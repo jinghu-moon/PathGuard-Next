@@ -15,18 +15,6 @@ target_compile_definitions(pathguard_policy_test PRIVATE
 target_link_libraries(pathguard_policy_test PRIVATE pathguard_core)
 add_test(NAME pathguard_policy_test COMMAND pathguard_policy_test)
 
-add_executable(pathguard_legacy_policy_characterization_test
-  unit/legacy_policy_characterization_test.cpp
-)
-target_compile_definitions(pathguard_legacy_policy_characterization_test PRIVATE
-  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-target_link_libraries(pathguard_legacy_policy_characterization_test PRIVATE pathguard_core)
-add_test(
-  NAME pathguard_legacy_policy_characterization_test
-  COMMAND pathguard_legacy_policy_characterization_test
-)
-
 add_executable(pathguard_path_test
   unit/path_test.cpp
 )
@@ -44,22 +32,6 @@ target_compile_definitions(pathguard_binary_test PRIVATE
 )
 target_link_libraries(pathguard_binary_test PRIVATE pathguard_core)
 add_test(NAME pathguard_binary_test COMMAND pathguard_binary_test)
-
-add_executable(pathguard_legacy_rules_control_test
-  unit/legacy_rules_control_test.cpp
-  ../daemon/src/legacy_rules_control.cpp
-)
-target_compile_definitions(pathguard_legacy_rules_control_test PRIVATE
-  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-target_include_directories(pathguard_legacy_rules_control_test PRIVATE
-  ${CMAKE_SOURCE_DIR}/daemon/include
-)
-target_link_libraries(pathguard_legacy_rules_control_test PRIVATE pathguard_core)
-add_test(
-  NAME pathguard_legacy_rules_control_test
-  COMMAND pathguard_legacy_rules_control_test
-)
 
 add_executable(pathguard_mount_transaction_test unit/mount_transaction_test.cpp)
 target_link_libraries(pathguard_mount_transaction_test PRIVATE pathguard_core)
@@ -255,6 +227,39 @@ target_compile_definitions(pathguard_rules_pipeline_test PRIVATE
 target_link_libraries(pathguard_rules_pipeline_test PRIVATE pathguard_rules_compiler)
 add_test(NAME pathguard_rules_pipeline_test COMMAND pathguard_rules_pipeline_test)
 
+add_executable(pathguard_rules_control_test
+  unit/rules_control_test.cpp
+)
+target_include_directories(pathguard_rules_control_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/daemon/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_control_test PRIVATE
+  pathguard_rules_control
+)
+add_test(NAME pathguard_rules_control_test COMMAND pathguard_rules_control_test)
+
+add_executable(pathguard_rules_migration_test
+  unit/rules_migration_test.cpp
+)
+target_compile_definitions(pathguard_rules_migration_test PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+target_include_directories(pathguard_rules_migration_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_migration_test PRIVATE
+  pathguard_rules_compiler
+)
+add_test(NAME pathguard_rules_migration_test COMMAND pathguard_rules_migration_test)
+
+add_test(
+  NAME pathguard_rules_format_cutover_guard
+  COMMAND ${CMAKE_COMMAND}
+    -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/rules/rules_format_cutover_guard_test.cmake
+)
+
 add_executable(pathguard_rules_parity_probe
   integration/rules/rules_compiler_parity_probe.cpp
 )
@@ -330,7 +335,9 @@ if(PATHGUARD_BUILD_FUZZERS)
 endif()
 
 add_executable(pathguard_policy_benchmark perf/policy_benchmark.cpp)
-target_link_libraries(pathguard_policy_benchmark PRIVATE pathguard_core)
+target_link_libraries(pathguard_policy_benchmark PRIVATE
+  pathguard_rules_compiler
+)
 
 add_executable(pathguard_cpp_toml_adapter_spike
   d0/cpp_toml_adapter_spike.cpp
@@ -373,14 +380,24 @@ target_include_directories(pathguard_cpp_d0_benchmark PRIVATE
 target_link_libraries(pathguard_cpp_d0_benchmark PRIVATE pathguard_core)
 
 add_test(
-  NAME pathguard_legacy_control_plane_integration
+  NAME pathguard_rules_control_plane_integration
   COMMAND ${CMAKE_COMMAND}
     -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
     -DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
     -DPATHGUARDCTL=$<TARGET_FILE:pathguardctl>
     -DPATHGUARDD=$<TARGET_FILE:pathguardd>
-    -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/rules/legacy_control_plane_test.cmake
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/rules/control_plane_test.cmake
 )
+
+if(WIN32)
+  find_program(PATHGUARD_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
+  add_test(
+    NAME pathguard_rules_hot_reload_integration
+    COMMAND ${PATHGUARD_POWERSHELL_EXECUTABLE} -NoProfile -File
+      ${CMAKE_SOURCE_DIR}/tests/hot_reload_test.ps1
+      -Daemon $<TARGET_FILE:pathguardd>
+  )
+endif()
 
 add_test(
   NAME pathguard_test_asset_guard

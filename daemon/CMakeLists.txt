@@ -1,8 +1,15 @@
-add_executable(pathguardd
-  src/main.cpp
-  src/legacy_rules_control.cpp
+add_library(pathguard_rules_control STATIC
+  src/rules_control.cpp
 )
-target_include_directories(pathguardd PRIVATE
+target_include_directories(pathguard_rules_control PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(pathguardd PRIVATE pathguard_core)
+target_link_libraries(pathguard_rules_control PUBLIC
+  pathguard_rules_compiler
+)
+
+add_executable(pathguardd src/main.cpp)
+target_link_libraries(pathguardd PRIVATE
+  pathguard_core
+  pathguard_rules_control
+)
