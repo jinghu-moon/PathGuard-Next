@@ -49,6 +49,14 @@ LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include
 include $(BUILD_EXECUTABLE)
 
 include $(CLEAR_VARS)
+LOCAL_MODULE := pathguard_deny_anchor_probe
+LOCAL_SRC_FILES := ../tests/device/rules/deny_anchor_probe.cpp \
+    $(DIRECTORY_RESOLVER_SOURCE) $(MOUNT_INFO_SNAPSHOT_SOURCE) \
+    $(MOUNT_EXECUTOR_SOURCE)
+LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include $(ROOT_PATH)/native/include
+include $(BUILD_EXECUTABLE)
+
+include $(CLEAR_VARS)
 LOCAL_MODULE := pathguard_rules_benchmark
 LOCAL_SRC_FILES := ../tests/perf/policy_benchmark.cpp \
     ../daemon/src/rules_control.cpp
@@ -84,6 +92,8 @@ include $(CLEAR_VARS)
 LOCAL_MODULE := pathguard_zygisk
 LOCAL_SRC_FILES := \
     ../zygisk/src/module_entry.cpp \
+    ../zygisk/src/media_query_filter.cpp \
+    ../zygisk/src/media_query_hook.cpp \
     ../zygisk/src/provider_redirect_hook.cpp \
     ../zygisk/src/provider_path_mapper.cpp \
     $(DIRECTORY_RESOLVER_SOURCE) \

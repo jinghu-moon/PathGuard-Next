@@ -15,6 +15,19 @@ enum class MountTransactionState : uint32_t {
     kNamespaceTainted = 7,
 };
 
+enum class MountPreflightPhase : uint32_t {
+    kIdle = 0,
+    kCapabilityProbe = 1,
+};
+
+constexpr bool ShouldExtendPendingMountWait(
+        MountTransactionState state, MountPreflightPhase phase,
+        bool grace_used) {
+    return state == MountTransactionState::kPending
+        && phase == MountPreflightPhase::kCapabilityProbe
+        && !grace_used;
+}
+
 constexpr bool IsMountTransactionTerminal(MountTransactionState state) {
     return state == MountTransactionState::kComplete
         || state == MountTransactionState::kCancelled

@@ -237,7 +237,8 @@ MountBackendProbe ProbeDirectoryMountBackends(const char* source_path,
         probe.error = error;
         return probe;
     }
-    probe.capabilities.strict_actions = kMountActionRedirect;
+    probe.capabilities.strict_actions =
+        kMountActionRedirect | kMountActionDenyAnchor;
     probe.capabilities.legacy_actions = kMountActionRedirect;
     probe.capabilities.primitives |= kCapabilityComponentFdWalk;
     if (ProbeOne(MountBackendKind::kStrictOpenTree, source, target,

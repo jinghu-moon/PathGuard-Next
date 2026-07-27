@@ -58,6 +58,23 @@ int main() {
     assert(plan[1].kind == PolicyChangeKind::kRemove && plan[1].source == "C");
     assert(plan[2].kind == PolicyChangeKind::kAdd && plan[2].source == "E");
 
+    const RulesBuildResult deny_before = Compile(
+        "format = 1\n[apps.\"com.example.app\"]\n"
+        "deny=[\"Private\"]\nredirect=[\"A\" -> \"B\"]\n");
+    const RulesBuildResult deny_after = Compile(
+        "format = 1\n[apps.\"com.example.app\"]\n"
+        "deny=[\"Secret\"]\nredirect=[\"A\" -> \"B\"]\n");
+    assert(deny_before.ok() && deny_after.ok());
+    const auto deny_plan = BuildPolicyPlan(
+        *deny_before.canonical, *deny_after.canonical);
+    assert(deny_plan.size() == 2);
+    assert(deny_plan[0].kind == PolicyChangeKind::kRemove);
+    assert(deny_plan[0].rule_kind == PolicyRuleKind::kDeny);
+    assert(deny_plan[0].source == "Private");
+    assert(deny_plan[1].kind == PolicyChangeKind::kAdd);
+    assert(deny_plan[1].rule_kind == PolicyRuleKind::kDeny);
+    assert(deny_plan[1].source == "Secret");
+
     const RulesBuildResult overlap = Compile(
         "format = 1\n[apps.\"com.example.app\"]\n"
         "redirect=[\"A\" -> \"X\",\"A/B\" -> \"Y\"]\n");
@@ -69,5 +86,11 @@ int main() {
     assert(explanation.target == "Y");
     assert(explanation.shadowed_parents.size() == 1);
     assert(explanation.shadowed_parents.front() == "A");
+
+    const PathExplanation denied = ExplainPath(
+        *deny_after.resolved, "com.example.app", "Secret/file", RulesLimits{});
+    assert(denied.action == PolicyRuleKind::kDeny);
+    assert(denied.source == "Secret");
+    assert(!denied.target.has_value());
     return 0;
 }

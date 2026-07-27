@@ -60,6 +60,7 @@ struct CanonicalAppPolicy {
     std::vector<std::int32_t> users;
     std::vector<std::string> processes;
     bool file_picker = false;
+    std::vector<NormalizedPath> deny;
     std::vector<CanonicalRedirectRule> redirects;
 
     bool operator==(const CanonicalAppPolicy&) const = default;

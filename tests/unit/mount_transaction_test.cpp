@@ -9,6 +9,7 @@
 namespace {
 
 using pathguard::MountTransactionState;
+using pathguard::MountPreflightPhase;
 
 std::uint32_t Value(MountTransactionState state) {
     return static_cast<std::uint32_t>(state);
@@ -25,6 +26,21 @@ bool Transition(std::atomic<std::uint32_t>* state, MountTransactionState from,
 }  // namespace
 
 int main() {
+    static_assert(!pathguard::ShouldExtendPendingMountWait(
+        MountTransactionState::kPending, MountPreflightPhase::kIdle, false));
+    static_assert(pathguard::ShouldExtendPendingMountWait(
+        MountTransactionState::kPending,
+        MountPreflightPhase::kCapabilityProbe, false));
+    static_assert(!pathguard::ShouldExtendPendingMountWait(
+        MountTransactionState::kPending,
+        MountPreflightPhase::kCapabilityProbe, true));
+    static_assert(!pathguard::ShouldExtendPendingMountWait(
+        MountTransactionState::kApplying,
+        MountPreflightPhase::kCapabilityProbe, false));
+    static_assert(!pathguard::ShouldExtendPendingMountWait(
+        MountTransactionState::kComplete,
+        MountPreflightPhase::kCapabilityProbe, false));
+
     static_assert(pathguard::IsMountTransitionAllowed(
         MountTransactionState::kPending, MountTransactionState::kApplying));
     static_assert(pathguard::IsMountTransitionAllowed(

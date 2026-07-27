@@ -6,6 +6,9 @@ DAEMON="$MODDIR/bin/pathguardd"
 PIDFILE="$RUNDIR/pathguardd.pid"
 
 mkdir -p "$RUNDIR"
+mkdir -p "$RUNDIR/deny-anchor"
+chown 0:0 "$RUNDIR/deny-anchor"
+chmod 0000 "$RUNDIR/deny-anchor"
 exec >>"$RUNDIR/service.log" 2>&1
 
 if [ ! -x "$DAEMON" ]; then

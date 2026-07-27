@@ -133,7 +133,11 @@ pathguard::PolicyDocument ToPolicyDocument(const CanonicalPolicy& canonical) {
         if (app.users.empty()) app.users.push_back("*");
         app.processes = source.processes;
         if (app.processes.empty()) app.processes.push_back("*");
-        app.mounts.reserve(source.redirects.size());
+        app.mounts.reserve(source.deny.size() + source.redirects.size());
+        for (const NormalizedPath& deny : source.deny) {
+            app.mounts.push_back({
+                pathguard::MountAction::kDeny, deny.bytes, {}, 0, 0, 0});
+        }
         for (const CanonicalRedirectRule& redirect : source.redirects) {
             app.mounts.push_back({
                 pathguard::MountAction::kRedirect,
@@ -257,22 +261,20 @@ void ValidateDeny(ResolvedAppPolicy* app, const OriginMap& origins,
                   return std::tie(lhs.path.bytes, lhs.id)
                       < std::tie(rhs.path.bytes, rhs.id);
               });
-    for (std::size_t index = 1; index < app->deny.size(); ++index) {
-        const ResolvedDenyRule& previous = app->deny[index - 1];
-        const ResolvedDenyRule& current = app->deny[index];
-        if (IsSameOrAncestor(previous.path, current.path)) {
+    std::vector<ResolvedDenyRule> unique;
+    unique.reserve(app->deny.size());
+    for (ResolvedDenyRule& current : app->deny) {
+        if (!unique.empty()
+            && IsSameOrAncestor(unique.back().path, current.path)) {
             AddDiagnostic(diagnostics, kRuleRedundant, "deny_redundant",
                           OriginSpan(origins, current.id),
                           DiagnosticSeverity::kWarning, limits,
-                          OriginSpan(origins, previous.id));
+                          OriginSpan(origins, unique.back().id));
+            continue;
         }
+        unique.push_back(std::move(current));
     }
-    if (!app->deny.empty()) {
-        AddDiagnostic(diagnostics, kExecutorUnavailable,
-                      "deny_executor_unavailable",
-                      OriginSpan(origins, app->deny.front().id),
-                      DiagnosticSeverity::kError, limits);
-    }
+    app->deny = std::move(unique);
     for (const ResolvedRedirectRule& redirect : app->redirects) {
         const auto next = std::lower_bound(
             app->deny.begin(), app->deny.end(), redirect.source.bytes,
@@ -485,6 +487,14 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
         app.users = source_app.users;
         app.processes = source_app.processes;
         app.file_picker = source_app.file_picker;
+        app.deny.reserve(source_app.deny.size());
+        for (const ResolvedDenyRule& deny : source_app.deny) {
+            app.deny.push_back(deny.path);
+        }
+        std::sort(app.deny.begin(), app.deny.end(),
+                  [](const NormalizedPath& lhs, const NormalizedPath& rhs) {
+                      return lhs.bytes < rhs.bytes;
+                  });
         std::sort(app.users.begin(), app.users.end());
         app.users.erase(std::unique(app.users.begin(), app.users.end()),
                         app.users.end());
@@ -510,7 +520,15 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
                   return lhs.package < rhs.package;
               });
     output.statistics.canonicalize_ns = ElapsedNs(canonicalize_started);
-    output.requirements.mount_actions = kMountActionRedirect;
+    output.requirements.mount_actions = 0;
+    for (const CanonicalAppPolicy& app : canonical.apps) {
+        if (!app.redirects.empty()) {
+            output.requirements.mount_actions |= kMountActionRedirect;
+        }
+        if (!app.deny.empty()) {
+            output.requirements.mount_actions |= kMountActionDenyAnchor;
+        }
+    }
     output.requirements.provider = std::any_of(
         canonical.apps.begin(), canonical.apps.end(),
         [](const CanonicalAppPolicy& app) { return app.file_picker; });

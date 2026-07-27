@@ -26,7 +26,7 @@ const char* PolicyString(const std::uint8_t* data, std::size_t size,
 
 int main(int argc, char** argv) {
     using namespace pathguard::binary_format;
-    if (argc != 5) return 2;
+    if (argc != 5 && argc != 7) return 2;
     const int fd = open(argv[1], O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat metadata {};
     if (fd < 0 || fstat(fd, &metadata) != 0
@@ -58,25 +58,46 @@ int main(int argc, char** argv) {
     if (plan_ok) {
         const std::uint32_t first = ReadLe32(package + kPackageFirstMountOffset);
         const std::uint32_t count = ReadLe32(package + kPackageMountCountOffset);
-        plan_ok = count == 1 && first < mount_count;
-        if (plan_ok) {
-            const std::uint8_t* rule = data + mount_offset + first * kMountRuleSize;
+        plan_ok = count == (argc == 7 ? 3U : 1U)
+            && first <= mount_count && count <= mount_count - first;
+        bool redirect_found = false;
+        bool first_deny_found = argc != 7;
+        bool second_deny_found = argc != 7;
+        for (std::uint32_t index = 0; plan_ok && index < count; ++index) {
+            const std::uint8_t* rule = data + mount_offset
+                + (first + index) * kMountRuleSize;
             const char* visible = PolicyString(
                 data, size, string_offset,
                 ReadLe32(rule + kMountVisiblePathOffset));
             const char* backing = PolicyString(
                 data, size, string_offset,
                 ReadLe32(rule + kMountBackingPathOffset));
-            plan_ok = rule[kMountActionOffset] == 1 && visible != nullptr
-                && backing != nullptr && std::strcmp(visible, argv[3]) == 0
-                && std::strcmp(backing, argv[4]) == 0;
+            plan_ok = visible != nullptr && backing != nullptr;
+            if (!plan_ok) break;
+            if (rule[kMountActionOffset] == 1
+                && std::strcmp(visible, argv[3]) == 0
+                && std::strcmp(backing, argv[4]) == 0) {
+                redirect_found = true;
+            } else if (rule[kMountActionOffset] == 0
+                       && backing[0] == '\0' && argc == 7
+                       && std::strcmp(visible, argv[5]) == 0) {
+                first_deny_found = true;
+            } else if (rule[kMountActionOffset] == 0
+                       && backing[0] == '\0' && argc == 7
+                       && std::strcmp(visible, argv[6]) == 0) {
+                second_deny_found = true;
+            } else {
+                plan_ok = false;
+            }
         }
+        plan_ok = plan_ok && redirect_found
+            && first_deny_found && second_deny_found;
     }
     if (plan_ok) {
-        std::printf("generation=%llu package=%s redirect=%s->%s\n",
+        std::printf("generation=%llu package=%s redirect=%s->%s denies=%u\n",
                     static_cast<unsigned long long>(
                         ReadLe64(data + kContentGenerationOffset)),
-                    argv[2], argv[3], argv[4]);
+                    argv[2], argv[3], argv[4], argc == 7 ? 2U : 0U);
     }
     munmap(mapping, size);
     return plan_ok ? 0 : 5;

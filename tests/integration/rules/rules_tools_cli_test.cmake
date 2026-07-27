@@ -27,9 +27,9 @@ execute_process(COMMAND "${PATHGUARDCTL}" plan "${old}" "${new}"
   RESULT_VARIABLE plan_result OUTPUT_VARIABLE plan_output
   ERROR_VARIABLE plan_error)
 if(NOT plan_result EQUAL 0
-   OR NOT plan_output MATCHES "modify com.example.app A from=B to=X"
-   OR NOT plan_output MATCHES "remove com.example.app C from=D"
-   OR NOT plan_output MATCHES "add com.example.app E to=F")
+   OR NOT plan_output MATCHES "modify com.example.app redirect A from=B to=X"
+   OR NOT plan_output MATCHES "remove com.example.app redirect C from=D"
+   OR NOT plan_output MATCHES "add com.example.app redirect E to=F")
   message(FATAL_ERROR "plan output mismatch: ${plan_output}${plan_error}")
 endif()
 
@@ -39,7 +39,7 @@ execute_process(
   RESULT_VARIABLE explain_result OUTPUT_VARIABLE explain_output
   ERROR_VARIABLE explain_error)
 if(NOT explain_result EQUAL 0
-   OR NOT explain_output MATCHES "match=A -> X"
+   OR NOT explain_output MATCHES "match=redirect A -> X"
    OR NOT explain_output MATCHES "shadowed_parent=none")
   message(FATAL_ERROR "explain output mismatch: ${explain_output}${explain_error}")
 endif()

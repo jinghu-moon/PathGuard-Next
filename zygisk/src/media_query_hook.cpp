@@ -7,6 +7,7 @@
 #include <string.h>
 #include <limits.h>
 
+#include "pathguard/media_query_filter.h"
 #include "pathguard/perf_clock.hpp"
 #include "zygisk.hpp"
 
@@ -16,10 +17,10 @@ namespace {
 constexpr char kLogTag[] = "PathGuard";
 constexpr char kProviderDescriptor[] = "android.content.IContentProvider";
 constexpr char kMediaAuthority[] = "media";
-constexpr char kStorageRootPrefix[] = "/storage/emulated/";
 constexpr char kSelectionKey[] = "android:query-arg-sql-selection";
 constexpr char kSelectionArgsKey[] = "android:query-arg-sql-selection-args";
 constexpr size_t kMaxDenyPaths = 8;
+constexpr size_t kMaxDenyArguments = kMaxDenyPaths * 2;
 constexpr size_t kMaxSelectionSize = 8192;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kLogTag, __VA_ARGS__)
@@ -141,38 +142,6 @@ bool ClearException(JNIEnv* env) {
     return true;
 }
 
-bool Append(char* output, size_t capacity, const char* value) {
-    const size_t current = strlen(output);
-    const size_t addition = strlen(value);
-    if (current + addition + 1 > capacity) return false;
-    memcpy(output + current, value, addition + 1);
-    return true;
-}
-
-bool BuildFilter(char* selection, size_t selection_capacity,
-                 char arguments[][PATH_MAX + 4], size_t* argument_count) {
-    selection[0] = '\0';
-    *argument_count = 0;
-    constexpr char kClause[] = "(_data IS NULL OR _data NOT LIKE ?)";
-
-    char storage_prefix[64]{};
-    if (snprintf(storage_prefix, sizeof(storage_prefix), "/storage/emulated/%u/",
-                 g_user_id) <= 0) {
-        return false;
-    }
-    for (size_t index = 0; index < g_deny_path_count; ++index) {
-        const char* path = g_deny_paths[index];
-        if (strncmp(path, storage_prefix, strlen(storage_prefix)) != 0) return false;
-        if (index > 0 && !Append(selection, selection_capacity, " AND ")) return false;
-        if (!Append(selection, selection_capacity, kClause)) return false;
-        if (snprintf(arguments[*argument_count], PATH_MAX + 4, "%s/%%", path) <= 0) {
-            return false;
-        }
-        ++*argument_count;
-    }
-    return *argument_count > 0;
-}
-
 bool IsMediaUri(JNIEnv* env, jobject uri) {
     if (uri == nullptr) return false;
     auto authority = static_cast<jstring>(env->CallObjectMethod(uri, g_uri_get_authority));
@@ -216,9 +185,18 @@ jobjectArray MergeArguments(JNIEnv* env, jobjectArray original,
 
 bool ApplyFilterToBundle(JNIEnv* env, jobject bundle) {
     char filter[kMaxSelectionSize]{};
-    char extra_arguments[kMaxDenyPaths][PATH_MAX + 4]{};
+    char extra_arguments[kMaxDenyArguments][PATH_MAX + 4]{};
+    const char* deny_paths[kMaxDenyPaths]{};
+    for (size_t index = 0; index < g_deny_path_count; ++index) {
+        deny_paths[index] = g_deny_paths[index];
+    }
     size_t extra_count = 0;
-    if (!BuildFilter(filter, sizeof(filter), extra_arguments, &extra_count)) return false;
+    if (!BuildDenySelection(
+            deny_paths, g_deny_path_count, filter, sizeof(filter),
+            extra_arguments[0], kMaxDenyArguments, sizeof(extra_arguments[0]),
+            &extra_count)) {
+        return false;
+    }
 
     auto original_selection = static_cast<jstring>(
         env->CallObjectMethod(bundle, g_bundle_get_string, g_selection_key));
@@ -573,7 +551,10 @@ bool Install(zygisk::Api* api, JNIEnv* env, const char* const* deny_paths,
     g_deny_path_count = 0;
     g_user_id = static_cast<unsigned>(uid) / 100000u;
     char user_prefix[64]{};
-    if (snprintf(user_prefix, sizeof(user_prefix), "/storage/emulated/0/") <= 0) {
+    const int prefix_length = snprintf(
+        user_prefix, sizeof(user_prefix), "/storage/emulated/%u/", g_user_id);
+    if (prefix_length <= 0
+        || static_cast<size_t>(prefix_length) >= sizeof(user_prefix)) {
         LOGE("media query hook user prefix formatting failed");
         return false;
     }
@@ -584,9 +565,8 @@ bool Install(zygisk::Api* api, JNIEnv* env, const char* const* deny_paths,
                  deny_paths[index] == nullptr ? "<null>" : deny_paths[index]);
             return false;
         }
-        const int written = snprintf(g_deny_paths[index], PATH_MAX,
-                                     "/storage/emulated/%u%s", g_user_id,
-                                     deny_paths[index] + strlen(user_prefix) - 1);
+        const int written = snprintf(
+            g_deny_paths[index], PATH_MAX, "%s", deny_paths[index]);
         if (written <= 0 || written >= PATH_MAX) {
             LOGE("media query hook path conversion failed: index=%zu", index);
             return false;

@@ -51,7 +51,7 @@ $common = @(
     "APP_PLATFORM=android-$Api",
     "APP_ABI=$($Abi -join ' ')"
 )
-& $ndk @common 'APP_MODULES=pathguardd pathguardctl pathguard_rules_parity_probe pathguard_rules_benchmark pathguard_policy_reader_probe'
+& $ndk @common 'APP_MODULES=pathguardd pathguardctl pathguard_rules_parity_probe pathguard_rules_benchmark pathguard_policy_reader_probe pathguard_deny_anchor_probe'
 if ($LASTEXITCODE -ne 0) { throw "daemon/cli ndk-build failed: $LASTEXITCODE" }
 
 foreach ($item in $Abi) {

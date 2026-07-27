@@ -70,9 +70,10 @@ int main() {
     const RulesBuildResult deny = Compile(
         "deny = [\"Private\", \"Private/Sub\"]\n"
         "redirect = [\"Public\" -> \"Target\"]\n");
-    assert(!deny.ok());
+    assert(deny.ok());
     assert(HasCode(deny, kRuleRedundant));
-    assert(HasCode(deny, kExecutorUnavailable));
+    assert(deny.canonical->apps.front().deny.size() == 1);
+    assert(deny.canonical->apps.front().deny.front().bytes == "Private");
 
     const RulesBuildResult deny_redirect = Compile(
         "deny = [\"A\"]\nredirect = [\"A/B\" -> \"C\"]\n");

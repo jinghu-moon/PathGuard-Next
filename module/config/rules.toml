@@ -4,10 +4,13 @@ format = 1
 [compatibility]
 allow_legacy_mount = true
 
-# Replace this package and paths with values for the target application.
 [apps."org.localsend.localsend_app"]
 users = [0]
 file_picker = true
+deny = [
+    "Pictures/Nagram",
+    "DCIM/Screenshots",
+]
 redirect = [
     "Download/localsend-source" -> "Download/localsend-redirect",
 ]

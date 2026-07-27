@@ -18,8 +18,14 @@ enum class PolicyChangeKind {
     kModify,
 };
 
+enum class PolicyRuleKind {
+    kDeny,
+    kRedirect,
+};
+
 struct PolicyChange {
     PolicyChangeKind kind = PolicyChangeKind::kAdd;
+    PolicyRuleKind rule_kind = PolicyRuleKind::kRedirect;
     std::string package;
     std::string source;
     std::string before_target;
@@ -32,6 +38,7 @@ std::vector<PolicyChange> BuildPolicyPlan(const CanonicalPolicy& before,
 struct PathExplanation {
     std::string package;
     std::string query;
+    std::optional<PolicyRuleKind> action;
     std::optional<std::string> source;
     std::optional<std::string> target;
     std::vector<std::string> shadowed_parents;

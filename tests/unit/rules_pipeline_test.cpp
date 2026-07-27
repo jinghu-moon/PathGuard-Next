@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
 
+#include "pathguard/binary.h"
 #include "pathguard/capabilities.h"
 #include "pathguard/mount_backend.h"
 #include "pathguard/policy_format.h"
@@ -91,6 +93,30 @@ int main() {
     assert(changed.ok());
     assert(changed.blob->content_generation != built.blob->content_generation);
 
+    const RulesBuildResult deny = Compile(
+        "format = 1\n[apps.\"org.localsend.localsend_app\"]\n"
+        "users = [0]\n"
+        "deny = [\"Pictures/Nagram\", \"DCIM/Screenshots\"]\n"
+        "redirect = [\"Download/localsend-source\" -> "
+        "\"Download/localsend-redirect\"]\n");
+    assert(deny.ok());
+    assert(deny.canonical->apps.front().deny.size() == 2);
+    assert(deny.requirements.mount_actions
+           == (kMountActionRedirect | kMountActionDenyAnchor));
+    PolicyDocument deny_document;
+    std::uint64_t deny_generation = 0;
+    ParseError deny_error;
+    assert(DecodePolicy(deny.blob->bytes, &deny_document,
+                        &deny_generation, &deny_error));
+    assert(deny_document.apps.front().mounts.size() == 3);
+    assert(std::count_if(
+        deny_document.apps.front().mounts.begin(),
+        deny_document.apps.front().mounts.end(),
+        [](const LogicalMountRule& rule) {
+            return rule.action == MountAction::kDeny
+                && rule.backing_path.empty();
+        }) == 2);
+
     DeviceSnapshot strict;
     strict.mount.primitives = kCapabilityOpenTreeMoveMount;
     strict.mount.strict_actions = kMountActionRedirect;
@@ -105,6 +131,10 @@ int main() {
     assert(admitted.content_generation == built.blob->content_generation);
     assert(admitted.capability_generation == 7);
     assert(admitted.topology_generation == 9);
+
+    assert(!AdmitPolicy(*deny.canonical, deny.requirements, strict).admitted);
+    strict.mount.strict_actions |= kMountActionDenyAnchor;
+    assert(AdmitPolicy(*deny.canonical, deny.requirements, strict).admitted);
 
     DeviceSnapshot missing_provider = strict;
     missing_provider.provider_supported = false;

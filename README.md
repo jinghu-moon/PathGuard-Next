@@ -4,9 +4,10 @@ PathGuard Next is an experimental Android storage-isolation module for Magisk Zy
 
 The current R1 prototype provides per-application selective directory redirect through
 namespace-local VFS mounts, policy format v5 snapshot compilation, strict/legacy
-capability selection, transactional rollback, and experimental opt-in SAF Provider
-virtualization. Deny, isolate/allow, event automation, and MediaStore filtering are
-compile-gated until their executors are complete. It is not production-ready; the
+capability selection, transactional rollback, strict-FD directory deny, and
+opt-in client MediaStore deny filtering with experimental SAF Provider virtualization.
+Isolate/allow, event automation, system Photo Picker filtering, and legacy-backend deny
+remain compile-gated. It is not production-ready; the
 owner-death, topology-remount, rollback-failure, device, and ROM matrices must pass
 before use.
 

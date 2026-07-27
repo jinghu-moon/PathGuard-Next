@@ -49,6 +49,24 @@ int main() {
     PrintHex(valid.blob->bytes);
     std::cout << '\n';
 
+    const RulesBuildResult mixed = Compile(
+        "format = 1\n"
+        "[apps.\"org.localsend.localsend_app\"]\n"
+        "users = [0]\n"
+        "deny = [\"Pictures/Nagram\", \"DCIM/Screenshots\"]\n"
+        "redirect = [\"Download/localsend-source\" -> "
+        "\"Download/localsend-redirect\"]\n");
+    if (!mixed.ok()
+        || mixed.requirements.mount_actions
+            != (pathguard::kMountActionRedirect
+                | pathguard::kMountActionDenyAnchor)) {
+        return 3;
+    }
+    std::cout << "mixed|" << mixed.blob->content_generation << '|'
+              << mixed.requirements.mount_actions << '|';
+    PrintHex(mixed.blob->bytes);
+    std::cout << '\n';
+
     const RulesBuildResult invalid = Compile(
         "format = 1\n[apps.\"com.example.app\"]\n"
         "redirect = [\"A\" ->]\n");

@@ -192,10 +192,47 @@ static bool ProbeProcFdMount(const char* source_root_path, const char* source_pa
 }
 #endif
 
-static void RunPollingLoop(pathguard::control::Reconciler* reconciler) {
+static pathguard::rules::DeviceSnapshot MakeDeviceSnapshot(
+        bool topology_supported) {
+    pathguard::rules::DeviceSnapshot snapshot;
+    snapshot.mount.primitives = pathguard::kCapabilityOpenTreeMoveMount
+        | pathguard::kCapabilityProcFdMount
+        | pathguard::kCapabilityStringBindMount;
+    snapshot.mount.strict_actions = pathguard::kMountActionRedirect
+        | pathguard::kMountActionDenyAnchor;
+    snapshot.mount.legacy_actions = pathguard::kMountActionRedirect;
+    snapshot.provider_supported = topology_supported;
+    snapshot.topology_supported = topology_supported;
+    snapshot.capability_generation = 1;
+    snapshot.topology_generation = topology_supported ? 1 : 0;
+    return snapshot;
+}
+
+static bool RefreshPendingTopology(pathguard::control::Reconciler* reconciler,
+                                   bool* topology_supported) {
+#if defined(PATHGUARD_ANDROID)
+    if (reconciler == nullptr || topology_supported == nullptr
+        || *topology_supported || !ProbeStorageTopology()) {
+        return false;
+    }
+    *topology_supported = true;
+    reconciler->SetDeviceSnapshot(MakeDeviceSnapshot(true));
+    return true;
+#else
+    (void)reconciler;
+    (void)topology_supported;
+    return false;
+#endif
+}
+
+static void RunPollingLoop(pathguard::control::Reconciler* reconciler,
+                           bool* topology_supported) {
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        LogReconcile("poll", reconciler->Reconcile());
+        const bool topology_changed = RefreshPendingTopology(
+            reconciler, topology_supported);
+        LogReconcile(topology_changed ? "topology" : "poll",
+                     reconciler->Reconcile());
     }
 }
 
@@ -208,7 +245,8 @@ static bool IsRulesEvent(const inotify_event* event, const std::string& file_nam
 }
 
 static bool RunInotifyLoop(const fs::path& config_directory,
-                           pathguard::control::Reconciler* reconciler) {
+                           pathguard::control::Reconciler* reconciler,
+                           bool* topology_supported) {
     const std::string file_name = pathguard::control::kRulesFileName;
     const int fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
     if (fd < 0) {
@@ -231,12 +269,20 @@ static bool RunInotifyLoop(const fs::path& config_directory,
     std::vector<char> buffer(16 * (sizeof(inotify_event) + NAME_MAX + 1));
     while (true) {
         pollfd descriptor{fd, POLLIN, 0};
-        if (poll(&descriptor, 1, -1) < 0) {
+        const int poll_result = poll(&descriptor, 1,
+                                     *topology_supported ? -1 : 1000);
+        if (poll_result < 0) {
             if (errno == EINTR) continue;
             std::cerr << "inotify poll failed; falling back to polling: errno="
                       << errno << '\n' << std::flush;
             close(fd);
             return false;
+        }
+        if (poll_result == 0) {
+            if (RefreshPendingTopology(reconciler, topology_supported)) {
+                LogReconcile("topology", reconciler->Reconcile());
+            }
+            continue;
         }
         if ((descriptor.revents & POLLIN) == 0) continue;
 
@@ -259,26 +305,12 @@ static bool RunInotifyLoop(const fs::path& config_directory,
             }
         }
         if (config_changed) {
+            RefreshPendingTopology(reconciler, topology_supported);
             LogReconcile("inotify", reconciler->Reconcile());
         }
     }
 }
 #endif
-
-static pathguard::rules::DeviceSnapshot MakeDeviceSnapshot(
-        bool topology_supported) {
-    pathguard::rules::DeviceSnapshot snapshot;
-    snapshot.mount.primitives = pathguard::kCapabilityOpenTreeMoveMount
-        | pathguard::kCapabilityProcFdMount
-        | pathguard::kCapabilityStringBindMount;
-    snapshot.mount.strict_actions = pathguard::kMountActionRedirect;
-    snapshot.mount.legacy_actions = pathguard::kMountActionRedirect;
-    snapshot.provider_supported = topology_supported;
-    snapshot.topology_supported = topology_supported;
-    snapshot.capability_generation = 1;
-    snapshot.topology_generation = topology_supported ? 1 : 0;
-    return snapshot;
-}
 
 int main(int argc, char** argv) {
     fs::path module_dir = ".";
@@ -347,9 +379,9 @@ int main(int argc, char** argv) {
     const fs::path config_directory = module_dir / "config";
     const fs::path run_directory = module_dir / "run";
 #if defined(PATHGUARD_ANDROID)
-    const bool topology_supported = ProbeStorageTopology();
+    bool topology_supported = ProbeStorageTopology();
 #else
-    const bool topology_supported = true;
+    bool topology_supported = true;
 #endif
     pathguard::control::Reconciler reconciler(
         config_directory, run_directory, pathguard::rules::RulesLimits{},
@@ -366,8 +398,9 @@ int main(int argc, char** argv) {
     std::cout << "pathguardd ready; module-dir=" << module_dir.string() << '\n'
               << std::flush;
 #if PATHGUARD_HAS_INOTIFY
-    if (RunInotifyLoop(config_directory, &reconciler)) return 0;
+    if (RunInotifyLoop(config_directory, &reconciler,
+                       &topology_supported)) return 0;
 #endif
-    RunPollingLoop(&reconciler);
+    RunPollingLoop(&reconciler, &topology_supported);
     return 0;
 }

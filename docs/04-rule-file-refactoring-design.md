@@ -1,8 +1,8 @@
 # PathGuard Next 规则文件重构设计
 
-> 状态：Implemented（RF0～RF9 全部通过）
+> 状态：Implemented（RF0～RF9 与 strict deny 通过）
 >
-> 文档版本：0.7
+> 文档版本：0.8
 >
 > 日期：2026-07-27
 >
@@ -143,7 +143,8 @@ TOML 提供明确类型、注释、字符串、数组和模块化表结构；Pat
 - 不允许配置顺序充当隐式优先级。
 - 不允许未知字段被静默忽略。
 - 不要求第三方 TOML 工具能够直接解析 `->` 扩展。
-- 不在本次重构中实现尚未完成的 deny、isolate、event 或其他执行器。
+- 不在规则编译器中实现 isolate、event 或其他尚未完成的执行器；direct-VFS deny
+  只在已验证的 strict FD backend 上准入。
 - 不为尚未出现的需求提前设计通用继承、模板和覆盖系统。
 
 ### 4.3 实际编辑环境约束
@@ -309,7 +310,8 @@ file_picker = false
 # processes = ["org.example.app", "org.example.app:worker"]
 
 # 禁止应用访问以下目录及其全部子目录。
-# 当前构建未完成 deny executor 时，启用 deny 会在编译阶段明确失败，不会假装生效。
+# 当前构建通过 strict FD deny anchor 保护直接文件访问；不代表覆盖 MediaStore、
+# Photo Picker、CloudMediaProvider 或 SAF 代开路径。legacy backend deny 保持 unsupported。
 deny = [
     # "Pictures/Private",
 ]

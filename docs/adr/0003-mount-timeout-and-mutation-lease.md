@@ -27,7 +27,7 @@ applying -> namespace_tainted
 
 1. helper 必须在第一项 namespace mutation 前以 CAS 将 `pending` 改为 `applying`，该 CAS 是 mutation lease 的唯一获取点。`MS_PRIVATE`、source anchor 和正向 bind 都属于 namespace mutation，不能放在 lease 之前。
 2. 应用在 300ms 到期时仅能把 `pending` CAS 为 `cancel_requested`。成功后可以立即 fail-open；helper 不得再进入 `applying`。
-3. 超时时若状态已是 `applying`，应用请求取消并等待 `rollback_complete` 或 `namespace_tainted`。只有前者允许目标进程继续；后者必须终止 namespace 成员。
+3. 300ms 到期时若状态已是 `applying`，应用先给予 500ms 有界完成窗口；事务在窗口内可发布 `complete`。窗口到期后请求取消并等待 `rollback_complete` 或 `namespace_tainted`。只有 `complete` 或前者允许目标进程继续；后者必须终止 namespace 成员。该窗口不改变 `pending` 阶段的 300ms 取消上限。
 4. helper 每项 namespace mutation 前和提交前检查取消；所有可逆 mount 进入栈，失败或取消时逆序 `umount2(MNT_DETACH)`。
 5. `complete` 发布后不接受取消。持有 lease 后的失败不会发布中间 `failed` 终态；只有可逆 mount 已全部验证回滚且传播状态未发生不可恢复变化时，才发布 `rollback_complete`。`failed` 只表示尚未取得 lease 的预检失败。
 6. 内部 readiness 5 秒上限不计入 300ms 承诺；等待期间仍可由 `pending -> cancel_requested` 中止。
@@ -50,7 +50,7 @@ helper 在取得 mutation lease 前必须解析目标 namespace 的 mountinfo，
 对外指标必须分别报告：
 
 - pre-mutation cancel latency，目标不超过 300ms；
-- applying transaction latency；
+- applying transaction latency，并分别报告 300ms 内完成、有界窗口内完成与取消回滚；
 - rollback latency；
 - namespace taint count 与被终止的 namespace member 数量。
 

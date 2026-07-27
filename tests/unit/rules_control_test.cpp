@@ -159,6 +159,27 @@ int main() {
     device.topology_supported = true;
     device.capability_generation = 21;
     device.topology_generation = 22;
+
+    const fs::path late_config = root / "late-config";
+    const fs::path late_run = root / "late-run";
+    fs::create_directories(late_config);
+    fs::create_directories(late_run);
+    Write(late_config / kRulesFileName, ValidRules("LateTopology"));
+    DeviceSnapshot topology_pending = device;
+    topology_pending.topology_supported = false;
+    topology_pending.topology_generation = 0;
+    Reconciler late_reconciler(
+        late_config, late_run, RulesLimits{}, topology_pending);
+    const ReconcileResult pending = late_reconciler.Reconcile();
+    assert(!pending.ok());
+    assert(pending.state.status == ControlStatus::kEnvironmentUnsupported);
+    assert(!fs::exists(late_run / "policy.bin"));
+    late_reconciler.SetDeviceSnapshot(device);
+    const ReconcileResult topology_ready = late_reconciler.Reconcile();
+    assert(topology_ready.ok() && topology_ready.published);
+    assert(topology_ready.state.status == ControlStatus::kActive);
+    assert(fs::is_regular_file(late_run / "policy.bin"));
+
     Reconciler reconciler(config, run, RulesLimits{}, device);
     ReconcileResult initial = reconciler.Reconcile();
     assert(initial.ok());

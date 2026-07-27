@@ -85,13 +85,18 @@ ByteSpan Origin(const OriginMap& origins, RuleId id) {
     return origin == nullptr ? ByteSpan{} : origin->primary;
 }
 
-using PlanKey = std::pair<std::string, std::string>;
+using PlanKey = std::tuple<std::string, PolicyRuleKind, std::string>;
 
 std::map<PlanKey, std::string> IndexPolicy(const CanonicalPolicy& policy) {
     std::map<PlanKey, std::string> output;
     for (const CanonicalAppPolicy& app : policy.apps) {
+        for (const NormalizedPath& deny : app.deny) {
+            output.emplace(PlanKey{app.package, PolicyRuleKind::kDeny,
+                                   deny.bytes}, std::string{});
+        }
         for (const CanonicalRedirectRule& redirect : app.redirects) {
-            output.emplace(PlanKey{app.package, redirect.source.bytes},
+            output.emplace(PlanKey{app.package, PolicyRuleKind::kRedirect,
+                                   redirect.source.bytes},
                            redirect.target.bytes);
         }
     }
@@ -154,18 +159,26 @@ std::vector<PolicyChange> BuildPolicyPlan(const CanonicalPolicy& before,
     while (old_rule != old_index.end() || new_rule != new_index.end()) {
         if (new_rule == new_index.end()
             || (old_rule != old_index.end() && old_rule->first < new_rule->first)) {
-            output.push_back({PolicyChangeKind::kRemove, old_rule->first.first,
-                              old_rule->first.second, old_rule->second, {}});
+            output.push_back({PolicyChangeKind::kRemove,
+                              std::get<1>(old_rule->first),
+                              std::get<0>(old_rule->first),
+                              std::get<2>(old_rule->first),
+                              old_rule->second, {}});
             ++old_rule;
         } else if (old_rule == old_index.end()
                    || new_rule->first < old_rule->first) {
-            output.push_back({PolicyChangeKind::kAdd, new_rule->first.first,
-                              new_rule->first.second, {}, new_rule->second});
+            output.push_back({PolicyChangeKind::kAdd,
+                              std::get<1>(new_rule->first),
+                              std::get<0>(new_rule->first),
+                              std::get<2>(new_rule->first),
+                              {}, new_rule->second});
             ++new_rule;
         } else {
             if (old_rule->second != new_rule->second) {
                 output.push_back({PolicyChangeKind::kModify,
-                                  old_rule->first.first, old_rule->first.second,
+                                  std::get<1>(old_rule->first),
+                                  std::get<0>(old_rule->first),
+                                  std::get<2>(old_rule->first),
                                   old_rule->second, new_rule->second});
             }
             ++old_rule;
@@ -190,26 +203,40 @@ PathExplanation ExplainPath(const ResolvedPolicy& policy,
             return item.package == package;
         });
     if (app == policy.apps.end()) return output;
-    std::vector<const ResolvedRedirectRule*> matches;
+    struct Match {
+        PolicyRuleKind action;
+        const NormalizedPath* source;
+        const NormalizedPath* target;
+    };
+    std::vector<Match> matches;
+    for (const ResolvedDenyRule& deny : app->deny) {
+        if (IsSameOrAncestor(deny.path, *query)) {
+            matches.push_back({PolicyRuleKind::kDeny, &deny.path, nullptr});
+        }
+    }
     for (const ResolvedRedirectRule& redirect : app->redirects) {
         if (IsSameOrAncestor(redirect.source, *query)) {
-            matches.push_back(&redirect);
+            matches.push_back({PolicyRuleKind::kRedirect, &redirect.source,
+                               &redirect.target});
         }
     }
     std::sort(matches.begin(), matches.end(),
-              [](const auto* lhs, const auto* rhs) {
-                  return std::tie(lhs->source.bytes, lhs->target.bytes)
-                      < std::tie(rhs->source.bytes, rhs->target.bytes);
+              [](const Match& lhs, const Match& rhs) {
+                  return std::tie(lhs.source->bytes, lhs.action)
+                      < std::tie(rhs.source->bytes, rhs.action);
               });
     if (matches.empty()) return output;
     const auto longest = std::max_element(
-        matches.begin(), matches.end(), [](const auto* lhs, const auto* rhs) {
-            return lhs->source.bytes.size() < rhs->source.bytes.size();
+        matches.begin(), matches.end(), [](const Match& lhs, const Match& rhs) {
+            return lhs.source->bytes.size() < rhs.source->bytes.size();
         });
-    output.source = (*longest)->source.bytes;
-    output.target = (*longest)->target.bytes;
-    for (const ResolvedRedirectRule* match : matches) {
-        if (match != *longest) output.shadowed_parents.push_back(match->source.bytes);
+    output.action = longest->action;
+    output.source = longest->source->bytes;
+    if (longest->target != nullptr) output.target = longest->target->bytes;
+    for (const Match& match : matches) {
+        if (&match != &*longest) {
+            output.shadowed_parents.push_back(match.source->bytes);
+        }
     }
     std::sort(output.shadowed_parents.begin(), output.shadowed_parents.end());
     return output;

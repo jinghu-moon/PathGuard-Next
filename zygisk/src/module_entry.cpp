@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 #include "pathguard/provider_redirect_hook.hpp"
+#include "pathguard/media_query_hook.hpp"
 #include "pathguard/mount_backend.h"
 #include "pathguard/mount_executor.h"
 #include "pathguard/mount_transaction.h"
@@ -49,16 +50,20 @@ constexpr uint32_t kBootstrapVersion = 5;
 constexpr uint32_t kCompanionResultMagic = 0x52534750;
 constexpr uint32_t kCompanionResultVersion = 1;
 constexpr uint32_t kSharedStateMagic = 0x53534750;
-constexpr uint32_t kSharedStateVersion = 2;
+constexpr uint32_t kSharedStateVersion = 3;
 constexpr size_t kMaxMountRules = 64;
 constexpr size_t kMaxPlanPathBytes = 64 * 1024;
 constexpr size_t kMaxProcessNameBytes = 256;
 constexpr int kProcessReadyTimeoutMs = 5000;
 constexpr int kCompanionIoTimeoutMs = 5000;
 constexpr int kAppResultTimeoutMs = 300;
+constexpr int kCapabilityProbeGraceMs = 500;
+constexpr int kApplyingCompletionGraceMs = 500;
 constexpr int kChildTerminateGraceMs = 1000;
 constexpr int kApplyingOwnerDeathTimeoutMs = 10000;
+constexpr uint8_t kDenyAction = 0;
 constexpr uint8_t kRedirectAction = 1;
+constexpr char kDenyAnchorRelativePath[] = "run/deny-anchor";
 constexpr char kDiagnosticPackage[] = "org.localsend.localsend_app";
 constexpr char kExternalStorageProviderProcess[] = "com.android.externalstorage";
 constexpr char kMainlineMediaProviderProcess[] = "com.android.providers.media.module";
@@ -161,7 +166,8 @@ struct SharedMountState {
     uint32_t version = kSharedStateVersion;
     alignas(4) uint32_t status = static_cast<uint32_t>(
         pathguard::MountTransactionState::kPending);
-    uint32_t reserved = 0;
+    alignas(4) uint32_t preflight_phase = static_cast<uint32_t>(
+        pathguard::MountPreflightPhase::kIdle);
     CompanionResult result;
 };
 
@@ -308,6 +314,101 @@ bool StorePlanPath(ProcessPlan* plan, const char* path, uint32_t* offset) {
     memcpy(plan->paths + plan->path_bytes, path, length);
     plan->path_bytes += static_cast<uint32_t>(length);
     return true;
+}
+
+bool IsExecutableMountAction(uint8_t action) {
+    return action == kDenyAction || action == kRedirectAction;
+}
+
+pathguard::MountActionMask RequiredMountActions(const ProcessPlan& plan) {
+    pathguard::MountActionMask required = 0;
+    for (uint32_t index = 0; index < plan.count; ++index) {
+        if (plan.mounts[index].action == kDenyAction) {
+            required |= pathguard::kMountActionDenyAnchor;
+        } else if (plan.mounts[index].action == kRedirectAction) {
+            required |= pathguard::kMountActionRedirect;
+        } else {
+            return 0;
+        }
+    }
+    return required;
+}
+
+bool BuildDenyAnchorPath(int module_dir_fd, char* output, size_t capacity) {
+    if (module_dir_fd < 0 || output == nullptr || capacity == 0) return false;
+    const int run_fd = openat(module_dir_fd, "run",
+                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (run_fd < 0) return false;
+    const int anchor_fd = openat(run_fd, "deny-anchor",
+                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    close(run_fd);
+    if (anchor_fd < 0) return false;
+    struct stat anchor_stat {};
+    bool valid = fstat(anchor_fd, &anchor_stat) == 0
+        && S_ISDIR(anchor_stat.st_mode) && anchor_stat.st_uid == 0
+        && (anchor_stat.st_mode & 0777) == 0;
+    const int scan_fd = valid ? dup(anchor_fd) : -1;
+    DIR* directory = scan_fd >= 0 ? fdopendir(scan_fd) : nullptr;
+    if (directory == nullptr) valid = false;
+    while (valid) {
+        errno = 0;
+        dirent* entry = readdir(directory);
+        if (entry == nullptr) {
+            valid = errno == 0;
+            break;
+        }
+        if (strcmp(entry->d_name, ".") != 0
+            && strcmp(entry->d_name, "..") != 0) {
+            valid = false;
+        }
+    }
+    if (directory != nullptr) closedir(directory);
+
+    char descriptor_path[64]{};
+    char module_path[PATH_MAX]{};
+    const int descriptor_written = snprintf(
+        descriptor_path, sizeof(descriptor_path), "/proc/self/fd/%d",
+        module_dir_fd);
+    const ssize_t module_length = descriptor_written > 0
+            && static_cast<size_t>(descriptor_written) < sizeof(descriptor_path)
+        ? readlink(descriptor_path, module_path, sizeof(module_path) - 1)
+        : -1;
+    if (module_length <= 0) valid = false;
+    if (valid) {
+        module_path[module_length] = '\0';
+        const int written = snprintf(output, capacity, "%s/%s", module_path,
+                                     kDenyAnchorRelativePath);
+        struct stat path_stat {};
+        valid = module_path[0] == '/'
+            && strstr(module_path, " (deleted)") == nullptr
+            && written > 0 && static_cast<size_t>(written) < capacity
+            && lstat(output, &path_stat) == 0
+            && path_stat.st_dev == anchor_stat.st_dev
+            && path_stat.st_ino == anchor_stat.st_ino;
+    }
+    close(anchor_fd);
+    return valid;
+}
+
+bool BuildPathUnderRoot(const char* root, const char* logical_path,
+                        char* output, size_t output_size);
+
+bool BuildMountSourcePath(const ProcessPlan& plan,
+                          const PlannedMount& mount,
+                          const char* deny_anchor_path,
+                          char* output, size_t capacity) {
+    if (mount.action == kDenyAction) {
+        if (deny_anchor_path == nullptr || deny_anchor_path[0] != '/') {
+            return false;
+        }
+        const int written = snprintf(output, capacity, "%s", deny_anchor_path);
+        return written > 0 && static_cast<size_t>(written) < capacity;
+    }
+    const char* backing = PlanPath(plan, mount.backing_path);
+    return mount.action == kRedirectAction && backing != nullptr
+        && backing[0] != '\0'
+        && BuildPathUnderRoot(plan.topology.source_root, backing,
+                              output, capacity);
 }
 
 bool ValidPackageIndex(const uint8_t* data, size_t size, uint32_t package_count,
@@ -568,12 +669,15 @@ bool LoadProcessPlan(int module_dir, const char* process_name, jint uid,
             data, size, string_offset,
             ReadLe32(rule + pathguard::binary_format::kMountBackingPathOffset));
         char expanded_backing[PATH_MAX]{};
-        if (action != kRedirectAction
+        const bool deny = action == kDenyAction;
+        if (!IsExecutableMountAction(action)
             || rule[1] != 0 || ReadLe16(rule + 6) != 0
             || visible == nullptr || backing == nullptr
             || !IsAllowedTarget(visible)
-            || !ExpandRuntimePath(backing, static_cast<uint32_t>(uid) / 100000u,
-                                  expanded_backing, sizeof(expanded_backing))
+            || (deny ? backing[0] != '\0'
+                     : !ExpandRuntimePath(
+                           backing, static_cast<uint32_t>(uid) / 100000u,
+                           expanded_backing, sizeof(expanded_backing)))
             || strlen(visible) >= PATH_MAX) {
             plan->count = 0;
             if (diagnostic) LOGE("policy_rule_invalid index=%u action=%u",
@@ -583,7 +687,8 @@ bool LoadProcessPlan(int module_dir, const char* process_name, jint uid,
         PlannedMount& mount = plan->mounts[plan->count++];
         mount.action = action;
         if (!StorePlanPath(plan, visible, &mount.visible_path)
-            || !StorePlanPath(plan, expanded_backing, &mount.backing_path)) {
+            || !StorePlanPath(plan, deny ? "" : expanded_backing,
+                              &mount.backing_path)) {
             plan->count = 0;
             if (diagnostic) LOGE("policy_plan_path_overflow index=%u", rule_index);
             return finish(false);
@@ -1108,6 +1213,18 @@ MountState LoadSharedStatus(const SharedMountState* state) {
         __atomic_load_n(&state->status, __ATOMIC_ACQUIRE));
 }
 
+pathguard::MountPreflightPhase LoadSharedPreflightPhase(
+        const SharedMountState* state) {
+    return static_cast<pathguard::MountPreflightPhase>(
+        __atomic_load_n(&state->preflight_phase, __ATOMIC_ACQUIRE));
+}
+
+void StoreSharedPreflightPhase(SharedMountState* state,
+                               pathguard::MountPreflightPhase phase) {
+    __atomic_store_n(&state->preflight_phase, static_cast<uint32_t>(phase),
+                     __ATOMIC_RELEASE);
+}
+
 bool IsCancelRequested(const SharedMountState* state) {
     return state != nullptr
         && LoadSharedStatus(state) == MountState::kCancelRequested;
@@ -1158,34 +1275,6 @@ bool AcquireMutationLease(SharedMountState* state) {
         MarkSharedCancelled(state);
     }
     return false;
-}
-
-enum class CancelDisposition {
-    kPreMutation,
-    kApplying,
-    kTerminal,
-};
-
-CancelDisposition RequestSharedCancel(SharedMountState* state) {
-    while (true) {
-        const MountState current = LoadSharedStatus(state);
-        if (current == MountState::kPending
-            && TransitionSharedState(state, MountState::kPending,
-                                     MountState::kCancelRequested)) {
-            return CancelDisposition::kPreMutation;
-        }
-        if (current == MountState::kApplying
-            && TransitionSharedState(state, MountState::kApplying,
-                                     MountState::kCancelRequested)) {
-            return CancelDisposition::kApplying;
-        }
-        if (pathguard::IsMountTransactionTerminal(current)) {
-            return CancelDisposition::kTerminal;
-        }
-        if (current == MountState::kCancelRequested) {
-            return CancelDisposition::kApplying;
-        }
-    }
 }
 
 enum class ProcessReadyResult {
@@ -1568,12 +1657,23 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
 
     char source_path[PATH_MAX]{};
     char target_path[PATH_MAX]{};
+    char deny_anchor_path[PATH_MAX]{};
+    const pathguard::MountActionMask required_actions =
+        RequiredMountActions(plan);
+    if (required_actions == 0
+        || ((required_actions & pathguard::kMountActionDenyAnchor) != 0
+            && !BuildDenyAnchorPath(module_dir_fd, deny_anchor_path,
+                                    sizeof(deny_anchor_path)))) {
+        perf.result = ENOTSUP;
+        perf.runtime_reason = static_cast<uint32_t>(
+            pathguard::RuntimeReason::kUnsupportedAction);
+        return perf;
+    }
     const char* first_visible = PlanPath(plan, plan.mounts[0].visible_path);
-    const char* first_backing = PlanPath(plan, plan.mounts[0].backing_path);
     if (!BuildPathUnderRoot(plan.topology.visible_root, first_visible,
                             target_path, sizeof(target_path))
-        || !BuildPathUnderRoot(plan.topology.source_root, first_backing,
-                               source_path, sizeof(source_path))) {
+        || !BuildMountSourcePath(plan, plan.mounts[0], deny_anchor_path,
+                                source_path, sizeof(source_path))) {
         perf.result = EINVAL;
         return perf;
     }
@@ -1602,7 +1702,6 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
     LogProbeStep("proc_fd", probe.proc_fd);
     LogProbeStep("legacy_string", probe.legacy_string);
     pathguard::MountBackendCapabilities capabilities = probe.capabilities;
-    const pathguard::MountActionMask required_actions = pathguard::kMountActionRedirect;
     const bool allow_legacy = (plan.policy_flags
         & pathguard::binary_format::kPolicyFlagAllowLegacyStringBind) != 0;
     const auto selection = pathguard::SelectMountBackend(
@@ -1654,12 +1753,9 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
     };
     const uint64_t src_pin_started = pathguard::perf::NowNs();
     for (size_t rule_index = 0; rule_index < plan.count; ++rule_index) {
-        const char* backing_path = PlanPath(
-            plan, plan.mounts[rule_index].backing_path);
-        if (plan.mounts[rule_index].action != kRedirectAction
-            || backing_path == nullptr
-            || !BuildPathUnderRoot(plan.topology.source_root, backing_path,
-                                   source_path, sizeof(source_path))) {
+        if (!BuildMountSourcePath(
+                plan, plan.mounts[rule_index], deny_anchor_path,
+                source_path, sizeof(source_path))) {
             return finish_preflight(EINVAL);
         }
         const int pin_error = pathguard::PinDirectory(
@@ -1766,12 +1862,13 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
             plan, plan.mounts[rule_index].visible_path);
         const char* backing_path = PlanPath(
             plan, plan.mounts[rule_index].backing_path);
-        if (plan.mounts[rule_index].action != kRedirectAction
+        if (!IsExecutableMountAction(plan.mounts[rule_index].action)
             || visible_path == nullptr || backing_path == nullptr
             || !BuildPathUnderRoot(plan.topology.visible_root, visible_path,
                                    target_path, sizeof(target_path))
-            || !BuildPathUnderRoot(plan.topology.source_root, backing_path,
-                                   source_path, sizeof(source_path))) {
+            || !BuildMountSourcePath(
+                plan, plan.mounts[rule_index], deny_anchor_path,
+                source_path, sizeof(source_path))) {
             error = EINVAL;
             break;
         }
@@ -2062,26 +2159,54 @@ SharedMountState* MapSharedState(int shared_fd) {
 }
 
 bool WaitForSharedResult(SharedMountState* state, int timeout_ms) {
-    const uint64_t deadline = pathguard::perf::NowNs()
+    uint64_t deadline = pathguard::perf::NowNs()
         + static_cast<uint64_t>(timeout_ms) * 1000000u;
+    bool preflight_grace_used = false;
+    bool applying_grace_used = false;
     while (true) {
         const MountState current = LoadSharedStatus(state);
         if (pathguard::MountTransactionHasResult(current)) return true;
         if (current == MountState::kCancelled) return false;
         const uint64_t now = pathguard::perf::NowNs();
         if (now >= deadline) {
-            const CancelDisposition disposition = RequestSharedCancel(state);
-            if (disposition == CancelDisposition::kPreMutation) return false;
-            if (disposition == CancelDisposition::kTerminal) {
-                return pathguard::MountTransactionHasResult(LoadSharedStatus(state));
+            if (pathguard::ShouldExtendPendingMountWait(
+                    current, LoadSharedPreflightPhase(state),
+                    preflight_grace_used)) {
+                preflight_grace_used = true;
+                deadline = now
+                    + static_cast<uint64_t>(kCapabilityProbeGraceMs) * 1000000u;
+                LOGI("mount wait extended for capability probe: pid=%d grace_ms=%d",
+                     getpid(), kCapabilityProbeGraceMs);
+                continue;
             }
+            if (current == MountState::kPending) {
+                if (TransitionSharedState(state, MountState::kPending,
+                                          MountState::kCancelRequested)) {
+                    return false;
+                }
+                continue;
+            }
+            if (current == MountState::kApplying && !applying_grace_used) {
+                applying_grace_used = true;
+                deadline = now
+                    + static_cast<uint64_t>(kApplyingCompletionGraceMs) * 1000000u;
+                continue;
+            }
+            if (current == MountState::kApplying
+                && !TransitionSharedState(state, MountState::kApplying,
+                                          MountState::kCancelRequested)) {
+                continue;
+            }
+            if (pathguard::IsMountTransactionTerminal(current)) {
+                return pathguard::MountTransactionHasResult(current);
+            }
+            const uint64_t owner_deadline = pathguard::perf::NowNs()
+                + static_cast<uint64_t>(kApplyingOwnerDeathTimeoutMs) * 1000000u;
             while (true) {
                 const MountState applying_state = LoadSharedStatus(state);
                 if (pathguard::MountTransactionHasResult(applying_state)) return true;
                 if (applying_state == MountState::kCancelled) return false;
                 const uint64_t applying_now = pathguard::perf::NowNs();
-                const uint64_t owner_deadline = deadline
-                    + static_cast<uint64_t>(kApplyingOwnerDeathTimeoutMs) * 1000000u;
                 if (applying_now >= owner_deadline) {
                     LOGE("mount transaction owner unavailable; terminating target pid=%d state=%u",
                          getpid(), StateValue(applying_state));
@@ -2255,6 +2380,22 @@ public:
             return;
         }
 
+        media_query_hook_required_ = plan.provider_compat;
+        if (media_query_hook_required_) {
+            bool has_deny = false;
+            for (uint32_t index = 0; index < plan.count; ++index) {
+                if (plan.mounts[index].action == kDenyAction) {
+                    has_deny = true;
+                    break;
+                }
+            }
+            media_query_hook_required_ = has_deny;
+            if (has_deny) {
+                media_plan_ = plan;
+                media_uid_ = args->uid;
+            }
+        }
+
         const uint64_t hook_ns = 0;
 
         const uint64_t connect_started = pathguard::perf::NowNs();
@@ -2337,6 +2478,48 @@ public:
                 && final_state == MountState::kComplete) {
                 LOGI("redirect mount active: pid=%d backend=%u", getpid(),
                      result.mount.backend);
+                if (media_query_hook_required_) {
+                    char primary_paths[kMaxMountRules][PATH_MAX]{};
+                    const char* deny_paths[kMaxMountRules]{};
+                    char storage_root[64]{};
+                    size_t deny_path_count = 0;
+                    const int storage_root_length = snprintf(
+                        storage_root, sizeof(storage_root), "/storage/emulated/%u",
+                        static_cast<unsigned>(media_uid_) / 100000u);
+                    if (storage_root_length <= 0
+                        || static_cast<size_t>(storage_root_length)
+                            >= sizeof(storage_root)) {
+                        media_query_hook_required_ = false;
+                    }
+                    for (uint32_t index = 0;
+                         media_query_hook_required_ && index < media_plan_.count;
+                         ++index) {
+                        if (media_plan_.mounts[index].action != kDenyAction) continue;
+                        const char* visible = PlanPath(
+                            media_plan_, media_plan_.mounts[index].visible_path);
+                        if (visible == nullptr || !BuildPathUnderRoot(
+                                storage_root, visible,
+                                primary_paths[deny_path_count],
+                                sizeof(primary_paths[deny_path_count]))) {
+                            media_query_hook_required_ = false;
+                            break;
+                        }
+                        deny_paths[deny_path_count] = primary_paths[deny_path_count];
+                        ++deny_path_count;
+                    }
+                    const uint64_t hook_started = pathguard::perf::NowNs();
+                    if (media_query_hook_required_ && deny_path_count > 0) {
+                        media_query_hook_installed_ = pathguard::media_query::Install(
+                            api_, env_, deny_paths, deny_path_count, media_uid_);
+                    }
+                    LOGI("perf media_hook_install installed=%d deny=%zu elapsed_us=%llu",
+                         media_query_hook_installed_ ? 1 : 0, deny_path_count,
+                         static_cast<unsigned long long>(pathguard::perf::NsToUs(
+                             pathguard::perf::ElapsedNs(hook_started))));
+                    if (!media_query_hook_installed_) {
+                        LOGE("media query hook unavailable after successful mount");
+                    }
+                }
             } else if (final_state == MountState::kNamespaceTainted) {
                 LOGE("redirect namespace tainted; process must terminate: pid=%d",
                      getpid());
@@ -2345,7 +2528,7 @@ public:
                      getpid());
             }
         }
-        Unload();
+        if (!media_query_hook_installed_) Unload();
     }
 
     void preServerSpecialize(zygisk::ServerSpecializeArgs*) override { Unload(); }
@@ -2358,8 +2541,12 @@ private:
     bool provider_redirect_required_ = false;
     bool provider_redirect_installed_ = false;
     bool provider_redirect_hooks_committed_ = false;
+    bool media_query_hook_installed_ = false;
+    bool media_query_hook_required_ = false;
     bool mount_request_sent_ = false;
     SharedMountState* mount_shared_state_ = nullptr;
+    ProcessPlan media_plan_;
+    jint media_uid_ = 0;
 };
 
 void CompanionHandler(int client) {
@@ -2425,9 +2612,11 @@ void CompanionHandler(int client) {
         }
         visible[visible_length] = '\0';
         backing[backing_length] = '\0';
-        if (mount.action != kRedirectAction
-            || backing_length == 0 || !IsAllowedTarget(visible)
-            || !IsAllowedTarget(backing)
+        if (!IsExecutableMountAction(mount.action)
+            || (mount.action == kDenyAction ? backing_length != 0
+                                            : backing_length == 0)
+            || !IsAllowedTarget(visible)
+            || (mount.action == kRedirectAction && !IsAllowedTarget(backing))
             || !StorePlanPath(&plan, visible, &mount.visible_path)
             || !StorePlanPath(&plan, backing, &mount.backing_path)) {
             close(module_dir_fd);
@@ -2528,18 +2717,27 @@ void CompanionHandler(int client) {
     {
         char warm_source[PATH_MAX]{};
         char warm_target[PATH_MAX]{};
+        char deny_anchor_path[PATH_MAX]{};
         const char* warm_visible = PlanPath(plan, plan.mounts[0].visible_path);
-        const char* warm_backing = PlanPath(plan, plan.mounts[0].backing_path);
-        if (warm_visible != nullptr && warm_backing != nullptr
+        const bool needs_deny_anchor =
+            (RequiredMountActions(plan) & pathguard::kMountActionDenyAnchor) != 0;
+        if (warm_visible != nullptr
+            && (!needs_deny_anchor
+                || BuildDenyAnchorPath(module_dir_fd, deny_anchor_path,
+                                       sizeof(deny_anchor_path)))
             && BuildPathUnderRoot(plan.topology.visible_root, warm_visible,
                                   warm_target, sizeof(warm_target))
-            && BuildPathUnderRoot(plan.topology.source_root, warm_backing,
-                                  warm_source, sizeof(warm_source))) {
+            && BuildMountSourcePath(plan, plan.mounts[0], deny_anchor_path,
+                                    warm_source, sizeof(warm_source))) {
             bool warm_hit = false;
             const uint64_t warm_started = pathguard::perf::NowNs();
+            StoreSharedPreflightPhase(
+                state, pathguard::MountPreflightPhase::kCapabilityProbe);
             GetOrProbeMountBackends(warm_source, warm_target,
                                     plan.policy_flags, plan.topology.generation,
                                     &warm_hit);
+            StoreSharedPreflightPhase(
+                state, pathguard::MountPreflightPhase::kIdle);
             LOGI("perf probe_warm pid=%d warm_us=%llu cache_hit=%d",
                  header.pid,
                  static_cast<unsigned long long>(pathguard::perf::NsToUs(

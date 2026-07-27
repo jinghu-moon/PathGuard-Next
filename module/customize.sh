@@ -17,6 +17,8 @@ set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
 set_perm_recursive "$MODPATH/config" 0 0 0755 0644
 mkdir -p "$MODPATH/run"
 set_perm_recursive "$MODPATH/run" 0 0 0755 0644
+mkdir -p "$MODPATH/run/deny-anchor"
+set_perm "$MODPATH/run/deny-anchor" 0 0 0000
 
 for script in post-fs-data.sh service.sh boot-completed.sh action.sh uninstall.sh; do
   [ -f "$MODPATH/$script" ] && set_perm "$MODPATH/$script" 0 0 0755

@@ -49,6 +49,13 @@ target_include_directories(pathguard_provider_path_mapper_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/unit)
 add_test(NAME pathguard_provider_path_mapper_test COMMAND pathguard_provider_path_mapper_test)
 
+add_executable(pathguard_media_query_filter_test
+    unit/media_query_filter_test.cpp
+    ../zygisk/src/media_query_filter.cpp)
+target_include_directories(pathguard_media_query_filter_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../zygisk/include)
+add_test(NAME pathguard_media_query_filter_test COMMAND pathguard_media_query_filter_test)
+
 add_executable(pathguard_topology_test unit/topology_test.cpp)
 target_link_libraries(pathguard_topology_test PRIVATE pathguard_core)
 add_test(NAME pathguard_topology_test COMMAND pathguard_topology_test)

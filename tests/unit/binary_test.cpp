@@ -179,7 +179,16 @@ int main() {
     pathguard::PolicyDocument unsupported = source;
     unsupported.apps[0].mounts[0].action = pathguard::MountAction::kDeny;
     unsupported.apps[0].mounts[0].backing_path.clear();
-    assert(!pathguard::EncodePolicy(unsupported, &bytes, &error));
+    assert(pathguard::EncodePolicy(unsupported, &bytes, &error));
+    assert(pathguard::DecodePolicy(bytes, &decoded, &generation, &error));
+    const pathguard::AppPolicy& decoded_deny_app = find_app("com.example.app");
+    const auto deny = std::find_if(
+        decoded_deny_app.mounts.begin(), decoded_deny_app.mounts.end(),
+        [](const auto& rule) {
+            return rule.action == pathguard::MountAction::kDeny;
+        });
+    assert(deny != decoded_deny_app.mounts.end());
+    assert(deny->backing_path.empty());
 
     pathguard::PolicyDocument media_gated = source;
     media_gated.apps[0].media_compat = pathguard::MediaCompat::kHideDenied;

@@ -1,8 +1,8 @@
 # PathGuard Next 重定向子系统设计
 
-> 状态：Draft / Phase R0.1 Core Implemented, Device Validation Pending
+> 状态：Draft / Phase R1 strict redirect + deny anchor implemented；跨设备矩阵待完成
 >
-> 文档版本：0.3
+> 文档版本：0.4
 >
 > 日期：2026-07-26
 >
@@ -603,7 +603,7 @@ media = hide_denied
 - [x] 统一事务 journal 区分 apply/verify/rollback 阶段，并提供 worker crash、rollback
   failure 与 pending/applying delay 注入构建开关；真机矩阵待执行。
 
-### Phase R1：选择性 redirect
+### Phase R1：选择性 redirect 与 strict deny
 
 - [x] topology probe 与 backend path resolver；Alioth Android 13 真机 topology 识别 `/storage/emulated/0 -> /data/media/0`。
 - [x] openat2/逐组件 FD walk resolver 与 symlink/magic-link 拒绝；Alioth 4.19 内核走 `component_fd_walk` capability。
@@ -616,7 +616,9 @@ media = hide_denied
 - [ ] strict 与 legacy 运行同一套 redirect 目录语义测试；安全等级与状态分别断言。
 - [ ] legacy 首版只开放选择性 `redirect`。没有完整 strict capability，或没有 legacy
   capability/显式授权/action support 时保持 fail-open，不得静默降级。
-- [ ] deny anchor 专项矩阵通过后，再实现 deny + redirect 混合事务、取消和回滚。
+- [x] strict proc-fd deny anchor 已在 Alioth/R1 验证读取、列举、创建拒绝、
+  mountinfo 身份和精确回滚；deny + redirect 复用同一混合事务、取消和回滚路径。
+- [ ] legacy deny 仍保持 unsupported，待独立 ROM/内核矩阵完成后解锁。
 - [ ] 直接文件系统真机矩阵。
 
 ### Phase R2：isolate + allow

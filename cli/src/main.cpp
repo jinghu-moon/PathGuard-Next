@@ -179,6 +179,11 @@ static const char* ChangeName(pathguard::rules::PolicyChangeKind kind) {
     return "unknown";
 }
 
+static const char* RuleName(pathguard::rules::PolicyRuleKind kind) {
+    return kind == pathguard::rules::PolicyRuleKind::kDeny
+        ? "deny" : "redirect";
+}
+
 static int PlanRulesFiles(const fs::path& before_path,
                           const fs::path& after_path) {
     using namespace pathguard::rules;
@@ -209,7 +214,7 @@ static int PlanRulesFiles(const fs::path& before_path,
     for (const PolicyChange& change :
          BuildPolicyPlan(*before.canonical, *after.canonical)) {
         std::cout << ChangeName(change.kind) << ' ' << change.package << ' '
-                  << change.source;
+                  << RuleName(change.rule_kind) << ' ' << change.source;
         if (!change.before_target.empty()) {
             std::cout << " from=" << change.before_target;
         }
@@ -245,8 +250,12 @@ static int ExplainRulesPath(const fs::path& rules_path,
         std::cout << "match=none\nshadowed_parent=none\n";
         return 0;
     }
-    std::cout << "match=" << *explanation.source << " -> "
-              << *explanation.target << '\n';
+    std::cout << "match=" << RuleName(*explanation.action) << ' '
+              << *explanation.source;
+    if (explanation.target.has_value()) {
+        std::cout << " -> " << *explanation.target;
+    }
+    std::cout << '\n';
     if (explanation.shadowed_parents.empty()) {
         std::cout << "shadowed_parent=none\n";
     } else {

@@ -233,10 +233,12 @@ bool CanonicalizeDocument(const PolicyDocument& input, PolicyDocument* output,
                         "media compatibility is not executable in redirect-only R1");
         }
         for (const LogicalMountRule& rule : app.mounts) {
-            if (rule.action != MountAction::kRedirect) {
-                return Fail(error, "only redirect is executable in Phase R1");
+            if (rule.action != MountAction::kRedirect
+                && rule.action != MountAction::kDeny) {
+                return Fail(error, "mount action is not executable in Phase R1");
             }
-            if (app.provider_compat == ProviderCompat::kVirtualize) {
+            if (rule.action == MountAction::kRedirect
+                && app.provider_compat == ProviderCompat::kVirtualize) {
                 for (const std::string& user : app.users) {
                     const std::string visible_key = user + '\0' + rule.visible_path;
                     const std::string backing_key = user + '\0' + rule.backing_path;

@@ -86,21 +86,22 @@ Hook 位于 `BinderProxy.transactNative`，只在显式 `media=hide_denied` 且 
 
 ### 3.1 MediaStore Hook 必须显式启用
 
-架构文档将 MediaStore 兼容定位为可选 compat 后端。当前实现已将 Hook 安装门槛收敛为显式 `media=hide_denied`，并且只有 mount 成功后才在 `postAppSpecialize` 安装，解决了原实现的两个问题：
+架构文档将 MediaStore 兼容定位为可选 compat 后端。当前实现已将 Hook 安装门槛收敛为显式 `file_picker = true`，并且只有 mount 成功且应用存在 deny 规则时才在 `postAppSpecialize` 安装，解决了原实现的两个问题：
 
 - 不需要 MediaStore 兼容的应用不再承担 JNI Hook、Binder 拦截和常驻模块成本。
 - “是否安装 Hook”已经成为策略层显式、可诊断的产品选择。
 
 配置项保持显式：
 
-```ini
-media = off
-media = hide_denied
+```toml
+[apps."org.example.app"]
+file_picker = true
+deny = ["Pictures/Private"]
 ```
 
-默认值为 `off`。当前 R1 编码器只允许 redirect，因此在 deny executor 恢复前拒绝
-`hide_denied` 生成可执行策略，避免出现“配置被接受但 Hook 未安装”的假成功。该字段保留在
-schema 2 和 `policy.bin` format v5 中，但不属于当前可执行能力。
+默认值为 `false`。当前实现只过滤目标应用进程直接发起的 MediaStore query；系统
+Photo Picker、SAF 和 CloudMediaProvider 是独立的跨进程数据面，不得由该能力隐式
+宣称覆盖。Hook 初始化失败时保持 strict deny anchor，不把媒体索引过滤假报为成功。
 
 ### 3.2 模块常驻按 Hook 与否分别计算
 
