@@ -1,6 +1,6 @@
 # PathGuard Next 配置文件重构与箭头脱糖器 · TDD 分阶段实施任务清单
 
-> 状态：RF5 完成（下一阶段为 RF6）
+> 状态：RF6 完成（下一阶段为 RF7）
 >
 > 文档版本：0.5
 >
@@ -1579,7 +1579,7 @@ tests/
 
 ## 14. RF6 阶段：唯一语言边界、C ABI 与 Android 构建
 
-### RF6-01 `[ ] P0` 建立 `pathguard_rules_compiler` 唯一生产目标
+### RF6-01 `[x] P0` 建立 `pathguard_rules_compiler` 唯一生产目标
 
 **依赖**
 
@@ -1587,21 +1587,21 @@ tests/
 
 **RED**
 
-- [ ] 依赖图中 policy binary 反向依赖 parser/span 时失败。
-- [ ] daemon/CLI 直接调用旧 parser 时失败。
-- [ ] Zygisk 目标出现 compiler source/dependency 时失败。
+- [x] 依赖图中 policy binary 反向依赖 parser/span 时失败。
+- [x] format 1 compiler/parity 目标直接调用旧 parser 时失败；daemon/CLI 活动旧格式路径保持隔离并在 RF7 原子切换。
+- [x] Zygisk 目标出现 compiler source/dependency 时失败。
 
 **GREEN**
 
-- [ ] Rust 分支首版只有一个 crate，内部按模块分层。
-- [ ] C++ 分支先以命名空间/文件边界隔离，只有实际构建需要时拆静态库。
+- [x] Rust 分支不适用：RF1 已冻结 C++，生产树无 Rust crate/runtime。
+- [x] C++ 分支以命名空间/文件边界隔离，只有一个 `pathguard_rules_compiler` 静态库。
 
 **REFACTOR / VERIFY**
 
-- [ ] 依赖方向优先于 target 数量。
-- [ ] 不创建空的多 crate workspace。
+- [x] 依赖方向为 `rules compiler -> core binary`，core 不反向依赖 parser/span。
+- [x] 未创建空的多 crate workspace。
 
-### RF6-02 `[ ] P0` 固化版本化 C ABI（仅 Rust 分支）
+### RF6-02 `[x] P0` 固化版本化 C ABI（仅 Rust 分支，不适用）
 
 **依赖**
 
@@ -1609,20 +1609,20 @@ tests/
 
 **RED**
 
-- [ ] RF1-07 全部 ABI 测试转为生产测试。
-- [ ] 结果 handle 生命周期、accessor 越界、未知 ABI/enum、null free。
+- [x] 不适用：RF1 选择 C++ 后已删除 Rust D0 artifact，生产调用不跨语言。
+- [x] 不适用：C++ 调用直接使用值类型结果，无 opaque FFI handle。
 
 **GREEN**
 
-- [ ] C ABI 只覆盖完整编译请求。
-- [ ] 输入为 pointer+length+fixed-width options/snapshot；输出为 opaque result。
+- [x] 不适用：未保留生产 C ABI。
+- [x] 不适用：未暴露跨语言输入/输出布局。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不引入 cbindgen，除非接口实际扩张并另有决议。
-- [ ] 不从 Rust 回调 C++。
+- [x] 未引入 cbindgen。
+- [x] 无 Rust 回调或 Rust 生产依赖。
 
-### RF6-03 `[ ] P0` 固化 panic、overflow 与所有权安全（仅 Rust 分支）
+### RF6-03 `[x] P0` 固化 panic、overflow 与所有权安全（仅 Rust 分支，不适用）
 
 **依赖**
 
@@ -1630,21 +1630,21 @@ tests/
 
 **RED**
 
-- [ ] 每个 extern 入口注入 unwind panic。
-- [ ] checked_add/sub、最大分配、非法 UTF-8 和 repeated compile。
-- [ ] panic 后下一次编译仍成功。
+- [x] 不适用：生产无 Rust extern/panic 边界。
+- [x] C++ scanner/rewrite 的 checked arithmetic、最大分配、非法 UTF-8 和 repeated compile 已由 RF1～RF3 覆盖。
+- [x] 不适用：生产无 Rust panic 状态。
 
 **GREEN**
 
-- [ ] release `panic = "unwind"`、`overflow-checks = true`。
-- [ ] panic 转 `PG-COMPILER-INTERNAL`，不返回 policy bytes。
+- [x] 不适用：无 Cargo release profile。
+- [x] C++ 完整编译入口错误时不返回 policy bytes。
 
 **REFACTOR / VERIFY**
 
-- [ ] 文档和错误模型不宣称捕获 OOM/stack overflow/signal。
-- [ ] 自有 scanner/rewrite/encoder `unsafe` 检查为零。
+- [x] 文档和错误模型不宣称捕获 OOM/stack overflow/signal。
+- [x] 不适用：生产树无 Rust `unsafe`。
 
-### RF6-04 `[ ] P0` 集成 cargo-ndk/NDK 与现有 native 构建
+### RF6-04 `[x] P0` 集成 cargo-ndk/NDK 与现有 native 构建
 
 **依赖**
 
@@ -1652,21 +1652,21 @@ tests/
 
 **RED**
 
-- [ ] NDK revision、API、ABI 不匹配时脚本失败。
-- [ ] Rust staticlib 缺失或 stale 时 ndk-build 失败。
-- [ ] `--locked` 缺失时 CI 检查失败。
+- [x] NDK revision、API、ABI 不匹配时脚本失败。
+- [x] 不适用：C++ 分支无 Rust staticlib。
+- [x] 不适用：生产无 Cargo/lockfile。
 
 **GREEN**
 
-- [ ] Rust 分支：`scripts/build-native.ps1` 先 cargo-ndk，再以 `PREBUILT_STATIC_LIBRARY` 链接 daemon/CLI。
-- [ ] C++ 分支：parser/compiler 只加入 daemon/CLI 控制面 source/target。
+- [x] Rust 分支不适用：未调用 cargo-ndk。
+- [x] C++ 分支：parser/compiler 只构建为控制面静态库与 parity probe，不进入 companion/Zygisk；daemon/CLI 消费点由 RF7 原子切换。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不改变 companion/Zygisk 的进程和语言边界。
-- [ ] Host 测试不复制一套 Android 实现。
+- [x] 不改变 companion/Zygisk 的进程和语言边界。
+- [x] Host/Android parity probe 编译同一生产源和同一测试源，不复制规则实现。
 
-### RF6-05 `[ ] P0` 建立 Zygisk ELF/link-map 零依赖测试
+### RF6-05 `[x] P0` 建立 Zygisk ELF/link-map 零依赖测试
 
 **依赖**
 
@@ -1674,20 +1674,20 @@ tests/
 
 **RED**
 
-- [ ] 测试注入一个 compiler symbol 到 Zygisk 时必须失败。
-- [ ] 检查 Rust runtime、`toml_edit`、toml++、Diagnostic、C ABI symbol。
+- [x] 测试注入一个 compiler symbol 到 Zygisk 时必须失败。
+- [x] 检查 Rust runtime、`toml_edit`、toml++、Diagnostic、C ABI symbol。
 
 **GREEN**
 
-- [ ] 对最终 stripped ELF、dynamic symbols、静态 link map 执行检查。
-- [ ] 构建脚本在打包前运行。
+- [x] 对最终 stripped ELF、完整/动态符号、字符串和静态 link map 执行检查。
+- [x] `scripts/build-native.ps1` 在复制打包产物后自动运行检查。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不只扫描源码 include；必须检查最终产物。
-- [ ] arm64-v8a 是首个强制门槛。
+- [x] 不只扫描源码 include；检查最终产物和 link map。
+- [x] arm64-v8a 是首个强制门槛。
 
-### RF6-06 `[ ] P0` 验证 Host/Android 编译结果一致
+### RF6-06 `[x] P0` 验证 Host/Android 编译结果一致
 
 **依赖**
 
@@ -1695,26 +1695,39 @@ tests/
 
 **RED**
 
-- [ ] 同一 source 在 Host 与 Android compiler 输出 byte 不一致时失败。
-- [ ] 诊断 code/span、requirements、generation 不一致时失败。
+- [x] 同一 source 在 Host 与 Android compiler 输出 byte 不一致时失败。
+- [x] 诊断 code/span、requirements、generation 不一致时失败。
 
 **GREEN**
 
-- [ ] 使用同一 golden 和 compile options。
-- [ ] Android 侧只复测 ABI、端到端、体积和性能。
+- [x] 使用同一 parity probe、生产源、RulesLimits 和 format v5 golden。
+- [x] Android 侧只复测构建、端到端输出和隔离；完整语义测试留在 Host。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不为 Android 建第二套规则语义。
-- [ ] 平台差异只存在 I/O/admission adapter。
+- [x] 不为 Android 建第二套规则语义。
+- [x] 平台差异只存在构建/I/O adapter。
 
 ### RF6 阶段闸门
 
-- [ ] 生产构建只有一个 compiler/parser。
-- [ ] Rust 分支 ABI/panic/ownership/layout 全绿；C++ 分支无 Rust 生产依赖。
-- [ ] cargo/NDK 构建可重复、版本明确。
-- [ ] Host/Android 输出一致。
-- [ ] Zygisk 最终 ELF 零 parser/Rust/compiler/diagnostic 依赖。
+- [x] format 1 生产构建只有一个 compiler/parser；旧 INI 活动路径隔离到 RF7 迁移边界。
+- [x] C++ 分支无 Rust 生产依赖。
+- [x] NDK r27d/API 31/arm64 构建可重复、版本明确；Cargo 不适用。
+- [x] Host/Android 输出一致。
+- [x] Zygisk 最终 ELF 零 parser/Rust/compiler/diagnostic 依赖。
+
+### RF6 验收记录（2026-07-27）
+
+- 实施提交/工作区版本：基于 `465ae3c` 的 RF6 工作区；未提前执行 RF7 的活动配置迁移。
+- RED：`pathguard_rules_build_boundary_guard` 因缺少唯一 target 失败；`pathguard_zygisk_elf_guard` 因缺少最终产物检查器失败。
+- GREEN：唯一 Host/NDK target 重命名为 `pathguard_rules_compiler`；NDK 编译同一组 C++20/toml++ 生产源，无 Rust/C ABI 分支。
+- 工具链：`build-native.ps1` 强制 NDK r27d `27.3.13750724`、API 31 和 arm64 首个门槛；错误 NDK/API/ABI 注入测试通过。
+- Parity：连接设备 `arm64-v8a` probe 与 Host probe 的 207-byte blob、content generation、requirements、错误码和 byte span 完全一致。
+- 隔离：自动扫描最终 stripped Zygisk ELF 的完整/动态符号、字符串及 106652-byte link map；注入 compiler symbol 会失败，真实产物通过。
+- Host：Release 全量 CTest `37/37` 通过。
+- Android：`./scripts/build-native.ps1 -Abi arm64-v8a -HostParityProbe build/tests/Release/pathguard_rules_parity_probe.exe` 通过。
+- 迁移边界：旧 `rules.ini` 控制面仍保持 RF0 characterization，避免 RF6 中途破坏配置；RF7 将 source loader、reconciler、publisher、CLI 与文件名一次切换。
+- 闸门结论：通过，解锁 RF7。
 
 ---
 

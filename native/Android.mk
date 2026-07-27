@@ -7,9 +7,40 @@ CORE_SOURCES := \
     ../core/src/topology.cpp \
     ../core/src/validation.cpp \
     ../core/src/version.cpp
+RULES_COMPILER_SOURCES := \
+    ../rules/src/arrow_scanner.cpp \
+    ../rules/src/compiler.cpp \
+    ../rules/src/desugarer.cpp \
+    ../rules/src/diagnostic.cpp \
+    ../rules/src/format_probe.cpp \
+    ../rules/src/semantic.cpp \
+    ../rules/src/source.cpp
 DIRECTORY_RESOLVER_SOURCE := directory_resolver.cpp
 MOUNT_INFO_SNAPSHOT_SOURCE := mount_info_snapshot.cpp
 MOUNT_EXECUTOR_SOURCE := mount_executor.cpp
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := pathguard_core_control
+LOCAL_SRC_FILES := $(CORE_SOURCES)
+LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include
+include $(BUILD_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := pathguard_rules_compiler
+LOCAL_SRC_FILES := $(RULES_COMPILER_SOURCES)
+LOCAL_C_INCLUDES := $(ROOT_PATH)/rules/include $(ROOT_PATH)/core/include \
+    $(ROOT_PATH)/third_party/tomlplusplus
+LOCAL_CPPFLAGS := -DTOML_EXCEPTIONS=0 -DTOML_ENABLE_FORMATTERS=0 \
+    -DTOML_ENABLE_UNRELEASED_FEATURES=0
+LOCAL_STATIC_LIBRARIES := pathguard_core_control
+include $(BUILD_STATIC_LIBRARY)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := pathguard_rules_parity_probe
+LOCAL_SRC_FILES := ../tests/integration/rules/rules_compiler_parity_probe.cpp
+LOCAL_C_INCLUDES := $(ROOT_PATH)/rules/include $(ROOT_PATH)/core/include
+LOCAL_STATIC_LIBRARIES := pathguard_rules_compiler
+include $(BUILD_EXECUTABLE)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := pathguardd
@@ -42,6 +73,7 @@ LOCAL_SRC_FILES := \
 LOCAL_C_INCLUDES := $(ROOT_PATH)/zygisk/include $(ROOT_PATH)/core/include $(ROOT_PATH)/native/include
 LOCAL_CPPFLAGS := -fno-threadsafe-statics \
     -Wframe-larger-than=786432 -Werror=frame-larger-than
+LOCAL_LDFLAGS := -Wl,-Map,$(LOCAL_PATH)/obj/local/$(TARGET_ARCH_ABI)/pathguard_zygisk.map
 LOCAL_LDLIBS := -llog
 ifneq ($(strip $(PATHGUARD_TEST_MOUNT_DELAY_MS)),)
 LOCAL_CPPFLAGS += -DPATHGUARD_TEST_MOUNT_DELAY_MS=$(PATHGUARD_TEST_MOUNT_DELAY_MS)
