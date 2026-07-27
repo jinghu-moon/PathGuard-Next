@@ -20,6 +20,17 @@ if(NOT real_result EQUAL 0)
     "RF0 test assets failed validation:\n${real_output}\n${real_error}")
 endif()
 
+execute_process(
+  COMMAND "${CMAKE_COMMAND}"
+    "-DSOURCE_DIR=${SOURCE_DIR}"
+    -DINJECT_BAD_SEED=ON
+    -P "${verifier}"
+  RESULT_VARIABLE bad_seed_result
+)
+if(bad_seed_result EQUAL 0)
+  message(FATAL_ERROR "RF2 asset guard accepted an invalid fuzz seed hash")
+endif()
+
 set(empty_root "${test_temp_root}/rf0-empty-assets")
 file(REMOVE_RECURSE "${empty_root}")
 file(MAKE_DIRECTORY "${empty_root}")

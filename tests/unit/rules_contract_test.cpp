@@ -46,6 +46,10 @@ int main() {
         kDesugarInternal,
         kCompilerInternal,
         kResourceLimit,
+        kFormatMissing,
+        kFormatInvalid,
+        kFormatUnsupported,
+        kDiagnosticsOmitted,
     };
     for (std::string_view code : codes) {
         assert(code.starts_with("PG-"));

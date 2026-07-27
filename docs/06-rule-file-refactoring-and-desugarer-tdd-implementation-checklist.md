@@ -1,8 +1,8 @@
 # PathGuard Next 配置文件重构与箭头脱糖器 · TDD 分阶段实施任务清单
 
-> 状态：RF1 完成（Phase D0 已接受，下一阶段为 RF2）
+> 状态：RF2 完成（下一阶段为 RF3）
 >
-> 文档版本：0.2
+> 文档版本：0.3
 >
 > 日期：2026-07-26
 >
@@ -756,7 +756,7 @@ tests/
 
 > 本阶段仅在 RF1 决定保留箭头时执行。
 
-### RF2-01 `[ ] P0` 实现 `SourceBuffer`、`ByteSpan` 与 `LineIndex`
+### RF2-01 `[x] P0` 实现 `SourceBuffer`、`ByteSpan` 与 `LineIndex`
 
 **依赖**
 
@@ -764,22 +764,22 @@ tests/
 
 **RED**
 
-- [ ] 覆盖空文件、ASCII、Unicode、LF、CRLF、BOM、EOF 和越界 span。
-- [ ] byte offset 到 1-based 行/Unicode code point 列映射错误时失败。
-- [ ] 任一 span 超出 source 时失败而不是截断。
+- [x] 覆盖空文件、ASCII、Unicode、LF、CRLF、BOM、EOF 和越界 span。
+- [x] byte offset 到 1-based 行/Unicode code point 列映射错误时失败。
+- [x] 任一 span 超出 source 时失败而不是截断。
 
 **GREEN**
 
-- [ ] 内部统一 UTF-8 byte half-open span。
-- [ ] JSON 诊断保留 byte offset；CLI 显示 code point 列。
-- [ ] 使用 checked arithmetic 和冻结 source size 上限。
+- [x] 内部统一 UTF-8 byte half-open span。
+- [x] JSON 诊断保留 byte offset；CLI 显示 code point 列。
+- [x] 使用 checked arithmetic 和冻结 source size 上限。
 
 **REFACTOR / VERIFY**
 
-- [ ] LSP UTF-16 转换不进入核心类型。
-- [ ] SourceBuffer 生命周期覆盖 parse/decode，不复制无关文本。
+- [x] LSP UTF-16 转换不进入核心类型。
+- [x] SourceBuffer 生命周期覆盖 parse/decode，不复制无关文本。
 
-### RF2-02 `[ ] P0` 实现 `RulesFormatProbe`
+### RF2-02 `[x] P0` 实现 `RulesFormatProbe`
 
 **依赖**
 
@@ -787,21 +787,21 @@ tests/
 
 **RED**
 
-- [ ] 覆盖 BOM、前导空白/注释、`format = 1`、缺失、非 bare key、非十进制、未知版本。
-- [ ] `format` 不是首个有效声明时失败。
-- [ ] 后续重复 format 留给 strict parser/decoder 的测试。
+- [x] 覆盖 BOM、前导空白/注释、`format = 1`、缺失、非 bare key、非十进制、未知版本。
+- [x] `format` 不是首个有效声明时失败。
+- [x] 后续重复 format 留给 strict parser/decoder 的测试。
 
 **GREEN**
 
-- [ ] 只识别第一个有效声明，不扫描和解释其他字段。
-- [ ] 在主箭头扫描前完成版本选择。
+- [x] 只识别第一个有效声明，不扫描和解释其他字段。
+- [x] 在主箭头扫描前完成版本选择。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不建立 key parser 或 dotted-key 逻辑。
-- [ ] 每个未来 format 版本拥有显式入口，不猜测语法。
+- [x] 不建立 key parser 或 dotted-key 逻辑。
+- [x] 每个未来 format 版本拥有显式入口，不猜测语法。
 
-### RF2-03 `[ ] P0` 实现 TOML 1.0 单行字符串边界
+### RF2-03 `[x] P0` 实现 TOML 1.0 单行字符串边界
 
 **依赖**
 
@@ -809,21 +809,21 @@ tests/
 
 **RED**
 
-- [ ] 基本字符串覆盖 `\"`、连续反斜杠奇偶性、字符串内 `->` 和 `#`。
-- [ ] 字面量字符串覆盖单引号、反斜杠普通字节和字符串内箭头。
-- [ ] 未终止字符串报告 `PG-ARROW-STRING-BOUNDARY`。
+- [x] 基本字符串覆盖 `\"`、连续反斜杠奇偶性、字符串内 `->` 和 `#`。
+- [x] 字面量字符串覆盖单引号、反斜杠普通字节和字符串内箭头。
+- [x] 未终止字符串报告 `PG-ARROW-STRING-BOUNDARY`。
 
 **GREEN**
 
-- [ ] scanner 只识别边界，不解码 escape。
-- [ ] 只有 Normal 状态中的连续 ASCII `-` `>` 产生 Arrow token。
+- [x] scanner 只识别边界，不解码 escape。
+- [x] 只有 Normal 状态中的连续 ASCII `-` `>` 产生 Arrow token。
 
 **REFACTOR / VERIFY**
 
-- [ ] 边界逻辑不依赖正则表达式。
-- [ ] 不将非法 escape 抢先解释为 PathGuard 语义错误。
+- [x] 边界逻辑不依赖正则表达式。
+- [x] 不将非法 escape 抢先解释为 PathGuard 语义错误。
 
-### RF2-04 `[ ] P0` 实现 TOML 1.0 多行字符串与注释边界
+### RF2-04 `[x] P0` 实现 TOML 1.0 多行字符串与注释边界
 
 **依赖**
 
@@ -831,21 +831,21 @@ tests/
 
 **RED**
 
-- [ ] 覆盖三/四/五连续引号、multiline basic escape、multiline literal、CRLF。
-- [ ] 多行字符串中的 `->`、`#`、括号不影响 outer state。
-- [ ] 注释到 LF、CRLF 和 EOF 的边界稳定。
+- [x] 覆盖三/四/五连续引号、multiline basic escape、multiline literal、CRLF。
+- [x] 多行字符串中的 `->`、`#`、括号不影响 outer state。
+- [x] 注释到 LF、CRLF 和 EOF 的边界稳定。
 
 **GREEN**
 
-- [ ] 按 TOML 1.0 delimiter 规则实现有限状态机。
-- [ ] 多行字符串可存在于普通 TOML，但不得作为 redirect operand。
+- [x] 按 TOML 1.0 delimiter 规则实现有限状态机。
+- [x] 多行字符串可存在于普通 TOML，但不得作为 redirect operand。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不使用递归。
-- [ ] 状态机对每个输入字节最多进行有界工作。
+- [x] 不使用递归。
+- [x] 状态机对每个输入字节最多进行有界工作。
 
-### RF2-05 `[ ] P0` 接入 toml-test 字符串/注释/encoding fixture
+### RF2-05 `[x] P0` 接入 toml-test 字符串/注释/encoding fixture
 
 **依赖**
 
@@ -853,21 +853,21 @@ tests/
 
 **RED**
 
-- [ ] fixture harness 在扫描器越界、死循环、未消费输入或产生无界诊断时失败。
-- [ ] valid string/comment fixture 中的字符串内部 sentinel arrow 被误判时失败。
-- [ ] invalid encoding fixture 产生 policy candidate 时失败。
+- [x] fixture harness 在扫描器越界、死循环、未消费输入或产生无界诊断时失败。
+- [x] valid string/comment fixture 中的字符串内部 sentinel arrow 被误判时失败。
+- [x] invalid encoding fixture 产生 policy candidate 时失败。
 
 **GREEN**
 
-- [ ] 遍历 manifest 选中的 raw TOML 文件。
-- [ ] valid fixture 验证安全完成和边界稳定；invalid fixture 验证安全拒绝或交给 parser。
+- [x] 遍历 manifest 选中的 raw TOML 文件。
+- [x] valid fixture 验证安全完成和边界稳定；invalid fixture 验证安全拒绝或交给 parser。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不解析配套 tagged JSON。
-- [ ] 不把 toml-test 未覆盖的嵌套深度/资源上限责任推给上游套件。
+- [x] 不解析配套 tagged JSON。
+- [x] 不把 toml-test 未覆盖的嵌套深度/资源上限责任推给上游套件。
 
-### RF2-06 `[ ] P0` 实现显著 token 摘要与浅层容器 frame
+### RF2-06 `[x] P0` 实现显著 token 摘要与浅层容器 frame
 
 **依赖**
 
@@ -875,21 +875,21 @@ tests/
 
 **RED**
 
-- [ ] 覆盖 value array、嵌套 array、inline table、table header、array-of-tables header 和 unknown bracket。
-- [ ] 表头的 `[`、inline table 的逗号不能冒充 array element delimiter。
-- [ ] 超过最大深度时稳定报资源错误。
+- [x] 覆盖 value array、嵌套 array、inline table、table header、array-of-tables header 和 unknown bracket。
+- [x] 表头的 `[`、inline table 的逗号不能冒充 array element delimiter。
+- [x] 超过最大深度时稳定报资源错误。
 
 **GREEN**
 
-- [ ] 只维护 `at_statement_start`、`expecting_value`、有界 frame stack 和递增 frame id。
-- [ ] 无法可靠分类的 bracket 使用 unknown frame，并禁止箭头转换。
+- [x] 只维护 `at_statement_start`、`expecting_value`、有界 frame stack 和递增 frame id。
+- [x] 无法可靠分类的 bracket 使用 unknown frame，并禁止箭头转换。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不保存完整 TokenStream。
-- [ ] 不解析 table key、table path 或 dotted key。
+- [x] 不保存完整 TokenStream。
+- [x] 不解析 table key、table path 或 dotted key。
 
-### RF2-07 `[ ] P0` 实现流式箭头候选状态机
+### RF2-07 `[x] P0` 实现流式箭头候选状态机
 
 **依赖**
 
@@ -897,25 +897,25 @@ tests/
 
 **RED**
 
-- [ ] 合法 basic/literal、无空格、多空格、跨行空白、尾逗号。
-- [ ] 普通键值、inline table 字段、table header 报 `PG-ARROW-CONTEXT`。
-- [ ] 缺左右 operand 报 `PG-ARROW-OPERAND`。
-- [ ] 内部注释报 `PG-ARROW-COMMENT-INSIDE`。
-- [ ] 链式箭头报 `PG-ARROW-CHAINED`。
-- [ ] 连续元素缺逗号报 `PG-ARROW-MISSING-COMMA`。
+- [x] 合法 basic/literal、无空格、多空格、跨行空白、尾逗号。
+- [x] 普通键值、inline table 字段、table header 报 `PG-ARROW-CONTEXT`。
+- [x] 缺左右 operand 报 `PG-ARROW-OPERAND`。
+- [x] 内部注释报 `PG-ARROW-COMMENT-INSIDE`。
+- [x] 链式箭头报 `PG-ARROW-CHAINED`。
+- [x] 连续元素缺逗号报 `PG-ARROW-MISSING-COMMA`。
 
 **GREEN**
 
-- [ ] 任一时刻最多一个 pending candidate。
-- [ ] 左右 delimiter 必须属于同一 value-array frame。
-- [ ] 右 operand 后 EOF 且 array 未闭合时允许候选完成，由 strict parser 报缺 `]`。
+- [x] 任一时刻最多一个 pending candidate。
+- [x] 左右 delimiter 必须属于同一 value-array frame。
+- [x] 右 operand 后 EOF 且 array 未闭合时允许候选完成，由 strict parser 报缺 `]`。
 
 **REFACTOR / VERIFY**
 
-- [ ] 同一字符串不能参与两个箭头。
-- [ ] 同一根因只产生最早、最具体的箭头错误。
+- [x] 同一字符串不能参与两个箭头。
+- [x] 同一根因只产生最早、最具体的箭头错误。
 
-### RF2-08 `[ ] P0` 实现 all-or-nothing 错误策略与有界诊断
+### RF2-08 `[x] P0` 实现 all-or-nothing 错误策略与有界诊断
 
 **依赖**
 
@@ -923,21 +923,21 @@ tests/
 
 **RED**
 
-- [ ] 任一 `PG-ARROW-*` 出现时 strict parser mock 不得被调用。
-- [ ] 多个独立错误只收集到 max diagnostics，并追加 omitted 诊断。
-- [ ] error 输出不得携带可发布 RulesDocument 或 PolicyBlob。
+- [x] 任一 `PG-ARROW-*` 出现时 strict parser mock 不得被调用。
+- [x] 多个独立错误只收集到 max diagnostics，并追加 omitted 诊断。
+- [x] error 输出不得携带可发布 RulesDocument 或 PolicyBlob。
 
 **GREEN**
 
-- [ ] 扫描可继续收集有界独立错误，但不应用任何 rewrite。
-- [ ] 统一结构化 Diagnostic，不在 scanner 拼多套文本。
+- [x] 扫描可继续收集有界独立错误，但不应用任何 rewrite。
+- [x] 统一结构化 Diagnostic，不在 scanner 拼多套文本。
 
 **REFACTOR / VERIFY**
 
-- [ ] 诊断 span 均位于原始 SourceBuffer。
-- [ ] 资源超限在最早可判断位置失败。
+- [x] 诊断 span 均位于原始 SourceBuffer。
+- [x] 资源超限在最早可判断位置失败。
 
-### RF2-09 `[ ] P0` 词法与 frame 状态机属性测试/fuzz
+### RF2-09 `[x] P0` 词法与 frame 状态机属性测试/fuzz
 
 **依赖**
 
@@ -945,26 +945,38 @@ tests/
 
 **RED**
 
-- [ ] seed corpus 至少含 toml-test 选集和所有手写边界。
-- [ ] 故意注入 offset 溢出、frame 不弹栈或 EOF 不推进时 fuzz 能发现。
+- [x] seed corpus 至少含 toml-test 选集和所有手写边界。
+- [x] 故意注入 offset 溢出、frame 不弹栈或 EOF 不推进时 fuzz 能发现。
 
 **GREEN**
 
-- [ ] fuzz string boundary 和 container/candidate 两个目标。
-- [ ] 不变量：终止、无越界、checked arithmetic、bounded allocation、诊断在源范围内。
+- [x] fuzz string boundary 和 container/candidate 两个目标。
+- [x] 不变量：终止、无越界、checked arithmetic、bounded allocation、诊断在源范围内。
 
 **REFACTOR / VERIFY**
 
-- [ ] 保存最小回归 corpus 和固定 seed。
-- [ ] 若选 Rust，项目自有模块保持无 `unsafe`。
+- [x] 保存最小回归 corpus 和固定 seed。
+- [x] 若选 Rust，项目自有模块保持无 `unsafe`。（RF1 选择 C++，本项不适用）
 
 ### RF2 阶段闸门
 
-- [ ] FormatProbe 在箭头扫描前稳定选择 format。
-- [ ] toml-test TOML 1.0 选集通过 scanner 安全性测试。
-- [ ] string/comment/frame/candidate 单测和 fuzz 通过。
-- [ ] 没有完整 TokenStream、TOML key parser 或 table-path parser。
-- [ ] 任一箭头错误都不会进入 strict parser。
+- [x] FormatProbe 在箭头扫描前稳定选择 format。
+- [x] toml-test TOML 1.0 选集通过 scanner 安全性测试。
+- [x] string/comment/frame/candidate 单测和 fuzz 通过。
+- [x] 没有完整 TokenStream、TOML key parser 或 table-path parser。
+- [x] 任一箭头错误都不会进入 strict parser。
+
+### RF2 验收记录（2026-07-27）
+
+- 实施提交/工作区版本：基于 `08321aa` 的未提交 RF2 工作区；未进入 RF3。
+- RED：缺少 `SourceBuffer`/scanner 头文件时构建失败；fixture 数量初始断言失败；Windows libFuzzer 首次因 CRT 不一致、再次因 ASan runtime 不可用而链接失败。
+- GREEN：新增 `pathguard_rules` 控制面静态库和 6 个 RF2 CTest；Host 全量 Release CTest `25/25` 通过。
+- Fixture：`toml-test v2.2.0` TOML 1.0 清单共 137 个输入，其中 valid 39、invalid 98、invalid encoding 15；资产 SHA-256 守卫通过。
+- Fuzz：Clang `20.1.7` 下 `pathguard_rules_string_fuzzer`、`pathguard_rules_candidate_fuzzer` 各运行 10,000 次，无崩溃或不变量失败；日常固定 seed smoke 纳入 CTest。
+- 固定 seed：`rules-string-fc1e00f7fbc3a5b3.seed`、`rules-candidate-c69f97c7c2b378df.seed`，文件名、manifest 和 SHA-256 一致性由资产守卫验证。
+- Android：`./scripts/build-native.ps1 -Abi arm64-v8a` 通过；`pathguardd`、`pathguardctl` 与 `libpathguard_zygisk.so` 均构建成功。
+- 架构边界：daemon 和 Zygisk 未链接 `pathguard_rules`；没有完整 TokenStream、TOML key/table-path parser、rewrite、toml++ parser 或发布接入。
+- 下一阶段：RF3 仅实现区间 rewrite、`RewriteMap` 与 `GeneratedRedirect`，不得提前进入 RF4 parser/AST decode。
 
 ---
 

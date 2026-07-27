@@ -1,2 +1,3 @@
-# target<TAB>seed<TAB>sha256<TAB>purpose
-# RF2 adds the first executable scanner seeds.
+# target	seed	sha256	purpose
+rules-string	rules-string-fc1e00f7fbc3a5b3.seed	fc1e00f7fbc3a5b3e8dc8688d03f89e9b006daf190f679ec88823f30815a0f94	TOML string/comment boundary mutation seed
+rules-candidate	rules-candidate-c69f97c7c2b378df.seed	c69f97c7c2b378df7a86bed7cc567b05a3411797025fd9605b1c34aeb93e30ec	container and arrow candidate mutation seed

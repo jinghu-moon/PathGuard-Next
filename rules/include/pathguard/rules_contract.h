@@ -33,5 +33,9 @@ inline constexpr std::string_view kRedirectSyntax = "PG-REDIRECT-SYNTAX";
 inline constexpr std::string_view kDesugarInternal = "PG-DESUGAR-INTERNAL";
 inline constexpr std::string_view kCompilerInternal = "PG-COMPILER-INTERNAL";
 inline constexpr std::string_view kResourceLimit = "PG-RESOURCE-LIMIT";
+inline constexpr std::string_view kFormatMissing = "PG-FORMAT-MISSING";
+inline constexpr std::string_view kFormatInvalid = "PG-FORMAT-INVALID";
+inline constexpr std::string_view kFormatUnsupported = "PG-FORMAT-UNSUPPORTED";
+inline constexpr std::string_view kDiagnosticsOmitted = "PG-DIAGNOSTICS-OMITTED";
 
 }  // namespace pathguard::rules

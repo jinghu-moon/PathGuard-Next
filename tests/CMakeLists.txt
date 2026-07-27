@@ -91,6 +91,124 @@ target_include_directories(pathguard_rules_contract_test PRIVATE
 )
 add_test(NAME pathguard_rules_contract_test COMMAND pathguard_rules_contract_test)
 
+add_executable(pathguard_rules_source_test unit/rules_source_test.cpp)
+target_include_directories(pathguard_rules_source_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_source_test PRIVATE pathguard_rules)
+add_test(NAME pathguard_rules_source_test COMMAND pathguard_rules_source_test)
+
+add_executable(pathguard_rules_format_probe_test unit/rules_format_probe_test.cpp)
+target_include_directories(pathguard_rules_format_probe_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_format_probe_test PRIVATE pathguard_rules)
+add_test(NAME pathguard_rules_format_probe_test COMMAND pathguard_rules_format_probe_test)
+
+add_executable(pathguard_rules_arrow_scanner_test
+  unit/rules_arrow_scanner_test.cpp
+)
+target_include_directories(pathguard_rules_arrow_scanner_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_arrow_scanner_test PRIVATE pathguard_rules)
+add_test(
+  NAME pathguard_rules_arrow_scanner_test
+  COMMAND pathguard_rules_arrow_scanner_test
+)
+
+add_executable(pathguard_rules_fixture_scanner_test
+  unit/rules_fixture_scanner_test.cpp
+)
+target_include_directories(pathguard_rules_fixture_scanner_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_compile_definitions(pathguard_rules_fixture_scanner_test PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+target_link_libraries(pathguard_rules_fixture_scanner_test PRIVATE pathguard_rules)
+add_test(
+  NAME pathguard_rules_fixture_scanner_test
+  COMMAND pathguard_rules_fixture_scanner_test
+)
+
+add_executable(pathguard_rules_string_fuzz_smoke
+  fuzz/rules_string_fuzz_smoke.cpp
+)
+target_include_directories(pathguard_rules_string_fuzz_smoke PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_compile_definitions(pathguard_rules_string_fuzz_smoke PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+target_link_libraries(pathguard_rules_string_fuzz_smoke PRIVATE pathguard_rules)
+add_test(
+  NAME pathguard_rules_string_fuzz_smoke
+  COMMAND pathguard_rules_string_fuzz_smoke
+)
+
+add_executable(pathguard_rules_candidate_fuzz_smoke
+  fuzz/rules_candidate_fuzz_smoke.cpp
+)
+target_include_directories(pathguard_rules_candidate_fuzz_smoke PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_compile_definitions(pathguard_rules_candidate_fuzz_smoke PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+target_link_libraries(pathguard_rules_candidate_fuzz_smoke PRIVATE pathguard_rules)
+add_test(
+  NAME pathguard_rules_candidate_fuzz_smoke
+  COMMAND pathguard_rules_candidate_fuzz_smoke
+)
+
+if(PATHGUARD_BUILD_FUZZERS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "PATHGUARD_BUILD_FUZZERS requires Clang/libFuzzer")
+  endif()
+  if(WIN32)
+    set(pathguard_fuzzer_sanitizers fuzzer,undefined)
+    set(pathguard_library_sanitizers fuzzer-no-link,undefined)
+  else()
+    set(pathguard_fuzzer_sanitizers fuzzer,address,undefined)
+    set(pathguard_library_sanitizers fuzzer-no-link,address,undefined)
+  endif()
+  target_compile_options(pathguard_rules PRIVATE
+    -fsanitize=${pathguard_library_sanitizers}
+    -fno-omit-frame-pointer
+  )
+  foreach(target IN ITEMS string candidate)
+    add_executable(pathguard_rules_${target}_fuzzer
+      fuzz/rules_${target}_fuzzer.cpp
+    )
+    target_link_libraries(pathguard_rules_${target}_fuzzer PRIVATE pathguard_rules)
+    target_compile_options(pathguard_rules_${target}_fuzzer PRIVATE
+      -fsanitize=${pathguard_fuzzer_sanitizers}
+      -fno-omit-frame-pointer
+    )
+    target_link_options(pathguard_rules_${target}_fuzzer PRIVATE
+      -fsanitize=${pathguard_fuzzer_sanitizers}
+    )
+    if(WIN32)
+      target_compile_options(pathguard_rules_${target}_fuzzer PRIVATE
+        -fms-runtime-lib=static
+      )
+      target_link_options(pathguard_rules_${target}_fuzzer PRIVATE
+        -fms-runtime-lib=static
+      )
+    endif()
+    set_property(TARGET pathguard_rules_${target}_fuzzer PROPERTY
+      MSVC_RUNTIME_LIBRARY MultiThreaded)
+  endforeach()
+  if(WIN32)
+    target_compile_options(pathguard_rules PRIVATE -fms-runtime-lib=static)
+  endif()
+  set_property(TARGET pathguard_rules PROPERTY
+    MSVC_RUNTIME_LIBRARY MultiThreaded)
+endif()
+
 add_executable(pathguard_policy_benchmark perf/policy_benchmark.cpp)
 target_link_libraries(pathguard_policy_benchmark PRIVATE pathguard_core)
 
