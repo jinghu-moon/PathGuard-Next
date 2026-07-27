@@ -41,5 +41,12 @@ inline constexpr std::string_view kTomlParse = "PG-TOML-PARSE";
 inline constexpr std::string_view kTypeMismatch = "PG-RULE-TYPE";
 inline constexpr std::string_view kUnknownField = "PG-RULE-UNKNOWN-FIELD";
 inline constexpr std::string_view kInvalidValue = "PG-RULE-INVALID-VALUE";
+inline constexpr std::string_view kPathInvalid = "PG-PATH-INVALID";
+inline constexpr std::string_view kRuleRedundant = "PG-RULE-REDUNDANT";
+inline constexpr std::string_view kRuleConflict = "PG-RULE-CONFLICT";
+inline constexpr std::string_view kRedirectCycle = "PG-REDIRECT-CYCLE";
+inline constexpr std::string_view kProviderConflict = "PG-PROVIDER-CONFLICT";
+inline constexpr std::string_view kExecutorUnavailable = "PG-EXECUTOR-UNAVAILABLE";
+inline constexpr std::string_view kPolicyEncode = "PG-POLICY-ENCODE";
 
 }  // namespace pathguard::rules

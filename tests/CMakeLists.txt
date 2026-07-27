@@ -225,6 +225,36 @@ target_include_directories(pathguard_rules_document_test PRIVATE
 target_link_libraries(pathguard_rules_document_test PRIVATE pathguard_rules)
 add_test(NAME pathguard_rules_document_test COMMAND pathguard_rules_document_test)
 
+add_executable(pathguard_rules_semantic_test
+  unit/rules_semantic_test.cpp
+)
+target_include_directories(pathguard_rules_semantic_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_semantic_test PRIVATE pathguard_rules)
+add_test(NAME pathguard_rules_semantic_test COMMAND pathguard_rules_semantic_test)
+
+add_executable(pathguard_rules_conflict_test
+  unit/rules_conflict_test.cpp
+)
+target_include_directories(pathguard_rules_conflict_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_link_libraries(pathguard_rules_conflict_test PRIVATE pathguard_rules)
+add_test(NAME pathguard_rules_conflict_test COMMAND pathguard_rules_conflict_test)
+
+add_executable(pathguard_rules_pipeline_test
+  unit/rules_pipeline_test.cpp
+)
+target_include_directories(pathguard_rules_pipeline_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+target_compile_definitions(pathguard_rules_pipeline_test PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+target_link_libraries(pathguard_rules_pipeline_test PRIVATE pathguard_rules)
+add_test(NAME pathguard_rules_pipeline_test COMMAND pathguard_rules_pipeline_test)
+
 if(PATHGUARD_BUILD_FUZZERS)
   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "PATHGUARD_BUILD_FUZZERS requires Clang/libFuzzer")

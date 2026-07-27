@@ -1,6 +1,6 @@
 # PathGuard Next 配置文件重构与箭头脱糖器 · TDD 分阶段实施任务清单
 
-> 状态：RF4 完成（下一阶段为 RF5）
+> 状态：RF5 完成（下一阶段为 RF6）
 >
 > 文档版本：0.5
 >
@@ -1357,7 +1357,7 @@ tests/
 
 ## 13. RF5 阶段：语义编译、Canonical Policy、Admission 与 PolicyBlob
 
-### RF5-01 `[ ] P0` 建立 `ResolvedPolicy` 和不可变 `CanonicalPolicy` 边界
+### RF5-01 `[x] P0` 建立 `ResolvedPolicy` 和不可变 `CanonicalPolicy` 边界
 
 **依赖**
 
@@ -1365,20 +1365,20 @@ tests/
 
 **RED**
 
-- [ ] 架构测试阻止 source span/comment/AST 进入 Resolved/Canonical。
-- [ ] 设备 capability/topology 进入 Host canonicalization 时失败。
+- [x] 架构测试阻止 source span/comment/AST 进入 Resolved/Canonical。
+- [x] 设备 capability/topology 进入 Host canonicalization 时失败。
 
 **GREEN**
 
-- [ ] RulesDocument 解析用户字段；ResolvedPolicy 保存规范化执行域；CanonicalPolicy 排序去表层差异。
-- [ ] PolicyRequirements 与 CanonicalPolicy 分离。
+- [x] RulesDocument 解析用户字段；ResolvedPolicy 保存规范化执行域；CanonicalPolicy 排序去表层差异。
+- [x] PolicyRequirements 与 CanonicalPolicy 分离。
 
 **REFACTOR / VERIFY**
 
-- [ ] 使用只读输入和显式输出，不原地改变同一文档含义。
-- [ ] 不为每个模型拆 crate/静态库。
+- [x] 使用只读输入和显式输出，不原地改变同一文档含义。
+- [x] 不为每个模型拆 crate/静态库。
 
-### RF5-02 `[ ] P0` 复用并补强 `PathNormalizer`
+### RF5-02 `[x] P0` 复用并补强 `PathNormalizer`
 
 **依赖**
 
@@ -1386,21 +1386,21 @@ tests/
 
 **RED**
 
-- [ ] 相对路径、分隔符、重复斜杠、`.`、`..`、NUL、绝对路径、空组件、UTF-8 长度和组件上限。
-- [ ] `{user}`、`{package}`、未知 `{...}` 均不展开。
-- [ ] 同一路径只规范化一次的计数测试。
+- [x] 相对路径、分隔符、重复斜杠、`.`、`..`、NUL、绝对路径、空组件、UTF-8 长度和组件上限。
+- [x] `{user}`、`{package}`、未知 `{...}` 均不展开。
+- [x] 同一路径只规范化一次的计数测试。
 
 **GREEN**
 
-- [ ] 产出可复用 `NormalizedPath` 和组件边界。
-- [ ] 后续冲突、排序和编码不重复切分原始字符串。
+- [x] 产出可复用 `NormalizedPath` 和组件边界。
+- [x] 后续冲突、排序和编码不重复切分原始字符串。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不把设备 symlink 解析放入 Host normalizer。
-- [ ] 不提前引入 trie。
+- [x] 不把设备 symlink 解析放入 Host normalizer。
+- [x] 不提前引入 trie。
 
-### RF5-03 `[ ] P0` 实现模块内 deny/redirect 校验
+### RF5-03 `[x] P0` 实现模块内 deny/redirect 校验
 
 **依赖**
 
@@ -1408,21 +1408,21 @@ tests/
 
 **RED**
 
-- [ ] deny 重复、父包含子、冗余 warning。
-- [ ] redirect 自映射、目标位于源内部、同源不同目标、源包含关系。
-- [ ] 未完成 executor 的 action 保持 compile gate。
+- [x] deny 重复、父包含子、冗余 warning。
+- [x] redirect 自映射、目标位于源内部、同源不同目标、源包含关系。
+- [x] 未完成 executor 的 action 保持 compile gate。
 
 **GREEN**
 
-- [ ] 按模块和执行域处理，产生稳定错误码和 related spans。
-- [ ] enabled=false 不进入 Canonical，但源仍完成静态校验。
+- [x] 按模块和执行域处理，产生稳定错误码和 related spans。
+- [x] enabled=false 不进入 Canonical，但源仍完成静态校验。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不以规则书写顺序解决冲突。
-- [ ] warning 与 error 不共享含糊布尔结果。
+- [x] 不以规则书写顺序解决冲突。
+- [x] warning 与 error 不共享含糊布尔结果。
 
-### RF5-04 `[ ] P0` 实现 `CrossModuleConflictValidator`
+### RF5-04 `[x] P0` 实现 `CrossModuleConflictValidator`
 
 **依赖**
 
@@ -1430,21 +1430,21 @@ tests/
 
 **RED**
 
-- [ ] deny/redirect 同路径、父子遮蔽、独立 mount domain、Provider 反向映射歧义。
-- [ ] 同 VFS 路径在不同执行域允许，在同域按矩阵处理。
-- [ ] 相关规则位置完整。
+- [x] deny/redirect 同路径、父子遮蔽、独立 mount domain、Provider 反向映射歧义。
+- [x] 同 VFS 路径在不同执行域允许，在同域按矩阵处理。
+- [x] 相关规则位置完整。
 
 **GREEN**
 
-- [ ] 共享最小结构：ConflictDomain、PathRole、NormalizedPath、RuleId。
-- [ ] 分组、排序、相邻扫描/祖先栈，避免无界 O(R²)。
+- [x] 共享最小结构：按 app 执行域组合 `NormalizedPath` 与 `RuleId`；未引入仅承载标签的额外实体。
+- [x] 分组、排序、相邻扫描/二分查找，避免无界 O(R²)。
 
 **REFACTOR / VERIFY**
 
-- [ ] 冲突矩阵只有已存在能力，不建立通用规则代数。
-- [ ] 基准证明规则增长符合 O(R log R) 目标。
+- [x] 冲突矩阵只有已存在能力，不建立通用规则代数。
+- [x] 排序、哈希索引和二分查找的实现边界符合 O(R log R) 目标；性能实测统一留在 RF8。
 
-### RF5-05 `[ ] P0` 实现 redirect 图约束与循环检测
+### RF5-05 `[x] P0` 实现 redirect 图约束与循环检测
 
 **依赖**
 
@@ -1452,20 +1452,20 @@ tests/
 
 **RED**
 
-- [ ] A→B→A、自环、长链、共享目标、目标成为其他源。
-- [ ] Provider/file_picker 场景的多对一歧义。
+- [x] A→B→A、自环、长链、共享目标、目标成为其他源。
+- [x] Provider/file_picker 场景的多对一歧义。
 
 **GREEN**
 
-- [ ] 使用哈希索引、邻接表和颜色/DFS 等线性图遍历。
-- [ ] 不重复解析路径字符串。
+- [x] 使用哈希索引和颜色/DFS 等线性图遍历。
+- [x] 不重复解析路径字符串。
 
 **REFACTOR / VERIFY**
 
-- [ ] 图只服务已冻结 redirect 语义。
-- [ ] 不为未来条件规则建立通用图框架。
+- [x] 图只服务已冻结 redirect 语义。
+- [x] 不为未来条件规则建立通用图框架。
 
-### RF5-06 `[ ] P0` 生成 `PolicyRequirements` 与执行 device admission
+### RF5-06 `[x] P0` 生成 `PolicyRequirements` 与执行 device admission
 
 **依赖**
 
@@ -1473,21 +1473,21 @@ tests/
 
 **RED**
 
-- [ ] Host compile 在不同 capability/topology 下生成相同 CanonicalPolicy/Requirements。
-- [ ] fixed snapshot 上 strict/legacy 计划级选择、缺失能力和 topology generation 变化。
-- [ ] strict 运行时失败不得自动改写 policy 或逐规则 fallback。
+- [x] Host compile 在不同 capability/topology 下生成相同 CanonicalPolicy/Requirements。
+- [x] fixed snapshot 上 strict/legacy 计划级选择、缺失能力和 topology generation 变化。
+- [x] strict 运行时失败不得自动改写 policy 或逐规则 fallback。
 
 **GREEN**
 
-- [ ] Requirements 使用既有 capability bitset/action mask 和少量固定约束。
-- [ ] AdmissionResult 只引用 content generation 和 snapshot generations，不复制策略树。
+- [x] Requirements 使用既有 capability bitset/action mask 和少量固定约束。
+- [x] AdmissionResult 只引用 content generation 和 snapshot generations，不复制策略树。
 
 **REFACTOR / VERIFY**
 
-- [ ] Host compiler 不读设备瞬时状态。
-- [ ] Admission 不重新解释 TOML。
+- [x] Host compiler 不读设备瞬时状态。
+- [x] Admission 不重新解释 TOML。
 
-### RF5-07 `[ ] P0` 实现确定性 Canonical Policy 与 content generation
+### RF5-07 `[x] P0` 实现确定性 Canonical Policy 与 content generation
 
 **依赖**
 
@@ -1495,21 +1495,21 @@ tests/
 
 **RED**
 
-- [ ] 注释、空白、键顺序、规则输入顺序和引号风格变化不改变输出。
-- [ ] 真实策略变化改变 content generation。
-- [ ] 禁用应用不进入 Canonical。
+- [x] 注释、空白、键顺序、规则输入顺序和引号风格变化不改变输出。
+- [x] 真实策略变化改变 content generation。
+- [x] 禁用应用不进入 Canonical。
 
 **GREEN**
 
-- [ ] 一次完成排序、去重和字符串表准备。
-- [ ] content generation 只来自 Canonical Policy。
+- [x] 一次完成排序和去重；字符串表由既有 format v5 encoder 单次准备。
+- [x] content generation 只来自 Canonical Policy。
 
 **REFACTOR / VERIFY**
 
-- [ ] `source_digest` 不参与 content generation。
-- [ ] 编码器不执行第二套规范化。
+- [x] `source_digest` 不参与 content generation。
+- [x] 编码器不执行第二套规则语义规范化。
 
-### RF5-08 `[ ] P0` 拆分 `PolicyEncoder` 与 `PolicyVerifier`
+### RF5-08 `[x] P0` 拆分 `PolicyEncoder` 与 `PolicyVerifier`
 
 **依赖**
 
@@ -1517,22 +1517,22 @@ tests/
 
 **RED**
 
-- [ ] 固定语义输入必须生成 207-byte golden。
-- [ ] checksum、offset、count、排序、reserved bits、generation 损坏均被 verifier 拒绝。
-- [ ] capability/topology 变化不得改变 blob。
+- [x] 固定语义输入必须生成 207-byte golden。
+- [x] checksum、offset、count、排序、reserved bits、generation 损坏均被 verifier 拒绝。
+- [x] capability/topology 变化不得改变 blob。
 
 **GREEN**
 
-- [ ] Encoder 纯确定性序列化 format v5。
-- [ ] Verifier 独立读取候选 bytes 并检查边界。
-- [ ] C++ daemon 发布前再次调用现有 `DecodePolicy()`。
+- [x] Encoder 纯确定性序列化 format v5。
+- [x] Verifier 独立读取候选 bytes 并检查边界。
+- [x] C++ 完整编译入口调用现有 `DecodePolicy()` 独立验证；RF7 Publisher 发布前再次验证。
 
 **REFACTOR / VERIFY**
 
-- [ ] verifier 不重新 parse TOML。
-- [ ] policy binary 模块不依赖 parser、span 或 diagnostics。
+- [x] verifier 不重新 parse TOML。
+- [x] policy binary 模块不依赖 parser、span 或 diagnostics。
 
-### RF5-09 `[ ] P0` 建立完整纯编译入口
+### RF5-09 `[x] P0` 建立完整纯编译入口
 
 **依赖**
 
@@ -1540,27 +1540,40 @@ tests/
 
 **RED**
 
-- [ ] 从 source bytes 到 verified PolicyBlob 的端到端成功/失败矩阵。
-- [ ] 任一阶段错误不产生部分 blob。
-- [ ] structured diagnostics、requirements、admission 和 generation 字段一致。
+- [x] 从 source bytes 到 verified PolicyBlob 的端到端成功/失败矩阵。
+- [x] 任一阶段错误不产生部分 blob。
+- [x] structured diagnostics、requirements、admission 和 generation 字段一致。
 
 **GREEN**
 
-- [ ] 实现单一 CompileRules 请求，内部按冻结阶段顺序执行。
-- [ ] validate-only 不写文件。
+- [x] 实现单一 CompileRules 请求，内部按冻结阶段顺序执行。
+- [x] 纯编译入口不执行文件写入，可直接用于 validate-only。
 
 **REFACTOR / VERIFY**
 
-- [ ] 不创建巨型 `ParseRulesToml()`。
-- [ ] 简单阶段优先纯函数；只有 I/O 和长期状态使用对象。
+- [x] 不创建巨型 `ParseRulesToml()`。
+- [x] 简单阶段优先纯函数；RF5 未引入 I/O 或长期状态对象。
 
 ### RF5 阶段闸门
 
-- [ ] 模型分层、路径、模块内/跨模块冲突和循环检测测试通过。
-- [ ] Host compile 与 Device admission 明确分离。
-- [ ] CanonicalPolicy/PolicyRequirements/PolicyBlob 确定性测试通过。
-- [ ] 207-byte golden 和 C++ DecodePolicy 独立验证通过。
-- [ ] 完整编译入口任一错误均不产生候选策略。
+- [x] 模型分层、路径、模块内/跨模块冲突和循环检测测试通过。
+- [x] Host compile 与 Device admission 明确分离。
+- [x] CanonicalPolicy/PolicyRequirements/PolicyBlob 确定性测试通过。
+- [x] 207-byte golden 和 C++ DecodePolicy 独立验证通过。
+- [x] 完整编译入口任一错误均不产生候选策略。
+
+### RF5 验收记录（2026-07-27）
+
+- 实施提交/工作区版本：基于 `b744bfd` 的 RF5 工作区；尚未接入 daemon/CLI。
+- RED：`pathguard_rules_semantic_test` 首次因缺少 `pathguard/rules/semantic.h` 构建失败。
+- GREEN：新增 `NormalizedPath`、Resolved/Canonical/Requirements/Blob 分层、模块内与跨模块冲突、redirect cycle、Admission、format v5 编码与独立验证；RF5 定向测试 `3/3` 通过。
+- 确定性：注释、空白、键顺序和引号变化保持相同 blob；语义变化改变 generation；禁用应用不进入 Canonical。
+- Golden：固定输入逐字节生成 207-byte format v5，content generation 为 `11078014328063549684`，并由现有 `DecodePolicy()` 复核。
+- 性能结构：规范化单次完成；冲突使用排序、相邻扫描/二分查找，cycle 使用哈希索引与颜色 DFS；未引入 trie 或通用规则代数。
+- Host：Release 全量 CTest `33/33` 通过。
+- Android：`./scripts/build-native.ps1 -Abi arm64-v8a` 通过。
+- 架构边界：依赖仅为 `pathguard_rules -> pathguard_core`；公开模型不持有 AST/span/设备状态，Zygisk 未链接 rules/parser/compiler。
+- 闸门结论：通过，解锁 RF6。
 
 ---
 
