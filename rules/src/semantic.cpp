@@ -239,17 +239,6 @@ void ValidateRedirects(ResolvedAppPolicy* app, const OriginMap& origins,
                           "file_picker_requires_redirect", {},
                           DiagnosticSeverity::kError, limits);
         }
-        std::unordered_map<std::string, RuleId> targets;
-        for (const ResolvedRedirectRule& rule : app->redirects) {
-            const auto inserted = targets.emplace(rule.target.bytes, rule.id);
-            if (!inserted.second) {
-                AddDiagnostic(diagnostics, kProviderConflict,
-                              "provider_target_ambiguous",
-                              OriginSpan(origins, rule.id),
-                              DiagnosticSeverity::kError, limits,
-                              OriginSpan(origins, inserted.first->second));
-            }
-        }
     }
 }
 
@@ -298,30 +287,6 @@ void ValidateDeny(ResolvedAppPolicy* app, const OriginMap& origins,
                           OriginSpan(origins, redirect.id),
                           DiagnosticSeverity::kError, limits,
                           OriginSpan(origins, conflict->id));
-        }
-    }
-}
-
-void ValidateProviderAcrossApps(const ResolvedPolicy& policy,
-                                const OriginMap& origins,
-                                const RulesLimits& limits,
-                                std::vector<Diagnostic>* diagnostics) {
-    std::unordered_map<std::string, RuleId> reverse;
-    for (const ResolvedAppPolicy& app : policy.apps) {
-        if (!app.file_picker) continue;
-        for (const std::int32_t user : app.users) {
-            for (const ResolvedRedirectRule& rule : app.redirects) {
-                const std::string key = std::to_string(user) + '\0'
-                    + rule.target.bytes;
-                const auto inserted = reverse.emplace(key, rule.id);
-                if (!inserted.second) {
-                    AddDiagnostic(diagnostics, kProviderConflict,
-                                  "provider_target_ambiguous",
-                                  OriginSpan(origins, rule.id),
-                                  DiagnosticSeverity::kError, limits,
-                                  OriginSpan(origins, inserted.first->second));
-                }
-            }
         }
     }
 }
@@ -468,10 +433,6 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
         output.statistics.conflict_ns += ElapsedNs(conflict_started);
         resolved.apps.push_back(std::move(app));
     }
-    const auto cross_conflict_started = Clock::now();
-    ValidateProviderAcrossApps(resolved, output.origins, limits,
-                               &output.diagnostics);
-    output.statistics.conflict_ns += ElapsedNs(cross_conflict_started);
     if (HasErrors(output.diagnostics)) {
         output.resolved = std::move(resolved);
         return output;

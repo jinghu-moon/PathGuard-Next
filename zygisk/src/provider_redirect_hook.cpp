@@ -72,6 +72,8 @@ using StatVfs64 = struct statvfs64;
 #endif
 using StatVfs64Fn = int (*)(const char*, StatVfs64*);
 using InotifyAddWatchFn = int (*)(int, const char*, uint32_t);
+using ClearIdentityFn = int64_t (*)(void*);
+using RestoreIdentityFn = void (*)(void*, int64_t);
 using NdkCallingUidFn = uid_t (*)();
 using BinderSelfFn = void* (*)();
 using BinderCallingUidFn = uid_t (*)(void*);
@@ -113,19 +115,22 @@ UtimensAtFn g_utimensat = nullptr;
 StatVfsFn g_statvfs = nullptr;
 StatVfs64Fn g_statvfs64 = nullptr;
 InotifyAddWatchFn g_inotify_add_watch = nullptr;
+ClearIdentityFn g_clear_identity = nullptr;
+RestoreIdentityFn g_restore_identity = nullptr;
 NdkCallingUidFn g_ndk_calling_uid = nullptr;
 BinderSelfFn g_binder_self = nullptr;
 BinderCallingUidFn g_binder_calling_uid = nullptr;
 
 struct ThreadState {
     bool in_hook = false;
+    int32_t saved_caller_uid = -1;
+    uint32_t identity_clear_depth = 0;
 };
 
 pthread_key_t g_thread_state_key{};
 uint32_t g_thread_state_key_ready = 0;
 uint32_t g_rewrite_log_count = 0;
 uint32_t g_hooks_enabled = 0;
-CallerMode g_caller_mode = CallerMode::kBinderUid;
 
 void DestroyThreadState(void* value) {
     free(value);
@@ -197,10 +202,10 @@ int32_t RawCallingUid() {
 }
 
 int32_t EffectiveCallingUid() {
-    if (g_caller_mode == CallerMode::kSystemMedia) return -1;
     const int32_t current = RawCallingUid();
-    return current >= 10000 && current != static_cast<int32_t>(getuid())
-        ? current : -1;
+    if (current >= 10000 && current != static_cast<int32_t>(getuid())) return current;
+    ThreadState* state = GetThreadState();
+    return state != nullptr ? state->saved_caller_uid : -1;
 }
 
 void ResolveBinderSymbols() {
@@ -574,6 +579,25 @@ int HookedInotifyAddWatch(int fd, const char* path, uint32_t mask) {
         });
 }
 
+int64_t HookedClearCallingIdentity(void* state) {
+    ThreadState* thread_state = GetThreadState();
+    if (thread_state != nullptr && thread_state->identity_clear_depth++ == 0) {
+        const int32_t uid = RawCallingUid();
+        thread_state->saved_caller_uid =
+            uid >= 10000 && uid != static_cast<int32_t>(getuid()) ? uid : -1;
+    }
+    return g_clear_identity(state);
+}
+
+void HookedRestoreCallingIdentity(void* state, int64_t token) {
+    g_restore_identity(state, token);
+    ThreadState* thread_state = GetThreadState();
+    if (thread_state != nullptr && thread_state->identity_clear_depth > 0
+        && --thread_state->identity_clear_depth == 0) {
+        thread_state->saved_caller_uid = -1;
+    }
+}
+
 // Only PLT-hook libraries that live for the entire lifetime of the process.
 // Hooking transient images is unsafe: ART unloads short-lived libraries (JIT
 // caches, dynamically (un)loaded HAL/AIDL client libraries) during
@@ -768,6 +792,10 @@ InstallResult RegisterHooks(zygisk::Api* api) {
         HOOK("statvfs", HookedStatVfs, g_statvfs),
         HOOK("statvfs64", HookedStatVfs64, g_statvfs64),
         HOOK("inotify_add_watch", HookedInotifyAddWatch, g_inotify_add_watch),
+        HOOK("_ZN7android14IPCThreadState20clearCallingIdentityEv",
+             HookedClearCallingIdentity, g_clear_identity),
+        HOOK("_ZN7android14IPCThreadState21restoreCallingIdentityEl",
+             HookedRestoreCallingIdentity, g_restore_identity),
     };
 #undef HOOK
     static_assert(sizeof(specs) / sizeof(specs[0]) <= 64);
@@ -779,7 +807,7 @@ InstallResult RegisterHooks(zygisk::Api* api) {
     const bool has_open = g_open != nullptr || g_openat != nullptr;
     const bool has_stat = g_stat != nullptr || g_stat64 != nullptr
         || g_fstatat != nullptr || g_fstatat64 != nullptr;
-    result.identity_hooks = false;
+    result.identity_hooks = g_clear_identity != nullptr && g_restore_identity != nullptr;
     const bool filesystem_complete = has_open && has_stat
         && g_access != nullptr && g_opendir != nullptr
         && g_mkdir != nullptr && g_remove != nullptr && g_rename != nullptr
@@ -788,8 +816,7 @@ InstallResult RegisterHooks(zygisk::Api* api) {
         && g_statvfs != nullptr && g_inotify_add_watch != nullptr;
     const bool raw_caller_uid = g_ndk_calling_uid != nullptr
         || (g_binder_self != nullptr && g_binder_calling_uid != nullptr);
-    const bool identity_safe = g_caller_mode == CallerMode::kSystemMedia
-        || raw_caller_uid;
+    const bool identity_safe = raw_caller_uid;
     result.virtualization_active = result.hooks_committed
         && filesystem_complete && identity_safe;
     uint32_t capability = 0;
@@ -802,9 +829,9 @@ InstallResult RegisterHooks(zygisk::Api* api) {
     if (g_rename != nullptr) capability |= 1u << 6;
     if (g_realpath != nullptr) capability |= 1u << 7;
     if (g_chmod != nullptr && g_chown != nullptr) capability |= 1u << 8;
+    if (g_clear_identity != nullptr && g_restore_identity != nullptr) capability |= 1u << 9;
     if (g_inotify_add_watch != nullptr) capability |= 1u << 10;
-    const unsigned identity_mode = g_caller_mode == CallerMode::kSystemMedia
-        ? 0u : result.identity_hooks ? 1u : raw_caller_uid ? 2u : 3u;
+    const unsigned identity_mode = result.identity_hooks ? 1u : raw_caller_uid ? 2u : 3u;
     LOGI("provider virtual hooks: images=%u registrations=%u attempted=%d committed=%d active=%d capability=%x identity_mode=%u "
          "open=%p openat=%p stat=%p stat64=%p access=%p opendir=%p mkdir=%p "
          "remove=%p rename=%p realpath=%p",
@@ -820,7 +847,7 @@ InstallResult RegisterHooks(zygisk::Api* api) {
 }  // namespace
 
 InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
-                      uint32_t rule_count, CallerMode caller_mode) {
+                      uint32_t rule_count) {
     if (api == nullptr || rules == nullptr || rule_count == 0 || rule_count > kMaxRules) {
         return {};
     }
@@ -830,7 +857,6 @@ InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
     }
     __atomic_store_n(&g_hooks_enabled, 0, __ATOMIC_RELEASE);
     g_rule_count = 0;
-    g_caller_mode = caller_mode;
     for (uint32_t index = 0; index < rule_count; ++index) {
         const Rule& input = rules[index];
         if (input.caller_uid < 10000
@@ -838,10 +864,8 @@ InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
             || !ValidLogicalRulePath(input.backing_path)) return {};
         for (uint32_t existing = 0; existing < g_rule_count; ++existing) {
             const PathRule& current = g_rules[existing];
-            const bool same_scope = caller_mode == CallerMode::kSystemMedia
-                ? current.user_id == input.user_id
-                : current.caller_uid == input.caller_uid
-                    && current.user_id == input.user_id;
+            const bool same_scope = current.caller_uid == input.caller_uid
+                && current.user_id == input.user_id;
             if (same_scope && strcmp(current.visible_path, input.visible_path) == 0
                 && strcmp(current.backing_path, input.backing_path) != 0) {
                 LOGE("provider virtual ambiguous rule: uid=%d user=%u visible=%s",
@@ -850,15 +874,13 @@ InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
             }
         }
         PathRule& output = g_rules[g_rule_count++];
-        output.caller_uid = caller_mode == CallerMode::kSystemMedia
-            ? -1 : input.caller_uid;
+        output.caller_uid = input.caller_uid;
         output.user_id = input.user_id;
         strcpy(output.visible_path, input.visible_path);
         strcpy(output.backing_path, input.backing_path);
     }
     ResolveBinderSymbols();
-    if (caller_mode == CallerMode::kBinderUid
-        && g_ndk_calling_uid == nullptr
+    if (g_ndk_calling_uid == nullptr
         && (g_binder_self == nullptr || g_binder_calling_uid == nullptr)) {
         LOGE("provider virtual Binder calling UID unavailable");
         return {};
@@ -867,9 +889,9 @@ InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
     if (ShouldEnableHooks(result)) {
         __atomic_store_n(&g_hooks_enabled, 1, __ATOMIC_RELEASE);
     }
-    LOGI("provider virtual installed: rules=%u caller_mode=%u binder_ndk=%d binder_cpp=%d "
+    LOGI("provider virtual installed: rules=%u caller_scope=binder_uid binder_ndk=%d binder_cpp=%d "
          "identity_hooks=%d attempted=%d committed=%d active=%d",
-         g_rule_count, static_cast<unsigned>(g_caller_mode),
+         g_rule_count,
          g_ndk_calling_uid != nullptr ? 1 : 0,
          g_binder_self != nullptr && g_binder_calling_uid != nullptr ? 1 : 0,
          result.identity_hooks ? 1 : 0,

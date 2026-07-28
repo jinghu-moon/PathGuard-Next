@@ -71,6 +71,16 @@ add_executable(pathguard_runtime_status_test unit/runtime_status_test.cpp)
 target_link_libraries(pathguard_runtime_status_test PRIVATE pathguard_core)
 add_test(NAME pathguard_runtime_status_test COMMAND pathguard_runtime_status_test)
 
+add_executable(pathguard_hide_probe_contract_test
+  unit/hide_probe_contract_test.cpp
+  device/hide/hide_probe_contract.cpp
+)
+target_include_directories(pathguard_hide_probe_contract_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/device/hide
+)
+add_test(NAME pathguard_hide_probe_contract_test
+  COMMAND pathguard_hide_probe_contract_test)
+
 add_executable(pathguard_rules_contract_test unit/rules_contract_test.cpp)
 target_include_directories(pathguard_rules_contract_test PRIVATE
   ${CMAKE_SOURCE_DIR}/rules/include

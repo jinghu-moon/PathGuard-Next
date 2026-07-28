@@ -1,7 +1,7 @@
 set(scan_text "")
 if(DEFINED TEST_TEXT)
   set(scan_text "${TEST_TEXT}")
-elseif(DEFINED ELF AND DEFINED NM AND DEFINED STRINGS)
+elseif(DEFINED ELF AND DEFINED NM AND DEFINED STRINGS AND DEFINED READELF)
   if(NOT EXISTS "${ELF}")
     message(FATAL_ERROR "Zygisk ELF does not exist: ${ELF}")
   endif()
@@ -32,6 +32,15 @@ elseif(DEFINED ELF AND DEFINED NM AND DEFINED STRINGS)
   if(NOT strings_result EQUAL 0)
     message(FATAL_ERROR "llvm-strings failed: ${strings_error}")
   endif()
+  execute_process(
+    COMMAND "${READELF}" -W -l "${ELF}"
+    RESULT_VARIABLE readelf_result
+    OUTPUT_VARIABLE program_headers
+    ERROR_VARIABLE readelf_error
+  )
+  if(NOT readelf_result EQUAL 0)
+    message(FATAL_ERROR "llvm-readelf failed: ${readelf_error}")
+  endif()
   string(APPEND scan_text "${nm_output}\n${dynamic_output}\n${strings_output}")
   if(DEFINED LINK_MAP AND EXISTS "${LINK_MAP}")
     file(READ "${LINK_MAP}" link_map_text)
@@ -40,7 +49,14 @@ elseif(DEFINED ELF AND DEFINED NM AND DEFINED STRINGS)
     message(FATAL_ERROR "Zygisk link map does not exist: ${LINK_MAP}")
   endif()
 else()
-  message(FATAL_ERROR "provide TEST_TEXT or ELF/NM/STRINGS")
+  message(FATAL_ERROR "provide TEST_TEXT or ELF/NM/STRINGS/READELF")
+endif()
+
+if(DEFINED TEST_PROGRAM_HEADERS)
+  set(program_headers "${TEST_PROGRAM_HEADERS}")
+endif()
+if(DEFINED program_headers AND program_headers MATCHES "(^|\n)[ \t]*TLS[ \t]+")
+  message(FATAL_ERROR "Zygisk ELF contains PT_TLS, unsupported by Zygisk Next builtin linker before 1.4.0")
 endif()
 
 set(forbidden

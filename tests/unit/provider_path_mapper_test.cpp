@@ -57,20 +57,58 @@ int main() {
     assert(std::strcmp(output,
         "/storage/emulated/10/Download/target/file") == 0);
 
-    PathRule media_rule = rules[0];
-    media_rule.caller_uid = -1;
-    assert(RewriteAbsolutePath(&media_rule, 1, -1,
-        "/storage/emulated/0/Download/localsend-source/media.jpg",
-        output, sizeof(output)));
+    PathRule pictures_rules[2]{};
+    pictures_rules[0].caller_uid = 10358;
+    pictures_rules[0].user_id = 0;
+    std::strcpy(pictures_rules[0].visible_path, "Pictures");
+    std::strcpy(pictures_rules[0].backing_path, "Download/localsend-redirect");
+    pictures_rules[1].caller_uid = 10359;
+    pictures_rules[1].user_id = 0;
+    std::strcpy(pictures_rules[1].visible_path, "Pictures");
+    std::strcpy(pictures_rules[1].backing_path, "Download/other-redirect");
+    assert(RewriteAbsolutePath(pictures_rules, 2, 10358,
+        "/storage/emulated/0/Pictures/received.jpg", output, sizeof(output)));
     assert(std::strcmp(output,
-        "/storage/emulated/0/Download/localsend-redirect/media.jpg") == 0);
-    assert(RestoreAbsolutePath(&media_rule, 1, -1,
+        "/storage/emulated/0/Download/localsend-redirect/received.jpg") == 0);
+    assert(RewriteAbsolutePath(pictures_rules, 2, 10359,
+        "/storage/emulated/0/Pictures/received.jpg", output, sizeof(output)));
+    assert(std::strcmp(output,
+        "/storage/emulated/0/Download/other-redirect/received.jpg") == 0);
+    assert(!RewriteAbsolutePath(pictures_rules, 2, 10360,
+        "/storage/emulated/0/Pictures/received.jpg", output, sizeof(output)));
+    assert(!RewriteAbsolutePath(pictures_rules, 2, -1,
+        "/storage/emulated/0/Pictures/received.jpg", output, sizeof(output)));
+    assert(RestoreAbsolutePath(rules, 2, 10382,
         "/storage/emulated/0/Download/localsend-redirect/media.jpg",
         output, sizeof(output)));
     assert(std::strcmp(output,
         "/storage/emulated/0/Download/localsend-source/media.jpg") == 0);
-    assert(!RestoreAbsolutePath(&media_rule, 1, -1,
+    assert(!RestoreAbsolutePath(rules, 2, 10382,
         "/storage/emulated/0/Download/other/media.jpg", output, sizeof(output)));
+
+    PathRule shared_target[2]{};
+    shared_target[0].caller_uid = 10358;
+    shared_target[0].user_id = 0;
+    std::strcpy(shared_target[0].visible_path, "Pictures");
+    std::strcpy(shared_target[0].backing_path, "Download/localsend-redirect");
+    shared_target[1].caller_uid = 10358;
+    shared_target[1].user_id = 0;
+    std::strcpy(shared_target[1].visible_path, "Download/localsend-source");
+    std::strcpy(shared_target[1].backing_path, "Download/localsend-redirect");
+    assert(RewriteAbsolutePath(shared_target, 2, 10358,
+        "/storage/emulated/0/Pictures/image.jpg", output, sizeof(output)));
+    assert(std::strcmp(output,
+        "/storage/emulated/0/Download/localsend-redirect/image.jpg") == 0);
+    assert(RewriteAbsolutePath(shared_target, 2, 10358,
+        "/storage/emulated/0/Download/localsend-source/document.pdf",
+        output, sizeof(output)));
+    assert(std::strcmp(output,
+        "/storage/emulated/0/Download/localsend-redirect/document.pdf") == 0);
+    assert(RestoreAbsolutePath(shared_target, 2, 10358,
+        "/storage/emulated/0/Download/localsend-redirect/received.bin",
+        output, sizeof(output)));
+    assert(std::strcmp(output,
+        "/storage/emulated/0/Download/localsend-source/received.bin") == 0);
 
     char small[8]{};
     assert(!RewriteAbsolutePath(rules, 2, 10382,

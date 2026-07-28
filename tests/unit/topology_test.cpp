@@ -65,6 +65,47 @@ int main() {
     assert(topology.mounts[0].aliases[0].mount_id == 74570);
     assert(topology.mounts[0].aliases[0].path == "/mnt/user/0/emulated");
 
+    const std::string android16_mountinfo =
+        "242 39 254:55 / /data rw shared:73 - f2fs /dev/block/dm-55 rw\n"
+        "10112 235 0:286 / /storage/emulated rw shared:71 - fuse /dev/fuse rw\n"
+        "10113 45 0:286 / /mnt/user/0/emulated rw shared:71 - fuse /dev/fuse rw\n"
+        "10325 45 254:55 /media /mnt/pass_through/0/emulated rw shared:73 - f2fs /dev/block/dm-55 rw\n";
+    assert(pathguard::ParseMountInfo(android16_mountinfo, &topology, &error));
+    assert(topology.mounts.size() == 1);
+    assert(topology.mounts[0].mount_id == 10112);
+    assert(topology.mounts[0].visible_root == "/storage/emulated/0");
+    assert(topology.mounts[0].backend_root == "/data/media/0");
+    assert(topology.mounts[0].filesystem_type == "fuse");
+    assert(topology.mounts[0].aliases.size() == 1);
+    assert(topology.mounts[0].aliases[0].mount_id == 10113);
+    assert(topology.mounts[0].aliases[0].path == "/mnt/user/0/emulated");
+
+    const std::string android16_wrong_device =
+        "242 39 254:55 / /data rw - f2fs /dev/block/dm-55 rw\n"
+        "10112 235 0:286 / /storage/emulated rw - fuse /dev/fuse rw\n"
+        "10113 45 0:286 / /mnt/user/0/emulated rw - fuse /dev/fuse rw\n"
+        "10325 45 254:56 /media /mnt/pass_through/0/emulated rw - f2fs /dev/block/dm-56 rw\n";
+    assert(!pathguard::ParseMountInfo(
+        android16_wrong_device, &unsupported, &error));
+    assert(unsupported.unsupported_reason == "missing backend evidence for user 0");
+
+    const std::string android16_wrong_subtree =
+        "242 39 254:55 / /data rw - f2fs /dev/block/dm-55 rw\n"
+        "10112 235 0:286 / /storage/emulated rw - fuse /dev/fuse rw\n"
+        "10113 45 0:286 / /mnt/user/0/emulated rw - fuse /dev/fuse rw\n"
+        "10325 45 254:55 /not-media /mnt/pass_through/0/emulated rw - f2fs /dev/block/dm-55 rw\n";
+    assert(!pathguard::ParseMountInfo(
+        android16_wrong_subtree, &unsupported, &error));
+    assert(unsupported.unsupported_reason == "missing backend evidence for user 0");
+
+    const std::string android16_missing_data_mount =
+        "10112 235 0:286 / /storage/emulated rw - fuse /dev/fuse rw\n"
+        "10113 45 0:286 / /mnt/user/0/emulated rw - fuse /dev/fuse rw\n"
+        "10325 45 254:55 /media /mnt/pass_through/0/emulated rw - f2fs /dev/block/dm-55 rw\n";
+    assert(!pathguard::ParseMountInfo(
+        android16_missing_data_mount, &unsupported, &error));
+    assert(unsupported.unsupported_reason == "missing backend evidence for user 0");
+
     const std::string missing_backend =
         "74570 47 0:119 / /mnt/user/0/emulated rw - fuse /dev/fuse rw\n"
         "74569 117 0:119 / /storage/emulated rw - fuse /dev/fuse rw\n";

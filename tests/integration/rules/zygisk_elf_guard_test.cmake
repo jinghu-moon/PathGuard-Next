@@ -20,3 +20,14 @@ execute_process(
 if(injected_result EQUAL 0)
   message(FATAL_ERROR "ELF guard accepted injected compiler symbol")
 endif()
+
+execute_process(
+  COMMAND "${CMAKE_COMMAND}"
+    "-DTEST_TEXT=mount_executor"
+    "-DTEST_PROGRAM_HEADERS=  TLS            0x001000 0x001000 0x001000 0x000004 0x00000c R 0x4"
+    -P "${verifier}"
+  RESULT_VARIABLE tls_result
+)
+if(tls_result EQUAL 0)
+  message(FATAL_ERROR "ELF guard accepted PT_TLS")
+endif()

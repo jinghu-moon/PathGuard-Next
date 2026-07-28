@@ -60,10 +60,11 @@ int main() {
         kRedirectCycle) || HasCode(Compile(
         "redirect = [\"A\" -> \"B\", \"B\" -> \"A\"]\n"),
         kRuleConflict));
-    assert(HasCode(Compile(
+    const RulesBuildResult shared_target = Compile(
         "file_picker = true\n"
-        "redirect = [\"A\" -> \"Shared\", \"B\" -> \"Shared\"]\n"),
-        kProviderConflict));
+        "redirect = [\"A\" -> \"Shared\", \"B\" -> \"Shared\"]\n");
+    assert(shared_target.ok());
+    assert(shared_target.canonical->apps.front().redirects.size() == 2);
     assert(HasCode(Compile("file_picker = true\nredirect = []\n"),
                    kInvalidValue));
 

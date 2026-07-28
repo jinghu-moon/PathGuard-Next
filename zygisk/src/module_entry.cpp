@@ -2256,16 +2256,12 @@ public:
             }
             const pathguard::provider_redirect::InstallResult install_result =
                 pathguard::provider_redirect::Install(
-                api_, env_, provider_rules, provider_rule_count,
-                media_provider
-                    ? pathguard::provider_redirect::CallerMode::kSystemMedia
-                    : pathguard::provider_redirect::CallerMode::kBinderUid);
+                api_, env_, provider_rules, provider_rule_count);
             provider_redirect_installed_ = install_result.virtualization_active;
             provider_redirect_module_retained_ =
                 pathguard::provider_redirect::MustRetainModule(install_result);
-            LOGI("provider redirect specialize: process=%s rules=%u mode=%u attempted=%d committed=%d installed=%d",
+            LOGI("provider redirect specialize: process=%s rules=%u caller_scope=binder_uid attempted=%d committed=%d installed=%d",
                  media_provider ? "media" : "external_storage", provider_rule_count,
-                 media_provider ? 1u : 0u,
                  install_result.hook_registration_attempted ? 1 : 0,
                  install_result.hooks_committed ? 1 : 0,
                  provider_redirect_installed_ ? 1 : 0);

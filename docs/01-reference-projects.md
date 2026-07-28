@@ -137,9 +137,9 @@ Phase 0B 不得直接照抄该项目；必须改为有界消息、同步确认�
 
 ---
 
-## C 类：内核级路线（取舍参考，明确不采用）
+## C 类：内核级路线（`hide` 可选后端研究）
 
-这一类项目代表比 mount namespace 更彻底、但也要求更多前置条件（定制内核）的路线。读它们的目的是为 5.6 节"与内核补丁路线的取舍"提供具体、可核实的技术依据，而不是评估要不要采用。
+这一类项目代表比 mount namespace 更彻底、但也要求更多前置条件的路线。现有 `deny`/`redirect` 仍以 mount namespace 为核心；若实现“目标名字不存在”的 exact `hide`，内核 VFS 后端已重新进入候选。必须精读真实 hook、作用域和失败边界，不能只看功能列表。
 
 ### C1. susfs4ksu-module（`sidex15/susfs4ksu-module`）
 
@@ -147,21 +147,41 @@ Phase 0B 不得直接照抄该项目；必须改为有界消息、同步确认�
 
 **技术路线**：依赖一个打了 SUSFS patch 的定制内核，通过 `sus_path`、`sus_mount`、`sus_open_redirect` 等配置项在内核层面直接处理路径解析和挂载表可见性。
 
-**参考价值**：对应 **5.6 节 ADR-009**：这是"要求定制内核"这条路径的直接证据来源——它的 README 和 issue 模板都明确要求用户提供"SUSFS patched kernel"，issue 里大量关于"内核版本不匹配导致模块失效"的报告，具体印证了 5.6 节"以更大设备覆盖面换取内核补丁能力"这个取舍判断的现实合理性。
+**参考价值**：SUSFS 2.2 在 namei/dcache/open/getdents 内联路径处理 `sus_path`，并已专门处理 FUSE inode，是 exact hide 覆盖面的主要参考。它同时证明“路径隐藏”和“挂载表隐藏”是两类独立机制。
 
-**注意事项**：不要花时间读具体实现代码，读文档和 issue 了解"需要什么前置条件、解决了什么问题"就够，这条路线本身已经被 ADR-009 排除在核心方案之外。
+**注意事项**：当前 `add_sus_path` ABI 没有 package/UID/namespace scope，只对 KernelSU 标记的一类 umounted App 生效；不能直接作为 PathGuard per-app adapter。`refer/hide-refer/susfs4ksu-master` 冻结在 1.3.8，准确结论必须以 GitLab 对应内核分支和 `refer/susfs4ksu` 的 2.x 源码为准。
 
 ### C2. susfs4ksu 内核补丁（GitHub 镜像 `Star-Seven/susfs4ksu`）
 
 **功能定位**：C1 依赖的内核补丁本体。
 
-**技术路线**：直接修改内核符号表和 VFS 相关代码路径，实现路径隐藏和重定向。
+**技术路线**：直接修改 namei、dcache、open、getdents、procfs 等内核路径，并用 inode/address-space flags 标记目标，实现路径隐藏、重定向和挂载信息伪装。
 
-**参考价值**：了解"内核级方案到底要改多深"的直观印象——对比你自己纯用户态 + 标准 namespace API 的方案，能更清楚地说明为什么 PathGuard Next 选择的路线对设备的侵入性小得多。
+**参考价值**：确定 exact hide 必须同时处理 lookup、readdir 和 mutation，且 FUSE、cache 与 task scope 都是正确性条件；用于设计最小 PathGuard 内核 patch，而不是复制 SUSFS 的 Root 痕迹隐藏体系。
 
-**注意事项**：原始仓库在 GitLab（`gitlab.com/simonpunk/susfs4ksu`），按内核版本分了多个分支维护，本仓库是 GitHub 镜像，可能不是最新内容，只用于快速浏览代码结构，不作为准确性依据。
+**注意事项**：原始仓库在 GitLab（`gitlab.com/simonpunk/susfs4ksu`），按内核版本分支维护。2.2 虽支持 FUSE，但仍不是 per-app policy；不要沿用旧版“拒绝 FUSE”的结论，也不要把全局 inode 标记直接搬进 PathGuard。
 
-### C3. NoMount（`maxsteeel/nomount`）
+### C3. LKM-PathMask（`Andrea-lyz/LKM-PathMask`）
+
+**功能定位**：Android arm64/GKI 外部内核模块，按 UID scope 将最多 16 个已存在路径伪装为 `ENOENT`，可选择从目录列表移除。
+
+**技术路线**：加载时解析目标 `(dev, inode)`；用 `inode_permission`、`vfs_getattr`、7 个 `__arm64_sys_*` kretprobe 改写返回值，并在 `getdents64` 返回后复制和压缩用户缓冲。用户态模块负责 KMI 包分发、包名转 UID、启动等待、热重载和诊断。
+
+**参考价值**：证明“外部 LKM + KMI 矩阵”是低于完整自定义内核的一种交付门槛，也提供了很实用的能力诊断、连续加载失败保护和 WebUI 运维样本。
+
+**注意事项**：v2.5.0 syscall 兜底只匹配绝对路径文本；`openat` 成功后关闭 FD 不能撤销 `O_TRUNC/O_CREAT` 副作用；getdents 固定 `maxactive`、64 KiB 分配和复制失败会 fail-open。它是 H0 对照对象，不是 exact hide 可直接复用后端。
+
+### C4. BRENE（`rrr333nnn333/BRENE`）
+
+**功能定位**：面向 SUSFS 2.2+ 的 Shell/WebUI 配置前端，集中管理 suspicious path、mount、maps 和系统伪装选项。
+
+**技术路线**：安装/调用同一个 SUSFS 用户态二进制，启动时枚举路径并写入 `add_sus_path` 或 `add_sus_path_loop`；没有新增内核 hook，也没有改变 SUSFS task scope。
+
+**参考价值**：展示共享存储路径重标记、配置持久化和用户诊断的产品化成本。其对 `..5.u.S` 的 inotify 清理也直接暴露了可写共享存储下的写入探测边界。
+
+**注意事项**：BRENE 不是独立 hide backend，不能用其 WebUI 功能数量推导 SUSFS 具备 per-app 能力；项目采用 AGPL-3.0，只做行为和运维参考。
+
+### C5. NoMount（`maxsteeel/nomount`）
 
 **功能定位**：内核级文件注入和路径重定向框架，专门设计为不触碰挂载表。
 
@@ -169,9 +189,9 @@ Phase 0B 不得直接照抄该项目；必须改为有界消息、同步确认�
 
 **参考价值**：对应 **5.5 节挂载可见性**的技术背景资料。它证明避免 mountinfo 暴露需要在 VFS 多个入口保持虚拟路径与真实路径一致，而不是简单过滤一个 procfs 文件。可以作为未来内核后端评估复杂度的旁证。
 
-**注意事项**：内核态改动完全超出 PathGuard Next 的项目边界（C++20 用户态 + 标准 Root 能力），不需要理解实现细节，了解设计目标即可。
+**注意事项**：它的目标是文件注入/重定向，不是 per-app 共享存储 hide；只提取 static key、RCU/hash 和无 mount 数据面的设计事实。
 
-### C4. APatch（`bmax121/APatch`）
+### C6. APatch（`bmax121/APatch`）
 
 **功能定位**：融合 Magisk 便捷安装方式和 KernelSU 内核修补能力的 Root 方案，依赖底层的 KernelPatch。
 
@@ -273,10 +293,10 @@ Phase 0B 不得直接照抄该项目；必须改为有界消息、同步确认�
 2. **AOSP MediaProvider（D2）** —— 7.4 节的一手依据，读代码比读文档更精确。
 3. **riru_storage_redirect（B1）** —— 反面教材里信息密度最高的一个，变更日志本身就是一部维护成本的血泪史。
 4. **KernelSU（D1）** —— 长期跟踪对象，不是一次性阅读完就结束。
+5. **SUSFS 2.2（C1/C2）与 LKM-PathMask（C3）** —— 实现 `hide` 前必须精读的正反样本，分别确认内联 VFS 覆盖面和外部 kretprobe 的 fail-open 边界；BRENE（C4）只需跟踪用户态 ABI 和运维问题。
+6. **rvmm-zygisk-mount（A5）** —— 仅用于阅读最短调用链和识别启动竞态、悬空指针等反例，不作为实现模板。
 
-5. **rvmm-zygisk-mount（A5）** —— 仅用于阅读最短调用链和识别启动竞态、悬空指针等反例，不作为实现模板。
-
-其余项目（C 类内核路线、E 类控制协议、F 类非 Root 对照组）建议只读 README 和关键文档；其中 NoMount 的 VFS 集成文档值得查看，以理解内核后端的实际复杂度。E 类项目重点看身份校验和服务生命周期，不需要迁移 Binder 实现。
+其余项目（E 类控制协议、F 类非 Root 对照组）建议只读 README 和关键文档。NoMount 的 VFS 集成仍值得查看，以理解无 mount 后端的实际复杂度；E 类项目重点看身份校验和服务生命周期，不需要迁移 Binder 实现。`hide` 的完整审计结论和 H0 顺序以 `docs/07-hide-capability-research-and-design.md` 为准。
 
 ## 源码复核后的直接行动项
 

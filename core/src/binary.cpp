@@ -221,8 +221,6 @@ bool CanonicalizeDocument(const PolicyDocument& input, PolicyDocument* output,
     }
     *output = input;
     std::unordered_set<std::string> packages;
-    std::unordered_map<std::string, std::string> provider_visible_to_backing;
-    std::unordered_map<std::string, std::string> provider_backing_to_visible;
     for (AppPolicy& app : output->apps) {
         if (!packages.insert(app.package).second) {
             return Fail(error, "duplicate package");
@@ -236,25 +234,6 @@ bool CanonicalizeDocument(const PolicyDocument& input, PolicyDocument* output,
             if (rule.action != MountAction::kRedirect
                 && rule.action != MountAction::kDeny) {
                 return Fail(error, "mount action is not executable in Phase R1");
-            }
-            if (rule.action == MountAction::kRedirect
-                && app.provider_compat == ProviderCompat::kVirtualize) {
-                for (const std::string& user : app.users) {
-                    const std::string visible_key = user + '\0' + rule.visible_path;
-                    const std::string backing_key = user + '\0' + rule.backing_path;
-                    const auto visible = provider_visible_to_backing.emplace(
-                        visible_key, rule.backing_path);
-                    if (!visible.second && visible.first->second != rule.backing_path) {
-                        return Fail(error,
-                                    "ambiguous provider source across packages");
-                    }
-                    const auto backing = provider_backing_to_visible.emplace(
-                        backing_key, rule.visible_path);
-                    if (!backing.second && backing.first->second != rule.visible_path) {
-                        return Fail(error,
-                                    "ambiguous provider backing across packages");
-                    }
-                }
             }
         }
         if (!app.events.empty()) {

@@ -10,11 +10,6 @@
 
 namespace pathguard::provider_redirect {
 
-enum class CallerMode : uint8_t {
-    kBinderUid = 0,
-    kSystemMedia = 1,
-};
-
 struct Rule {
     int32_t caller_uid;
     uint32_t user_id;
@@ -23,6 +18,6 @@ struct Rule {
 };
 
 InstallResult Install(zygisk::Api* api, JNIEnv* env, const Rule* rules,
-                      uint32_t rule_count, CallerMode caller_mode);
+                      uint32_t rule_count);
 
 }  // namespace pathguard::provider_redirect
