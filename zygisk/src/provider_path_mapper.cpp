@@ -56,6 +56,22 @@ bool HasSafeTail(const char* tail) {
 
 }  // namespace
 
+bool MatchesVisiblePath(const PathRule* rules, uint32_t rule_count,
+                        const char* path) {
+    if (rules == nullptr || path == nullptr || path[0] != '/') return false;
+    for (uint32_t index = 0; index < rule_count; ++index) {
+        const PathRule& rule = rules[index];
+        const char* suffix = nullptr;
+        char root[128]{};
+        if (!LogicalSuffix(path, rule.user_id, &suffix, root, sizeof(root))) continue;
+        const char* tail = nullptr;
+        if (MatchesLogicalPath(suffix, rule.visible_path, &tail) && HasSafeTail(tail)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool RewriteAbsolutePath(const PathRule* rules, uint32_t rule_count,
                          int32_t caller_uid, const char* path,
                          char* output, size_t capacity) {

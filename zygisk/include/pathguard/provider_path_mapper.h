@@ -18,6 +18,9 @@ struct PathRule {
     char backing_path[PATH_MAX]{};
 };
 
+bool MatchesVisiblePath(const PathRule* rules, uint32_t rule_count,
+                        const char* path);
+
 bool RewriteAbsolutePath(const PathRule* rules, uint32_t rule_count,
                          int32_t caller_uid, const char* path,
                          char* output, size_t capacity);

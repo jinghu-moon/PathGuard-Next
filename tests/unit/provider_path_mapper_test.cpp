@@ -4,6 +4,7 @@
 #include "test_assert.h"
 
 using pathguard::provider_redirect::PathRule;
+using pathguard::provider_redirect::MatchesVisiblePath;
 using pathguard::provider_redirect::RewriteAbsolutePath;
 using pathguard::provider_redirect::RestoreAbsolutePath;
 
@@ -19,6 +20,12 @@ int main() {
     std::strcpy(rules[1].backing_path, "Download/target");
 
     char output[PATH_MAX]{};
+    assert(MatchesVisiblePath(rules, 2,
+        "/storage/emulated/0/Download/localsend-source/file"));
+    assert(!MatchesVisiblePath(rules, 2,
+        "/storage/emulated/0/Download/localsend-source-other/file"));
+    assert(!MatchesVisiblePath(rules, 2,
+        "/storage/emulated/0/Download/localsend-source/../escape"));
     assert(RewriteAbsolutePath(rules, 2, 10382,
         "/storage/emulated/0/Download/localsend-source", output, sizeof(output)));
     assert(std::strcmp(output,

@@ -5,9 +5,12 @@
 
 #include <dirent.h>
 #include <dlfcn.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <link.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -17,6 +20,7 @@
 #include <sys/inotify.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace pathguard::provider_redirect {
@@ -24,7 +28,6 @@ namespace {
 
 constexpr char kLogTag[] = "PathGuard";
 constexpr uint32_t kMaxRules = 64;
-constexpr uint32_t kMaxImages = 256;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kLogTag, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kLogTag, __VA_ARGS__)
@@ -72,13 +75,6 @@ using InotifyAddWatchFn = int (*)(int, const char*, uint32_t);
 using NdkCallingUidFn = uid_t (*)();
 using BinderSelfFn = void* (*)();
 using BinderCallingUidFn = uid_t (*)(void*);
-using ClearIdentityFn = int64_t (*)(void*);
-using RestoreIdentityFn = void (*)(void*, int64_t);
-
-struct Image {
-    dev_t device = 0;
-    ino_t inode = 0;
-};
 
 PathRule g_rules[kMaxRules]{};
 uint32_t g_rule_count = 0;
@@ -117,16 +113,43 @@ UtimensAtFn g_utimensat = nullptr;
 StatVfsFn g_statvfs = nullptr;
 StatVfs64Fn g_statvfs64 = nullptr;
 InotifyAddWatchFn g_inotify_add_watch = nullptr;
-ClearIdentityFn g_clear_identity = nullptr;
-RestoreIdentityFn g_restore_identity = nullptr;
 NdkCallingUidFn g_ndk_calling_uid = nullptr;
 BinderSelfFn g_binder_self = nullptr;
 BinderCallingUidFn g_binder_calling_uid = nullptr;
-thread_local bool g_in_hook = false;
-thread_local int32_t g_saved_caller_uid = -1;
-thread_local uint32_t g_identity_clear_depth = 0;
+
+struct ThreadState {
+    bool in_hook = false;
+};
+
+pthread_key_t g_thread_state_key{};
+uint32_t g_thread_state_key_ready = 0;
 uint32_t g_rewrite_log_count = 0;
+uint32_t g_hooks_enabled = 0;
 CallerMode g_caller_mode = CallerMode::kBinderUid;
+
+void DestroyThreadState(void* value) {
+    free(value);
+}
+
+bool InitializeThreadStateKey() {
+    if (__atomic_load_n(&g_thread_state_key_ready, __ATOMIC_ACQUIRE) != 0) return true;
+    if (pthread_key_create(&g_thread_state_key, DestroyThreadState) != 0) return false;
+    __atomic_store_n(&g_thread_state_key_ready, 1, __ATOMIC_RELEASE);
+    return true;
+}
+
+ThreadState* GetThreadState() {
+    if (__atomic_load_n(&g_thread_state_key_ready, __ATOMIC_ACQUIRE) == 0) return nullptr;
+    auto* state = static_cast<ThreadState*>(pthread_getspecific(g_thread_state_key));
+    if (state != nullptr) return state;
+    state = static_cast<ThreadState*>(calloc(1, sizeof(ThreadState)));
+    if (state == nullptr) return nullptr;
+    if (pthread_setspecific(g_thread_state_key, state) != 0) {
+        free(state);
+        return nullptr;
+    }
+    return state;
+}
 
 bool ValidLogicalRulePath(const char* path) {
     if (path == nullptr || path[0] == '\0' || path[0] == '/'
@@ -152,10 +175,13 @@ bool ValidLogicalRulePath(const char* path) {
 
 class HookGuard final {
 public:
-    HookGuard() : outer_(!g_in_hook) { if (outer_) g_in_hook = true; }
-    ~HookGuard() { if (outer_) g_in_hook = false; }
+    HookGuard() : state_(GetThreadState()), outer_(state_ != nullptr && !state_->in_hook) {
+        if (outer_) state_->in_hook = true;
+    }
+    ~HookGuard() { if (outer_) state_->in_hook = false; }
     bool outer() const { return outer_; }
 private:
+    ThreadState* state_;
     bool outer_;
 };
 
@@ -173,8 +199,8 @@ int32_t RawCallingUid() {
 int32_t EffectiveCallingUid() {
     if (g_caller_mode == CallerMode::kSystemMedia) return -1;
     const int32_t current = RawCallingUid();
-    if (current >= 10000 && current != static_cast<int32_t>(getuid())) return current;
-    return g_saved_caller_uid;
+    return current >= 10000 && current != static_cast<int32_t>(getuid())
+        ? current : -1;
 }
 
 void ResolveBinderSymbols() {
@@ -217,10 +243,18 @@ bool ResolveAtPath(int dirfd, const char* path, char* output, size_t capacity) {
     return written > 0 && static_cast<size_t>(written) < capacity;
 }
 
-bool RewriteAtPath(int32_t uid, int dirfd, const char* path,
-                   char* absolute, char* output) {
-    return ResolveAtPath(dirfd, path, absolute, PATH_MAX)
-        && RewriteAbsolutePath(g_rules, g_rule_count, uid, absolute, output, PATH_MAX);
+bool RewriteAtPath(int dirfd, const char* path, char* absolute, char* output,
+                   int32_t* caller_uid) {
+    if (!ResolveAtPath(dirfd, path, absolute, PATH_MAX)
+        || !MatchesVisiblePath(g_rules, g_rule_count, absolute)) {
+        return false;
+    }
+    const int32_t uid = EffectiveCallingUid();
+    if (!RewriteAbsolutePath(g_rules, g_rule_count, uid, absolute, output, PATH_MAX)) {
+        return false;
+    }
+    *caller_uid = uid;
+    return true;
 }
 
 void LogRewrite(const char* operation, int32_t uid,
@@ -233,12 +267,15 @@ void LogRewrite(const char* operation, int32_t uid,
 template <typename Function>
 auto WithPath(const char* operation, int dirfd, const char* path,
               Function function) -> decltype(function(dirfd, path)) {
+    if (__atomic_load_n(&g_hooks_enabled, __ATOMIC_ACQUIRE) == 0) {
+        return function(dirfd, path);
+    }
     HookGuard guard;
     if (!guard.outer() || path == nullptr) return function(dirfd, path);
-    const int32_t uid = EffectiveCallingUid();
     char absolute[PATH_MAX]{};
     char rewritten[PATH_MAX]{};
-    if (!RewriteAtPath(uid, dirfd, path, absolute, rewritten)) {
+    int32_t uid = -1;
+    if (!RewriteAtPath(dirfd, path, absolute, rewritten, &uid)) {
         return function(dirfd, path);
     }
     LogRewrite(operation, uid, absolute, rewritten);
@@ -387,17 +424,22 @@ int HookedRmdir(const char* path) {
 template <typename Function>
 int WithTwoPaths(const char* operation, int old_dirfd, const char* old_path,
                  int new_dirfd, const char* new_path, Function function) {
+    if (__atomic_load_n(&g_hooks_enabled, __ATOMIC_ACQUIRE) == 0) {
+        return function(old_dirfd, old_path, new_dirfd, new_path);
+    }
     HookGuard guard;
     if (!guard.outer() || old_path == nullptr || new_path == nullptr) {
         return function(old_dirfd, old_path, new_dirfd, new_path);
     }
-    const int32_t uid = EffectiveCallingUid();
     char old_absolute[PATH_MAX]{}, old_rewritten[PATH_MAX]{};
     char new_absolute[PATH_MAX]{}, new_rewritten[PATH_MAX]{};
+    int32_t old_uid = -1;
+    int32_t new_uid = -1;
     const bool old_changed = RewriteAtPath(
-        uid, old_dirfd, old_path, old_absolute, old_rewritten);
+        old_dirfd, old_path, old_absolute, old_rewritten, &old_uid);
     const bool new_changed = RewriteAtPath(
-        uid, new_dirfd, new_path, new_absolute, new_rewritten);
+        new_dirfd, new_path, new_absolute, new_rewritten, &new_uid);
+    const int32_t uid = old_changed ? old_uid : new_uid;
     if (old_changed) LogRewrite(operation, uid, old_absolute, old_rewritten);
     if (new_changed) LogRewrite(operation, uid, new_absolute, new_rewritten);
     return function(old_changed ? AT_FDCWD : old_dirfd,
@@ -440,11 +482,14 @@ ssize_t HookedReadlink(const char* path, char* buffer, size_t size) {
 }
 
 char* HookedRealpath(const char* path, char* resolved) {
+    if (__atomic_load_n(&g_hooks_enabled, __ATOMIC_ACQUIRE) == 0) {
+        return g_realpath(path, resolved);
+    }
     HookGuard guard;
     if (!guard.outer() || path == nullptr) return g_realpath(path, resolved);
-    const int32_t uid = EffectiveCallingUid();
     char absolute[PATH_MAX]{}, rewritten[PATH_MAX]{};
-    if (!RewriteAtPath(uid, AT_FDCWD, path, absolute, rewritten)) {
+    int32_t uid = -1;
+    if (!RewriteAtPath(AT_FDCWD, path, absolute, rewritten, &uid)) {
         return g_realpath(path, resolved);
     }
     char canonical[PATH_MAX]{};
@@ -529,18 +574,6 @@ int HookedInotifyAddWatch(int fd, const char* path, uint32_t mask) {
         });
 }
 
-int64_t HookedClearCallingIdentity(void* state) {
-    if (g_identity_clear_depth++ == 0) g_saved_caller_uid = RawCallingUid();
-    return g_clear_identity(state);
-}
-
-void HookedRestoreCallingIdentity(void* state, int64_t token) {
-    g_restore_identity(state, token);
-    if (g_identity_clear_depth > 0 && --g_identity_clear_depth == 0) {
-        g_saved_caller_uid = -1;
-    }
-}
-
 // Only PLT-hook libraries that live for the entire lifetime of the process.
 // Hooking transient images is unsafe: ART unloads short-lived libraries (JIT
 // caches, dynamically (un)loaded HAL/AIDL client libraries) during
@@ -570,96 +603,183 @@ bool IsPermanentHookTarget(const char* path) {
     return false;
 }
 
-uint32_t CollectImages(Image* images, uint32_t capacity) {
-    FILE* maps = fopen("/proc/self/maps", "re");
-    if (maps == nullptr) return 0;
-    uint32_t count = 0;
-    char line[PATH_MAX + 256]{};
-    while (fgets(line, sizeof(line), maps) != nullptr && count < capacity) {
-        unsigned major = 0, minor = 0;
-        unsigned long long inode = 0;
-        char path[PATH_MAX]{};
-        if (sscanf(line, "%*s %*s %*s %x:%x %llu %4095s",
-                   &major, &minor, &inode, path) != 4
-            || inode == 0 || path[0] != '/'
-            || !IsPermanentHookTarget(path)) continue;
-        const Image image{static_cast<dev_t>(makedev(major, minor)),
-                          static_cast<ino_t>(inode)};
-        bool duplicate = false;
-        for (uint32_t index = 0; index < count; ++index) {
-            if (images[index].device == image.device
-                && images[index].inode == image.inode) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (!duplicate) images[count++] = image;
+struct HookSpec {
+    const char* symbol;
+    void* replacement;
+    void** original;
+};
+
+struct RegistrationContext {
+    zygisk::Api* api;
+    const HookSpec* specs;
+    size_t spec_count;
+    uint32_t image_count = 0;
+    uint32_t registration_count = 0;
+};
+
+bool AddressInImage(const dl_phdr_info& info, uintptr_t address) {
+    for (ElfW(Half) index = 0; index < info.dlpi_phnum; ++index) {
+        const ElfW(Phdr)& header = info.dlpi_phdr[index];
+        if (header.p_type != PT_LOAD) continue;
+        const uintptr_t begin = info.dlpi_addr + header.p_vaddr;
+        if (address >= begin && address < begin + header.p_memsz) return true;
     }
-    fclose(maps);
-    return count;
+    return false;
 }
 
-void Register(zygisk::Api* api, const Image* images, uint32_t count,
-              const char* symbol, void* replacement, void** original) {
-    for (uint32_t index = 0; index < count; ++index) {
-        api->pltHookRegister(images[index].device, images[index].inode,
-                             symbol, replacement, original);
+uintptr_t ResolveDynamicAddress(const dl_phdr_info& info, ElfW(Addr) value) {
+    const uintptr_t absolute = static_cast<uintptr_t>(value);
+    if (AddressInImage(info, absolute)) return absolute;
+    const uintptr_t relative = info.dlpi_addr + absolute;
+    return AddressInImage(info, relative) ? relative : 0;
+}
+
+size_t RelocationSymbolIndex(ElfW(Xword) info) {
+#if defined(__LP64__)
+    return ELF64_R_SYM(info);
+#else
+    return ELF32_R_SYM(info);
+#endif
+}
+
+void RegisterImportedSymbol(RegistrationContext* context, dev_t device,
+                            ino_t inode, const char* symbol,
+                            uint64_t* registered) {
+    for (size_t index = 0; index < context->spec_count; ++index) {
+        const HookSpec& spec = context->specs[index];
+        if (strcmp(spec.symbol, symbol) != 0) continue;
+        const uint64_t bit = uint64_t{1} << index;
+        if ((*registered & bit) != 0) return;
+        context->api->pltHookRegister(
+            device, inode, spec.symbol, spec.replacement, spec.original);
+        *registered |= bit;
+        ++context->registration_count;
+        return;
     }
+
+}
+
+int RegisterImageImports(dl_phdr_info* info, size_t, void* opaque) {
+    if (info == nullptr || info->dlpi_name == nullptr
+        || !IsPermanentHookTarget(info->dlpi_name)) return 0;
+
+    struct stat identity{};
+    if (stat(info->dlpi_name, &identity) != 0
+        || identity.st_dev == 0 || identity.st_ino == 0) return 0;
+
+    const ElfW(Dyn)* dynamic = nullptr;
+    size_t dynamic_count = 0;
+    for (ElfW(Half) index = 0; index < info->dlpi_phnum; ++index) {
+        const ElfW(Phdr)& header = info->dlpi_phdr[index];
+        if (header.p_type != PT_DYNAMIC) continue;
+        dynamic = reinterpret_cast<const ElfW(Dyn)*>(
+            info->dlpi_addr + header.p_vaddr);
+        dynamic_count = header.p_memsz / sizeof(ElfW(Dyn));
+        break;
+    }
+    if (dynamic == nullptr || dynamic_count == 0) return 0;
+
+    uintptr_t string_table = 0;
+    uintptr_t symbol_table = 0;
+    uintptr_t relocations = 0;
+    size_t string_size = 0;
+    size_t relocation_size = 0;
+    ElfW(Sxword) relocation_type = 0;
+    for (size_t index = 0; index < dynamic_count; ++index) {
+        const ElfW(Dyn)& entry = dynamic[index];
+        if (entry.d_tag == DT_NULL) break;
+        switch (entry.d_tag) {
+            case DT_STRTAB:
+                string_table = ResolveDynamicAddress(*info, entry.d_un.d_ptr);
+                break;
+            case DT_STRSZ: string_size = entry.d_un.d_val; break;
+            case DT_SYMTAB:
+                symbol_table = ResolveDynamicAddress(*info, entry.d_un.d_ptr);
+                break;
+            case DT_JMPREL:
+                relocations = ResolveDynamicAddress(*info, entry.d_un.d_ptr);
+                break;
+            case DT_PLTRELSZ: relocation_size = entry.d_un.d_val; break;
+            case DT_PLTREL: relocation_type = entry.d_un.d_val; break;
+            default: break;
+        }
+    }
+    if (string_table == 0 || symbol_table == 0 || relocations == 0
+        || string_size == 0 || relocation_size == 0
+        || (relocation_type != DT_REL && relocation_type != DT_RELA)) return 0;
+
+    auto* context = static_cast<RegistrationContext*>(opaque);
+    ++context->image_count;
+    const auto* symbols = reinterpret_cast<const ElfW(Sym)*>(symbol_table);
+    const auto* strings = reinterpret_cast<const char*>(string_table);
+    const size_t entry_size = relocation_type == DT_RELA
+        ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+    const size_t count = relocation_size / entry_size;
+    uint64_t registered = 0;
+    for (size_t index = 0; index < count; ++index) {
+        const ElfW(Xword) relocation_info = relocation_type == DT_RELA
+            ? reinterpret_cast<const ElfW(Rela)*>(relocations)[index].r_info
+            : reinterpret_cast<const ElfW(Rel)*>(relocations)[index].r_info;
+        const ElfW(Sym)& imported = symbols[RelocationSymbolIndex(relocation_info)];
+        if (imported.st_name >= string_size) continue;
+        RegisterImportedSymbol(context, identity.st_dev, identity.st_ino,
+                               strings + imported.st_name, &registered);
+    }
+    return 0;
 }
 
 InstallResult RegisterHooks(zygisk::Api* api) {
-    Image images[kMaxImages]{};
-    const uint32_t count = CollectImages(images, kMaxImages);
-#define REGISTER(symbol, hook, original) \
-    Register(api, images, count, symbol, reinterpret_cast<void*>(hook), \
-             reinterpret_cast<void**>(&(original)))
-    REGISTER("open", HookedOpen, g_open);
-    REGISTER("open64", HookedOpen64, g_open64);
-    REGISTER("openat", HookedOpenAt, g_openat);
-    REGISTER("openat64", HookedOpenAt64, g_openat64);
-    REGISTER("stat", HookedStat, g_stat);
-    REGISTER("lstat", HookedLstat, g_lstat);
-    REGISTER("fstatat", HookedFstatAt, g_fstatat);
-    REGISTER("stat64", HookedStat64, g_stat64);
-    REGISTER("lstat64", HookedLstat64, g_lstat64);
-    REGISTER("fstatat64", HookedFstatAt64, g_fstatat64);
-    REGISTER("access", HookedAccess, g_access);
-    REGISTER("faccessat", HookedFaccessAt, g_faccessat);
-    REGISTER("opendir", HookedOpenDir, g_opendir);
-    REGISTER("mkdir", HookedMkdir, g_mkdir);
-    REGISTER("mkdirat", HookedMkdirAt, g_mkdirat);
-    REGISTER("unlink", HookedUnlink, g_unlink);
-    REGISTER("unlinkat", HookedUnlinkAt, g_unlinkat);
-    REGISTER("remove", HookedRemove, g_remove);
-    REGISTER("rmdir", HookedRmdir, g_rmdir);
-    REGISTER("rename", HookedRename, g_rename);
-    REGISTER("renameat", HookedRenameAt, g_renameat);
-    REGISTER("renameat2", HookedRenameAt2, g_renameat2);
-    REGISTER("readlink", HookedReadlink, g_readlink);
-    REGISTER("realpath", HookedRealpath, g_realpath);
-    REGISTER("chmod", HookedChmod, g_chmod);
-    REGISTER("fchmodat", HookedFchmodAt, g_fchmodat);
-    REGISTER("chown", HookedChown, g_chown);
-    REGISTER("lchown", HookedLchown, g_lchown);
-    REGISTER("fchownat", HookedFchownAt, g_fchownat);
-    REGISTER("truncate", HookedTruncate, g_truncate);
-    REGISTER("truncate64", HookedTruncate64, g_truncate64);
-    REGISTER("utimensat", HookedUtimensAt, g_utimensat);
-    REGISTER("statvfs", HookedStatVfs, g_statvfs);
-    REGISTER("statvfs64", HookedStatVfs64, g_statvfs64);
-    REGISTER("inotify_add_watch", HookedInotifyAddWatch, g_inotify_add_watch);
-    REGISTER("_ZN7android14IPCThreadState20clearCallingIdentityEv",
-             HookedClearCallingIdentity, g_clear_identity);
-    REGISTER("_ZN7android14IPCThreadState21restoreCallingIdentityEl",
-             HookedRestoreCallingIdentity, g_restore_identity);
-#undef REGISTER
+    const HookSpec specs[] = {
+#define HOOK(symbol, hook, original) \
+        {symbol, reinterpret_cast<void*>(hook), \
+         reinterpret_cast<void**>(&(original))}
+        HOOK("open", HookedOpen, g_open),
+        HOOK("open64", HookedOpen64, g_open64),
+        HOOK("openat", HookedOpenAt, g_openat),
+        HOOK("openat64", HookedOpenAt64, g_openat64),
+        HOOK("stat", HookedStat, g_stat),
+        HOOK("lstat", HookedLstat, g_lstat),
+        HOOK("fstatat", HookedFstatAt, g_fstatat),
+        HOOK("stat64", HookedStat64, g_stat64),
+        HOOK("lstat64", HookedLstat64, g_lstat64),
+        HOOK("fstatat64", HookedFstatAt64, g_fstatat64),
+        HOOK("access", HookedAccess, g_access),
+        HOOK("faccessat", HookedFaccessAt, g_faccessat),
+        HOOK("opendir", HookedOpenDir, g_opendir),
+        HOOK("mkdir", HookedMkdir, g_mkdir),
+        HOOK("mkdirat", HookedMkdirAt, g_mkdirat),
+        HOOK("unlink", HookedUnlink, g_unlink),
+        HOOK("unlinkat", HookedUnlinkAt, g_unlinkat),
+        HOOK("remove", HookedRemove, g_remove),
+        HOOK("rmdir", HookedRmdir, g_rmdir),
+        HOOK("rename", HookedRename, g_rename),
+        HOOK("renameat", HookedRenameAt, g_renameat),
+        HOOK("renameat2", HookedRenameAt2, g_renameat2),
+        HOOK("readlink", HookedReadlink, g_readlink),
+        HOOK("realpath", HookedRealpath, g_realpath),
+        HOOK("chmod", HookedChmod, g_chmod),
+        HOOK("fchmodat", HookedFchmodAt, g_fchmodat),
+        HOOK("chown", HookedChown, g_chown),
+        HOOK("lchown", HookedLchown, g_lchown),
+        HOOK("fchownat", HookedFchownAt, g_fchownat),
+        HOOK("truncate", HookedTruncate, g_truncate),
+        HOOK("truncate64", HookedTruncate64, g_truncate64),
+        HOOK("utimensat", HookedUtimensAt, g_utimensat),
+        HOOK("statvfs", HookedStatVfs, g_statvfs),
+        HOOK("statvfs64", HookedStatVfs64, g_statvfs64),
+        HOOK("inotify_add_watch", HookedInotifyAddWatch, g_inotify_add_watch),
+    };
+#undef HOOK
+    static_assert(sizeof(specs) / sizeof(specs[0]) <= 64);
+    RegistrationContext context{api, specs, sizeof(specs) / sizeof(specs[0])};
+    dl_iterate_phdr(RegisterImageImports, &context);
     InstallResult result;
+    result.hook_registration_attempted = context.registration_count != 0;
     result.hooks_committed = api->pltHookCommit();
     const bool has_open = g_open != nullptr || g_openat != nullptr;
     const bool has_stat = g_stat != nullptr || g_stat64 != nullptr
         || g_fstatat != nullptr || g_fstatat64 != nullptr;
-    result.identity_hooks = g_clear_identity != nullptr
-        && g_restore_identity != nullptr;
+    result.identity_hooks = false;
     const bool filesystem_complete = has_open && has_stat
         && g_access != nullptr && g_opendir != nullptr
         && g_mkdir != nullptr && g_remove != nullptr && g_rename != nullptr
@@ -669,7 +789,7 @@ InstallResult RegisterHooks(zygisk::Api* api) {
     const bool raw_caller_uid = g_ndk_calling_uid != nullptr
         || (g_binder_self != nullptr && g_binder_calling_uid != nullptr);
     const bool identity_safe = g_caller_mode == CallerMode::kSystemMedia
-        || result.identity_hooks || raw_caller_uid;
+        || raw_caller_uid;
     result.virtualization_active = result.hooks_committed
         && filesystem_complete && identity_safe;
     uint32_t capability = 0;
@@ -682,14 +802,15 @@ InstallResult RegisterHooks(zygisk::Api* api) {
     if (g_rename != nullptr) capability |= 1u << 6;
     if (g_realpath != nullptr) capability |= 1u << 7;
     if (g_chmod != nullptr && g_chown != nullptr) capability |= 1u << 8;
-    if (g_clear_identity != nullptr && g_restore_identity != nullptr) capability |= 1u << 9;
     if (g_inotify_add_watch != nullptr) capability |= 1u << 10;
     const unsigned identity_mode = g_caller_mode == CallerMode::kSystemMedia
         ? 0u : result.identity_hooks ? 1u : raw_caller_uid ? 2u : 3u;
-    LOGI("provider virtual hooks: images=%u committed=%d active=%d capability=%x identity_mode=%u "
+    LOGI("provider virtual hooks: images=%u registrations=%u attempted=%d committed=%d active=%d capability=%x identity_mode=%u "
          "open=%p openat=%p stat=%p stat64=%p access=%p opendir=%p mkdir=%p "
          "remove=%p rename=%p realpath=%p",
-         count, result.hooks_committed ? 1 : 0,
+         context.image_count, context.registration_count,
+         result.hook_registration_attempted ? 1 : 0,
+         result.hooks_committed ? 1 : 0,
          result.virtualization_active ? 1 : 0, capability, identity_mode,
          g_open, g_openat, g_stat, g_stat64, g_access, g_opendir, g_mkdir,
          g_remove, g_rename, g_realpath);
@@ -703,6 +824,11 @@ InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
     if (api == nullptr || rules == nullptr || rule_count == 0 || rule_count > kMaxRules) {
         return {};
     }
+    if (!InitializeThreadStateKey()) {
+        LOGE("provider virtual thread state initialization failed");
+        return {};
+    }
+    __atomic_store_n(&g_hooks_enabled, 0, __ATOMIC_RELEASE);
     g_rule_count = 0;
     g_caller_mode = caller_mode;
     for (uint32_t index = 0; index < rule_count; ++index) {
@@ -738,12 +864,16 @@ InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
         return {};
     }
     const InstallResult result = RegisterHooks(api);
+    if (ShouldEnableHooks(result)) {
+        __atomic_store_n(&g_hooks_enabled, 1, __ATOMIC_RELEASE);
+    }
     LOGI("provider virtual installed: rules=%u caller_mode=%u binder_ndk=%d binder_cpp=%d "
-         "identity_hooks=%d committed=%d active=%d",
+         "identity_hooks=%d attempted=%d committed=%d active=%d",
          g_rule_count, static_cast<unsigned>(g_caller_mode),
          g_ndk_calling_uid != nullptr ? 1 : 0,
          g_binder_self != nullptr && g_binder_calling_uid != nullptr ? 1 : 0,
          result.identity_hooks ? 1 : 0,
+         result.hook_registration_attempted ? 1 : 0,
          result.hooks_committed ? 1 : 0,
          result.virtualization_active ? 1 : 0);
     if (!result.virtualization_active) g_rule_count = 0;

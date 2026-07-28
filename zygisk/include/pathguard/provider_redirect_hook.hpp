@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <sys/types.h>
 
+#include "pathguard/provider_redirect_lifecycle.hpp"
 #include "zygisk.hpp"
 
 namespace pathguard::provider_redirect {
@@ -19,12 +20,6 @@ struct Rule {
     uint32_t user_id;
     char visible_path[PATH_MAX];
     char backing_path[PATH_MAX];
-};
-
-struct InstallResult {
-    bool hooks_committed = false;
-    bool virtualization_active = false;
-    bool identity_hooks = false;
 };
 
 InstallResult Install(zygisk::Api* api, JNIEnv* env, const Rule* rules,

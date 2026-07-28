@@ -2261,14 +2261,16 @@ public:
                     ? pathguard::provider_redirect::CallerMode::kSystemMedia
                     : pathguard::provider_redirect::CallerMode::kBinderUid);
             provider_redirect_installed_ = install_result.virtualization_active;
-            provider_redirect_hooks_committed_ = install_result.hooks_committed;
-            LOGI("provider redirect specialize: process=%s rules=%u mode=%u committed=%d installed=%d",
+            provider_redirect_module_retained_ =
+                pathguard::provider_redirect::MustRetainModule(install_result);
+            LOGI("provider redirect specialize: process=%s rules=%u mode=%u attempted=%d committed=%d installed=%d",
                  media_provider ? "media" : "external_storage", provider_rule_count,
                  media_provider ? 1u : 0u,
-                 provider_redirect_hooks_committed_ ? 1 : 0,
+                 install_result.hook_registration_attempted ? 1 : 0,
+                 install_result.hooks_committed ? 1 : 0,
                  provider_redirect_installed_ ? 1 : 0);
             if (!provider_redirect_installed_
-                && !provider_redirect_hooks_committed_) Unload();
+                && !provider_redirect_module_retained_) Unload();
             return;
         }
         const bool diagnostic = strcmp(process_name, kDiagnosticPackage) == 0;
@@ -2352,7 +2354,7 @@ public:
     void postAppSpecialize(const zygisk::AppSpecializeArgs*) override {
         if (provider_redirect_required_) {
             if (!provider_redirect_installed_
-                && !provider_redirect_hooks_committed_) Unload();
+                && !provider_redirect_module_retained_) Unload();
             return;
         }
         const uint64_t post_started = pathguard::perf::NowNs();
@@ -2445,7 +2447,7 @@ private:
     JNIEnv* env_ = nullptr;
     bool provider_redirect_required_ = false;
     bool provider_redirect_installed_ = false;
-    bool provider_redirect_hooks_committed_ = false;
+    bool provider_redirect_module_retained_ = false;
     bool media_query_hook_installed_ = false;
     bool media_query_hook_required_ = false;
     bool mount_request_sent_ = false;
