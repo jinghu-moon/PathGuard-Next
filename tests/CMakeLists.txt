@@ -56,6 +56,13 @@ target_include_directories(pathguard_provider_redirect_lifecycle_test PRIVATE
 add_test(NAME pathguard_provider_redirect_lifecycle_test
     COMMAND pathguard_provider_redirect_lifecycle_test)
 
+add_executable(pathguard_provider_caller_uid_test
+    unit/provider_caller_uid_test.cpp)
+target_include_directories(pathguard_provider_caller_uid_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../zygisk/include)
+add_test(NAME pathguard_provider_caller_uid_test
+    COMMAND pathguard_provider_caller_uid_test)
+
 add_executable(pathguard_media_query_filter_test
     unit/media_query_filter_test.cpp
     ../zygisk/src/media_query_filter.cpp)
@@ -363,6 +370,13 @@ add_test(
   COMMAND ${CMAKE_COMMAND}
     -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
     -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/rules/zygisk_elf_guard_test.cmake
+)
+
+add_test(
+  NAME pathguard_post_fs_bootstrap_guard
+  COMMAND ${CMAKE_COMMAND}
+    -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/rules/post_fs_bootstrap_guard_test.cmake
 )
 
 add_test(

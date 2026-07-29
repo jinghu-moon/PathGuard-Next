@@ -80,6 +80,12 @@ int main() {
         "deny = [\"A\"]\nredirect = [\"A/B\" -> \"C\"]\n");
     assert(HasCode(deny_redirect, kRuleConflict));
 
+    const RulesBuildResult nested_deny = Compile(
+        "deny = [\"A/Private\"]\nredirect = [\"A\" -> \"C\"]\n");
+    assert(nested_deny.ok());
+    assert(nested_deny.canonical->apps.front().deny.size() == 1);
+    assert(nested_deny.canonical->apps.front().redirects.size() == 1);
+
     const RulesBuildResult disabled_bad = Compile(
         "enabled = false\nredirect = [\"../bad\" -> \"Target\"]\n");
     assert(HasCode(disabled_bad, kPathInvalid));

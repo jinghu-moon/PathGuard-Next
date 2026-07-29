@@ -60,7 +60,7 @@ if(DEFINED program_headers AND program_headers MATCHES "(^|\n)[ \t]*TLS[ \t]+")
 endif()
 
 set(forbidden
-  "toml::|toml\\+\\+|toml_edit|pathguard_rules|pathguard::rules|CompileRules|ParseRulesDocument|RenderDiagnostic|RulesBuildResult|pg_rules_|rust_eh_personality|__rust")
+  "toml::|toml\\+\\+|toml_edit|pathguard_rules|pathguard::rules|CompileRules|ParseRulesDocument|RenderDiagnostic|RulesBuildResult|pg_rules_|rust_eh_personality|__rust|IPCThreadState|getCallingUidEv|clearCallingIdentityEv|restoreCallingIdentityE")
 if(scan_text MATCHES "${forbidden}")
   message(FATAL_ERROR "Zygisk ELF/link map contains parser/compiler/runtime evidence")
 endif()

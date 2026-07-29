@@ -18,9 +18,17 @@ int main() {
     assert(MustRetainModule(partial_commit));
     assert(!ShouldEnableHooks(partial_commit));
 
+    InstallResult partial_identity;
+    partial_identity.identity_hook_attempted = true;
+    partial_identity.identity_hooks = false;
+    assert(MustRetainModule(partial_identity));
+    assert(!ShouldEnableHooks(partial_identity));
+
     InstallResult active;
     active.hook_registration_attempted = true;
     active.hooks_committed = true;
+    active.identity_hook_attempted = true;
+    active.identity_hooks = true;
     active.virtualization_active = true;
     assert(MustRetainModule(active));
     assert(ShouldEnableHooks(active));

@@ -6,12 +6,13 @@ struct InstallResult {
     bool hook_registration_attempted = false;
     bool hooks_committed = false;
     bool virtualization_active = false;
+    bool identity_hook_attempted = false;
     bool identity_hooks = false;
 };
 
-// A failed PLT commit can still leave a subset of callbacks installed.
+// JNI replacements and a failed PLT commit can leave callbacks installed.
 constexpr bool MustRetainModule(const InstallResult& result) noexcept {
-    return result.hook_registration_attempted;
+    return result.hook_registration_attempted || result.identity_hook_attempted;
 }
 
 // Registered callbacks may run while pltHookCommit() is still in progress.

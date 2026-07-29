@@ -98,9 +98,11 @@ int main() {
         "users = [0]\n"
         "deny = [\"Pictures/Nagram\", \"DCIM/Screenshots\"]\n"
         "redirect = [\"Download/localsend-source\" -> "
-        "\"Download/localsend-redirect\"]\n");
+        "\"Download/localsend-redirect\", "
+        "\"Pictures\" -> \"Download/localsend-redirect\"]\n");
     assert(deny.ok());
     assert(deny.canonical->apps.front().deny.size() == 2);
+    assert(deny.canonical->apps.front().redirects.size() == 2);
     assert(deny.requirements.mount_actions
            == (kMountActionRedirect | kMountActionDenyAnchor));
     PolicyDocument deny_document;
@@ -108,7 +110,7 @@ int main() {
     ParseError deny_error;
     assert(DecodePolicy(deny.blob->bytes, &deny_document,
                         &deny_generation, &deny_error));
-    assert(deny_document.apps.front().mounts.size() == 3);
+    assert(deny_document.apps.front().mounts.size() == 4);
     assert(std::count_if(
         deny_document.apps.front().mounts.begin(),
         deny_document.apps.front().mounts.end(),

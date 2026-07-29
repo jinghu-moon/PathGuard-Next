@@ -272,7 +272,7 @@ void ValidateDeny(ResolvedAppPolicy* app, const OriginMap& origins,
             });
         const ResolvedDenyRule* conflict = nullptr;
         if (next != app->deny.end()
-            && IsSameOrAncestor(redirect.source, next->path)) {
+            && SamePath(redirect.source, next->path)) {
             conflict = &*next;
         }
         if (next != app->deny.begin()) {
