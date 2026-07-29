@@ -53,8 +53,9 @@ mount 内部接口和 plan 表达允许随统一 IR 重构；
 | 层级 | 当前状态 | 本文用法 |
 | --- | --- | --- |
 | 已实现基线 | rules TOML format 1；policy format v5/schema 2；literal deny/redirect；`file_picker`；mount 与 Provider literal virtualization | 记录为前测事实；不形成接口兼容承诺 |
-| 已接受目标 | ADR-0010～0014 的后端策略、snapshot、capability、app-path 和 Glob v1 边界 | 作为当前候选设计；发现与最新需求/平台事实冲突时必须修订 |
-| 未决提案 | ADR-0015 `base - except[]` 有界反选 | 只作为条件设计；接受前不得写入正式 format 6 |
+| 已接受目标 | ADR-0010～0015 的后端策略、snapshot、capability、Glob v1 和有界反选 | 作为当前目标设计；发现与最新需求/平台事实冲突时必须修订 |
+| 已接受目标 | ADR-0016 policy format 6/schema 3 | format 6 首版编码统一 Selector/Action、PatternTable 和有界 selector 差集；不增加 NOT token |
+| 已接受目标 | ADR-0017 route provenance | daemon 单写持久 owner；多源反向只接受 strong identity + committed record，不恢复 canonical source fallback |
 
 本文出现“当前”时只指上述已实现基线；出现“目标”“应”或 Phase P0～P5 时指尚待实现和验证的
 设计。任何 capability 只有对应代码、probe 和 conformance test 同时成立后才能从目标变成运行时
@@ -64,13 +65,13 @@ mount 内部接口和 plan 表达允许随统一 IR 重构；
 
 | 议题 | 当前代码 | ADR/官方证据 | 本文结论 |
 | --- | --- | --- | --- |
-| policy 格式 | v5/schema 2 是唯一 reader | ADR-0002 的 v4 已过时；0014/0015 尚无运行时格式 | v5 是前测基线，v6 可一次性替换，不要求运行时兼容 |
+| policy 格式 | v5/schema 2 是唯一 reader | ADR-0002 的 v4 已过时；ADR-0016 已冻结 v6/schema 3 | v5 是前测基线；目标 v6 一次性替换，不要求运行时兼容 |
 | Provider 身份 | Binder caller UID；shared UID 按 UID 共享 | ADR-0006 明确 package attribution 未完成；Binder/SAF 不保证自动给出唯一 package | UID/user 是最低安全 scope，package 只作可信附加限定 |
 | 动态能力位 | 只有 bit 0～4、8～11 | ADR-0012/0013 接受 bit 16～19，但注明分阶段实现 | 目标协议已决，运行时能力尚未实现 |
 | Provider 操作 | literal path virtualization + 部分 query deny | DocumentsProvider 将 query/create/open 分成不同接口 | glob Provider action 必须 composite admission |
 | FUSE | 存在设备相关兼容 Hook，不构成 complete probe | AOSP Mainline 可更新；passthrough 可绕过后续 read/write daemon path | 按当前模块/内核 probe，并在 open/create 固定 FD route |
 | snapshot | specialize 时独立读取当前 policy | ADR-0001 延期 Zygote mmap；ADR-0011 接受进程内 hazard pointer | 每进程 immutable snapshot，seq_cst 首版，不改变 ADR-0001 |
-| 反选 | 当前不支持 glob/except | ADR-0014 接受字符类补集；ADR-0015 仍 Proposed | `[!abc]` 属于 v1；selector except 必须先过 P0 决策门 |
+| 反选 | 当前代码尚未支持 glob/except | ADR-0014 接受字符类补集；ADR-0015 已 Accepted | `[!abc]` 属于 v1；selector except 已进入 ADR-0016 的 format 6/schema 3 |
 
 ### 1.3 未发布阶段的改动与验收原则
 
@@ -345,7 +346,7 @@ glob 作为集合同时匹配，并使用 literal prefix/suffix 和 Aho-Corasick
 ### 4.1 版本策略
 
 带 selector 的动作字段不加入 format 1 的普通 `redirect` 或 `deny` 数组。规则编译器升级到
-`format = 2`，生成新的 `policy.bin` format 6；运行时只读取一个受支持的二进制格式。
+`format = 2`，生成新的 `policy.bin` format 6/schema 3；运行时只读取一个受支持的二进制格式。
 在 P1 切换前，format 1/v5 仍是当前事实；切换 change set 必须同时更新规则 compiler、daemon、
 Zygisk/Provider reader、CLI/status、默认规则和全部 fixtures，然后直接以 format 2/v6 取代旧格式。
 不实现 format 1 到 format 2 的生产迁移命令，不保留双格式 reader，也不要求新版本读取 v5。
@@ -386,9 +387,10 @@ deny_rules = [
 | --- | --- | --- |
 | `select.root` | 是 | 相对于当前 user storage root 的目录，不能为绝对路径 |
 | `select.glob` | 是 | 相对于 `root` 的 glob，匹配文件或目录项 |
+| `select.except` | 否 | 同 root/type 下从 base glob 减去的 pattern 数组；语义见 ADR-0015 |
 | `select.type` | 否 | `file`、`directory` 或 `any`；默认 `file` |
 | `to` | redirect/export 必选 | 目标目录，必须位于允许的 storage root 内 |
-| `priority` | 否 | 默认 0；数值越大优先级越高 |
+| `priority` | 否 | 有符号 32 位整数，默认 0；数值越大优先级越高 |
 | `preserve` | 否 | 首版固定为 `relative`，保留匹配项相对 root 的 tail |
 | `collision` | 否 | redirect/export 的碰撞策略；首版只允许 `reject` |
 | `enforcement` | glob deny 必选 | `provider` 或 `complete`，禁止隐式扩大保障范围 |
@@ -446,9 +448,9 @@ NUL 和超出长度限制的 pattern。运行时使用已固定的 storage topol
 如果以后配置中确有大量人工复用需求，再增加只作用于单个 app section 的命名 selector；
 当前不为此预留第二套解析路径。
 
-### 4.5 有界反选的决策门
+### 4.5 有界反选
 
-[ADR-0015](adr/0015-bounded-selector-negation.md) 当前仍是 Proposed。它将 selector 反选定义为
+[ADR-0015](adr/0015-bounded-selector-negation.md) 已 Accepted。它将 selector 反选定义为
 显式有界集合差，而不是 Glob token：
 
 ```text
@@ -456,16 +458,15 @@ Effective = Base(root, type, glob) - Union(except patterns)
 ```
 
 该模型能表达“deny 除允许目录外的全部内容”和严格互斥的剩余分区，并保持 base candidate
-索引；但它会增加 selector canonical form、冲突证明、预算和 format 6 的 except ref table。
-因此 P0 必须先用真实规则样本和 benchmark 在以下两项中作出一次性选择：
+索引。V-08 已用真实规则样本、1/16/64 candidate 退化样本和 Release 结构微基准关闭决策门：
+format 6 首版必须编码 canonical except ref table，并维持每 selector 8 个、每 app 256 refs、
+单 bucket 64 candidates 和单次 4096 transitions 的硬上限。普通 redirect 剩余路由仍优先用低
+priority catch-all；deny 白名单和要求显式互斥的剩余分区才使用 `select.except`。
 
-1. 接受 ADR-0015，把 `select.except` 与 format 6 首版一起冻结；
-2. 否决或延期 ADR-0015，format 6 首版完全不编码 except，普通 redirect 剩余路由继续用低
-   priority catch-all 表达。
-
-在 ADR-0015 变为 Accepted 前，本文后续只把 except 当作条件扩展；不得预分配正式 table 字段、
-不得接受 `!pattern`/尾项 `!`，也不得用 reserved bytes 偷渡语义。字符类中的 `[!abc]` 不受影响，
-它只是单字符集合补集，已经属于 ADR-0014 的 Glob v1。
+继续拒绝裸 `!pattern`、尾项 `!`、顺序反转和一般布尔表达式。字符类中的 `[!abc]` 不受影响，
+它只是单字符集合补集，已经属于 ADR-0014 的 Glob v1。`except` 的全集以
+`IdentityKey=(caller_uid,user_id)` 为最低可信边界；只有 adapter 验证 package attribution 后才进入
+package 子桶，禁止从 policy 包名反推主体。
 
 ## 5. 通用 Pattern IR 与动作 IR
 
@@ -498,12 +499,23 @@ enum class ExecutionDomain : uint8_t {
 struct PathSelector {
     PatternKind kind;
     StringId root;
-    PatternId pattern;       // LiteralPrefix 使用空 pattern
+    PatternId base_pattern;  // LiteralPrefix 使用 invalid id
+    uint32_t first_except;
+    uint16_t except_count;
     uint8_t object_type;     // file/directory/any
-    uint16_t literal_score;
     uint16_t depth;
     uint32_t first_action;
     uint16_t action_count;
+};
+
+struct PatternProgram {
+    uint32_t first_token;
+    uint16_t token_count;
+    uint16_t component_count;
+};
+
+struct SelectorExceptRef {
+    PatternId pattern;
 };
 
 struct ActionRule {
@@ -511,8 +523,8 @@ struct ActionRule {
     ExecutionDomain execution_domain;
     SelectorId selector;
     StringId target;
-    uint16_t priority;
-    uint16_t flags;
+    int32_t priority;
+    uint32_t options;
     uint8_t preserve;
     uint8_t collision;
     uint8_t reverse_mode;  // none/static_unique/provenance
@@ -523,8 +535,10 @@ struct ActionRule {
 struct PatternPlan {
     uint64_t plan_generation;
     Span<PathSelector> selectors;
-    Span<PatternToken> patterns;
+    Span<PatternProgram> patterns;
+    Span<PatternToken> tokens;
     Span<CharacterClass> character_classes;
+    Span<SelectorExceptRef> except_refs;
     Span<ActionRule> actions;
 };
 ```
@@ -681,6 +695,9 @@ shared UID 下按任意规则声明顺序选择 package。
 
 首版冻结以下防御性上限；Phase P0 可以根据基准下调，扩大上限必须修改 limits profile、
 golden 和 reader 测试，不能只改 UI：
+生产代码的唯一数值定义为 `core/include/pathguard/pattern_limits.h` 中的
+`kPatternLimitsProfileV1`；编译器、reader、matcher 与测试只能引用该定义或显式断言其冻结值，
+不得在各模块复制另一组预算常量。
 
 | 限制 | 首版值 |
 | --- | ---: |
@@ -834,17 +851,24 @@ deny 与其他动作重叠不是配置冲突：只要 deny 声明的 enforcement
 
 1. **静态唯一**：编译器证明目标 relative-tail 语言不相交，直接由 target 唯一恢复 selector；
 2. **来源追踪**：语言可能相交时，成功 create/rename 事务提交一条 route provenance，至少包含
-   identity/attribution scope、稳定 target file identity、target relative path、SelectorId、原始
-   logical path 和 plan generation。query/open/reverse scan 使用该记录恢复来源。
+   identity/attribution scope 与 identity epoch、稳定 target object identity、target relative path、
+   RuleId、原始 logical path 和 generations。query/open/reverse scan 使用该记录恢复来源。
 
-来源追踪属于 redirect router/adapter 的共享服务，不进入 Pattern Engine，也不改变 glob 语法。
-记录必须与文件操作一起具备 prepare/commit/abort 语义：失败 create 不留记录，rename 原子更新，
-delete 清除，文件 identity 或 generation 不一致时记录失效。target identity 优先使用可连接 file
-handle/FID；经过 probe 后才允许使用 `(st_dev, st_ino, ctime)` fallback，裸路径或裸 inode 不足以
-证明同一实体。
+来源追踪属于 daemon 单写的 redirect router 共享服务，不进入 Pattern Engine，也不改变 glob
+语法。精确事务和持久格式由
+[ADR-0017](adr/0017-route-provenance-transactions.md) 冻结：mutation 前 durable prepare，文件系统
+成功后记录 strong identity，再 durable commit，最后才向 create/rename 调用方返回成功；delete
+使用 prepare + tombstone。跨文件系统与 store 无法形成真正 ACID 事务，无法补偿的中间状态必须
+保留为 unowned/ambiguous，不能自动删除文件或伪造来源。
+
+durable target identity 优先使用可连接 file handle/FID；fallback 只接受经过 probe 的稳定 volume
+identity + inode + `statx` birth time。`(st_dev, st_ino, ctime)` 会随正常写入变化，只能用于诊断或
+同 boot 快速拒绝，不能恢复跨重启 owner。强 identity 不可用时 provenance mode 不准入。
 
 当前 v5 `RestoreAbsolutePath` 对歧义选择 canonical visible source 的行为记录为前测事实，但在
-v6 中计划内删除。新文件的 provenance 完整时，C3/C4 必须保持 Provider query 与实际 FD 一致；
+v6 中计划内删除。policy reload 只按当前 scope 中语义相同的 RuleId rebind；无关规则改变不能让
+有效记录整体失效，RuleId/target/scope/identity epoch 变化则进入 stale/ambiguous。新文件的
+provenance 完整时，C3/C4 必须保持 Provider query 与实际 FD 一致；
 历史/外部文件缺少 provenance 且静态无法唯一恢复时，返回 `AmbiguousReverse` 并保持真实 target
 视图或明确省略虚拟别名，不能伪造来源。Provider composite admission 必须把 provenance
 prepare/commit/reload 测试纳入 bit 17 的 reverse-mapping substatus；不需要反向展示的 app-path
@@ -1105,48 +1129,29 @@ v6 继承的是 v5 已验证有效的安全属性：little-endian 显式编码�
 generation、严格 offset/count/reserved 校验和完整包名比较，不继承 v5 row layout 或双 reader。
 旧 reader 按 version 拒绝 v6，新 reader 按 version 拒绝 v5；切换由一个协调 change set 完成。
 
-建议布局：
+精确字节契约由 [ADR-0016](adr/0016-policy-format-v6.md) 唯一定义，本文只保留结构关系，避免在
+两处复制 row offset、enum 和硬上限。目标版本固定为 policy format 6/schema 3，布局为：
 
 ```text
-Header
-  magic, format=6, schema=2
-  file_size, checksum, content_generation
-  package_count, selector_count, action_count
-  token_count, class_count
-  package/selector/action/token/class/string offsets
-
-PackageTable
-  package hash/name, user/process scope
-  first_selector/selector_count
-  first_action/action_count
-  plan_generation, required capability flags
-
-SelectorTable
-  match kind, object type, flags
-  root string id
-  token offset/count, literal score
-  first_action/action_count
-
-ActionTable
-  action kind, execution domain, priority, flags
-  selector id, target string id
-  preserve/collision/reverse mode/options
-  required capability flags, required operation mask
-
-PatternTokenTable
-  固定宽度 token；literal token 引用 StringTable
-  CHAR_CLASS token 引用 CharacterClassTable
-
-CharacterClassTable
-  固定 128-bit ASCII bitmap、negated flag、reserved bytes
-
-StringTable
+Header[128]
+PackageTable -> package scope、selector/action ranges、plan generation、requirement unions
+ScopeRefTable -> user/process scope refs
+SelectorTable -> root、base PatternId、except/action ranges、匹配缓存
+ActionTable -> selector、action/domain、target、priority、requirements 与路由选项
+PatternTable -> canonical PatternProgram 与 token range
+PatternTokenTable -> literal/star/question/globstar/class/separator tokens
+CharacterClassTable -> canonical 128-bit ASCII bitmap
+SelectorExceptRefTable -> selector 的 canonical PatternId 差集引用
+StringIndexTable -> StringId 到 StringData range
+StringData -> canonical UTF-8 bytes
 ```
 
 要求：
 
 - 数值仍使用 little-endian 显式编码，固定 row 不依赖 C/C++ struct padding；
-- 所有 offset、count、token kind 和 reserved 字段严格校验；
+- Header 与九张固定表的 offset、count、row size、token kind、enum 和 reserved 字段严格校验；
+- `PatternId` 必须引用 PatternTable；Pattern 的 token range、selector/action/scope/except ranges
+  连续覆盖各自表，不允许空洞、重复或未引用 row；
 - `CHAR_CLASS` 引用必须在 `class_count` 范围内；class flag 只能包含 `negated`，reserved bytes
   必须为零，bitmap 不得包含 `/`；
 - CRC-32 checksum 覆盖完整 payload；`content_generation`/`plan_generation` 继续基于 canonical IR
@@ -1156,27 +1161,28 @@ StringTable
   编码并去重；
 - action table 在每个 package range 内按 selector id、execution domain、action、priority 降序的 canonical 顺序
   编码，使 selector 的 action range 连续；
-- `content_generation`/`plan_generation` 覆盖 selector tokens/classes、action domain/priority/target/
-  reverse mode、capability/operation requirements 和 package scope，而不是只覆盖原始字符串；
-- Zygisk、Provider 和宿主编译器共享纯 C/C++ 格式头及 golden vectors；
+- `content_generation`/`plan_generation` 覆盖 failure mode、header semantic flags、selector
+  patterns/classes/except、action domain/priority/target/reverse mode、capability/operation requirements
+  和 package scope，而不是只覆盖原始字符串；
+- `StringId` 是 StringIndexTable row index，不是裸 StringData offset；StringId 0 固定为空串；
+- Zygisk、Provider、宿主编译器、CLI 和 device probe 共享纯 C/C++ 格式头及 golden vectors；
 - policy 中不保存正则字符串，不在运行时编译正则；
 - brace source 原文和 expansion metadata 不进入 policy；reader 只验证展开后的表、引用和
   自身预算；
 - deny、redirect、observe、export 只能引用已验证的 selector ID，禁止在各 action table
   内复制未经校验的 pattern 字符串。
 - execution domain、required capabilities 和 required operations 必须是已知值且组合合法；
-  bit 16～19 及 operation mask 的数值与共享 C/C++ header/golden vectors 一次冻结。
+  bit 16～19 及 operation mask v1 的数值服从 ADR-0016，不在 adapter 内重复编号；
 - `Glob + Mount`、`LiteralPrefix + Event` 等非法 action/domain 组合由 compiler 和 reader 同时
   拒绝；首版 mount domain 只接受 literal deny/redirect，event domain 只接受 observe/export。
 
-如果 ADR-0015 在 P0 被接受，v6 首版同时加入固定宽度 `SelectorExceptRefTable`，SelectorTable
-记录 `first_except/except_count`，reader 将 except token 计入相同预算和 canonical generation。
-如果 ADR-0015 未被接受，以上字段和表完全不存在；不得为了“以后可能需要”预留具有潜在语义的
-半成品引用。
+ADR-0015 已 Accepted。v6 首版必须包含固定宽度 `SelectorExceptRefTable`，SelectorTable 记录
+`first_except/except_count`；base 与 except 共同引用全局去重的 PatternTable，并把全部 token
+计入同一预算和 canonical generation。不存在不含 except table 的条件式 v6 变体。
 
 SelectorTable 条目本身不携带 package/UID 授权。首版只在单个 package plan 内去重 selector；
 PackageTable 拥有 ActionTable range，ActionRule 再引用该 package range 内的 SelectorId。
-即使未来允许跨 package 共享不可变 token bytes，scope/admission 仍只能沿
+Pattern/Token/Class/String 可以跨 package 共享不可变内容，但 scope/admission 仍只能沿
 `PackageTable -> ActionTable -> SelectorTable` 引用链确定，禁止从 selector 推断 package。
 PackageTable 的 required capability flags 是其 ActionTable requirements 的预计算并集，用于
 快速状态汇总；admission 仍按单条 action 的 requirements 判断，不能因一个 action 缺能力而
@@ -1230,7 +1236,7 @@ deny，能力未通过 admission 时规则状态必须是 `inactive/unsupported`
 
 1. 在任何运行时代码改动前，按 1.3/11.0 节记录 C1～C5 host + 真机前测；缺少前测证据不得
    开始 format/Hook/mount 重构。
-2. 先接受或否决 ADR-0015；在结果确定前不冻结 format 6 selector row。
+2. ADR-0015 已 Accepted；公共模型和 golden 直接实现 `base - Union(except)`，不再保留条件分支。
 3. 新增 `PathSelector`、`PatternToken`、`MatchSet`、`ActionRule` 和 `Decision` 公共模型；Decision
    使用 primary disposition + effect mask，ActionRule 明确 execution domain 和 operation mask。
 4. 新增 Glob v1 parser/compiler，包括 ASCII bitmap 字符类、UTF-8 scalar 推进、组件级 `**`
@@ -1249,8 +1255,8 @@ deny，能力未通过 admission 时规则状态必须是 `inactive/unsupported`
 
 ### Phase P1：policy v6
 
-1. 先接受新的 format 6 ADR，明确 supersede ADR-0002 及 ADR-0006 的 v5 格式部分，并同步修正
-   ADR-0012～0015 中涉及 row/table 的引用。
+1. 实现已接受的 ADR-0016；它 supersede ADR-0002 及 ADR-0006 的 v5 格式部分，row/table、enum、
+   operation mask 和 limits 只从共享格式头生成，相关 ADR 不复制另一套数值。
 2. 删除 v6 中独立的 mount/event policy 表；literal/glob 和全部动作统一编码为 selector/action，
    再按 execution domain 物化后端 plan。
 3. 实现 v6 little-endian 显式 encode/decode、CRC-32、canonical FNV generation 和独立 reader
@@ -1262,7 +1268,8 @@ deny，能力未通过 admission 时规则状态必须是 `inactive/unsupported`
 6. 实现 runtime capability snapshot、requirements admission 和细粒度 status bits。
 7. 按 ADR-0011 实现 immutable MatcherSnapshot、TLS hazard-pointer slots、原子发布、安全回收、
    atfork 惰性重建以及 slot/retire 观测指标。
-8. 按 ADR-0013 在 format 6 共享头中冻结 execution domain 和 operation mask 数值。
+8. 按 ADR-0016 已冻结的 execution domain 和 operation mask v1 数值实现共享头与 golden，禁止
+   adapter 自行编号。
 9. 每个准入进程从已验证 policy 构建自己的 MatcherSnapshot；不引入 Zygote 继承 policy mmap。
 
 ### Phase P2：Pattern Engine、Action Evaluator 与现有 Hook 复用
@@ -1281,7 +1288,7 @@ deny，能力未通过 admission 时规则状态必须是 `inactive/unsupported`
 
 ### Phase P3：Provider/MediaStore
 
-1. 先接受 route provenance ADR，冻结所有权、事务、持久化、损坏恢复和数据清理边界。
+1. 实现已接受的 ADR-0017，保持 daemon 单写 store、事务状态机、恢复矩阵和 GC 边界一致。
 2. Provider 使用 Binder caller UID 建立 route scope。
 3. 补齐 query、insert、create、rename、delete、scan 的正向/反向映射。
 4. 补齐 provider-scope glob deny 的全操作拒绝矩阵。
@@ -1354,7 +1361,7 @@ evidence paths / reviewer conclusion
 - literal/glob 多源同 target 编译成功；静态唯一与 provenance reverse mode 选择确定；
 - format 6 保留 little-endian/CRC/canonical generation 等安全属性，v5/v6 reader 均严格拒绝
   非本版本、未知字段和非零 reserved 字段；
-- ADR-0015 未接受时任何 `except`/except ref 必须被拒绝；接受时再启用其专项 golden；
+- `except`/except ref 必须按 ADR-0015 的 canonical、预算和引用范围通过专项 golden；
 - fuzz 不产生越界、指数匹配或非确定性诊断。
 
 ### 11.2 Pattern Engine 与 Action Evaluator
@@ -1439,8 +1446,8 @@ bypass、candidate/transition 上限）从 P0 起强制；性能 gate 使用固�
    capability matrix。
 7. Provider 只拿到 shared UID 时无法天然区分同 UID package；没有可信 attribution 的 package
    级隔离必须保持 unsupported，不能靠规则包名猜测。
-8. 有界反选仍是 Proposed；在 ADR-0015 被接受前，正式语法只有正向 Glob v1 和动作优先级，
-   不承诺 `except` 或任何 `!pattern` 简写。
+8. 有界反选已由 ADR-0015 接受；正式语法包含显式 `select.except`，但不支持任何
+   `!pattern` 简写、顺序反转或运行时 NOT token。
 9. format 2/v6 是破坏性切换，不提供生产兼容 reader 或自动迁移工具；安全来自完整 change set、
    格式拒绝和 C1～C6 前后重放，不来自长期维护旧协议。
 
@@ -1466,7 +1473,8 @@ bypass、candidate/transition 上限）从 P0 起强制；性能 gate 使用固�
 | Provider bool 拆分 | 已决策 | ADR-0012：provider intent 与 caller UID/query-insert/FUSE complete 三个准入位分离 |
 | app-path capability 悬空 | 已决策 | ADR-0013：bit 19 冻结 adapter baseline，具体 API 由 execution domain + operation mask 准入 |
 | glob 核心语法与 brace 边界 | 已决策 | ADR-0014：字符类进入 Glob v1；brace 只在宿主编译期有界展开；否定/extglob 不进入 pattern |
-| selector 反选直接进入 v6 | 暂不采纳 | ADR-0015 仍为 Proposed；P0 先接受或否决，未接受前不编码 except ref |
+| selector 反选直接进入 v6 | 已采纳 | ADR-0015 已 Accepted；format 6 首版编码 canonical except ref，不保留占位兼容分支 |
+| 多源反向选择 canonical source | 不采纳 | ADR-0017：按 strong object identity 持久追踪 owner；无法证明唯一时返回 `AmbiguousReverse` |
 | 每次操作检查 capability | 修正后采纳 | probe/admission 在 snapshot 发布前完成，运行时只消费已准入 action |
 | UID 校验和索引分成两步 | 修正后采纳 | `(caller_uid,user_id)` 是最低可信 identity；package attribution 可信时才进子桶，scope/bucket miss 不进入 matcher |
 | observe/export 与 Deny/Redirect 共用单一 Decision 枚举 | 不采纳 | 主处置使用 Pass/Deny/Redirect，observe/export 作为独立 effect；Deny 禁止 export |

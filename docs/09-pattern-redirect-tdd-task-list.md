@@ -1,6 +1,6 @@
 # PathGuard Next Pattern Redirect TDD 执行清单
 
-> 状态：实施清单草案
+> 状态：执行中；第一部分已完成（V-01～V-11、T-01/I-01/R-01、T-02/I-02/R-02）
 >
 > 基准设计：`docs/08-pattern-redirect-design.md` v0.8
 >
@@ -30,6 +30,19 @@ tests/fuzz/seeds/pattern-v1/
 ```
 
 ## 第一部分：基础与准备
+
+> 执行结果（2026-07-30）：本部分全部完成。受版本控制的环境、Host/真机基线、
+> 决策记录、红绿重构证据及重放结果统一索引于
+> `tests/baseline/pattern-v6/README.md`。最终 Release configure/build 通过，CTest `59/59`
+> 通过，`git diff --check` 通过；未发现非预期核心行为回归。
+
+| 已完成任务 | 状态 | 主要证据 |
+| --- | --- | --- |
+| V-01～V-07 | complete | 环境、Host/设备基线、追踪矩阵、当前差距、参考项目与官方约束 |
+| V-08～V-10 | complete | ADR-0015 决策门、ADR-0016 format 6、ADR-0017 provenance |
+| T-01/I-01/R-01/V-11 | complete | 对比报告红测、validator、共享 schema 与故障重放 |
+| T-02/I-02/R-02 | complete | Pattern harness 红测、最小骨架、共享 corpus/limits |
+| 第一部分最终验证 | complete | Release `59/59`、专项 `6/6`、diff check |
 
 ### V-01 [验证] 固化工作区、工具链与执行命令
 
@@ -688,7 +701,7 @@ tests/fuzz/seeds/pattern-v1/
 
 ### I-21 [绿] 实现 provenance journal 最小事务
 
-- **任务描述**：实现版本化记录、prepare/commit/abort、原子持久化和启动恢复；key 使用 ADR 冻结的 device/inode/generation/route identity，而非裸路径。
+- **任务描述**：实现版本化 snapshot/WAL、prepare/materialized/commit/abort、CURRENT epoch 原子切换和启动恢复；owner 使用 ADR 冻结的 file handle 或 stable volume + inode + statx btime、RouteScope/RuleId，而非裸路径、裸 inode 或 ctime。
 - **验收标准**：T-21 全绿；每个故障点恢复到 committed 或 absent，不出现半记录。
 - **关联需求**：设计 6.3、8；route provenance ADR。
 - **依赖/时间盒**：T-21；4 小时。

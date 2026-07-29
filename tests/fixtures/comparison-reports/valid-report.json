@@ -1,0 +1,28 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-example-20260729",
+  "before_commit": "41df39529f01049ec5a0bb2c2d4b9a4ced3e2d79",
+  "after_commit": "working_tree",
+  "environment": {
+    "host": "Windows 11 x64",
+    "device": "not_applicable"
+  },
+  "rules_source_hash": "sha256:not_applicable",
+  "policy_hash": "sha256:not_applicable",
+  "module_abi_hashes": {
+    "arm64-v8a": "sha256:not_applicable"
+  },
+  "scenario_id": "C1",
+  "steps": [
+    "Load the baseline policy",
+    "Execute the scoped path operation"
+  ],
+  "expected_result": "The target UID receives EACCES and other UIDs pass through",
+  "before_actual": "Baseline behavior observed",
+  "after_actual": "Equivalent behavior observed",
+  "classification": "unchanged",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-bootstrap-20260729/V-03-device-baseline.md"
+  ],
+  "reviewer_conclusion": "No unexpected core regression"
+}

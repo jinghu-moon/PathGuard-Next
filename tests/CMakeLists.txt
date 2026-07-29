@@ -424,6 +424,34 @@ if(PATHGUARD_BUILD_FUZZERS)
     set_property(TARGET pathguard_rules_${target}_fuzzer PROPERTY
       MSVC_RUNTIME_LIBRARY MultiThreaded)
   endforeach()
+  function(pathguard_add_pattern_fuzzer target source)
+    add_executable(${target} ${source})
+    target_include_directories(${target} PRIVATE
+      ${CMAKE_SOURCE_DIR}/core/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
+    )
+    target_compile_options(${target} PRIVATE
+      -fsanitize=${pathguard_fuzzer_sanitizers}
+      -fno-omit-frame-pointer
+    )
+    target_link_options(${target} PRIVATE
+      -fsanitize=${pathguard_fuzzer_sanitizers}
+    )
+    if(WIN32)
+      target_compile_options(${target} PRIVATE
+        -fms-runtime-lib=static
+      )
+      target_link_options(${target} PRIVATE
+        -fms-runtime-lib=static
+      )
+    endif()
+    set_property(TARGET ${target} PROPERTY
+      MSVC_RUNTIME_LIBRARY MultiThreaded)
+  endfunction()
+  pathguard_add_pattern_fuzzer(pathguard_pattern_tokenizer_fuzzer
+    fuzz/pattern_tokenizer_fuzzer.cpp)
+  pathguard_add_pattern_fuzzer(pathguard_pattern_matcher_fuzzer
+    fuzz/pattern_matcher_fuzzer.cpp)
   if(WIN32)
     target_compile_options(pathguard_rules_compiler PRIVATE -fms-runtime-lib=static)
     target_compile_options(pathguard_core PRIVATE -fms-runtime-lib=static)
@@ -433,6 +461,60 @@ if(PATHGUARD_BUILD_FUZZERS)
   set_property(TARGET pathguard_core PROPERTY
     MSVC_RUNTIME_LIBRARY MultiThreaded)
 endif()
+
+add_executable(pathguard_pattern_fuzz_smoke
+  fuzz/pattern_fuzz_smoke.cpp
+)
+target_include_directories(pathguard_pattern_fuzz_smoke PRIVATE
+  ${CMAKE_SOURCE_DIR}/core/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
+)
+target_compile_definitions(pathguard_pattern_fuzz_smoke PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+add_test(NAME pathguard_pattern_fuzz_smoke
+  COMMAND pathguard_pattern_fuzz_smoke)
+
+add_executable(pathguard_pattern_harness_contract_test
+  unit/pattern_harness_contract_test.cpp
+)
+target_include_directories(pathguard_pattern_harness_contract_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/core/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
+)
+target_compile_definitions(pathguard_pattern_harness_contract_test PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+add_test(NAME pathguard_pattern_harness_contract
+  COMMAND pathguard_pattern_harness_contract_test)
+
+add_executable(pathguard_pattern_property_smoke_test
+  unit/pattern_property_smoke_test.cpp
+)
+target_include_directories(pathguard_pattern_property_smoke_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/core/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
+)
+target_compile_definitions(pathguard_pattern_property_smoke_test PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+add_test(NAME pathguard_pattern_property_smoke
+  COMMAND pathguard_pattern_property_smoke_test)
+
+add_executable(pathguard_pattern_benchmark
+  perf/pattern_benchmark.cpp
+)
+target_include_directories(pathguard_pattern_benchmark PRIVATE
+  ${CMAKE_SOURCE_DIR}/core/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
+)
+target_compile_definitions(pathguard_pattern_benchmark PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+add_test(NAME pathguard_pattern_benchmark_jsonl
+  COMMAND pathguard_pattern_benchmark --format=jsonl)
+add_test(NAME pathguard_pattern_benchmark_tsv
+  COMMAND pathguard_pattern_benchmark --format=tsv)
 
 add_executable(pathguard_policy_benchmark perf/policy_benchmark.cpp)
 target_include_directories(pathguard_policy_benchmark PRIVATE
@@ -520,6 +602,21 @@ add_test(
     -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
     -DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
     -P ${CMAKE_CURRENT_SOURCE_DIR}/baseline/test_asset_guard_test.cmake
+)
+
+add_test(
+  NAME pathguard_comparison_report_guard
+  COMMAND ${CMAKE_COMMAND}
+    -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+    -DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/baseline/comparison_report_guard_test.cmake
+)
+
+add_test(
+  NAME pathguard_pattern_harness_guard
+  COMMAND ${CMAKE_COMMAND}
+    -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/baseline/pattern_harness_guard_test.cmake
 )
 
 add_test(

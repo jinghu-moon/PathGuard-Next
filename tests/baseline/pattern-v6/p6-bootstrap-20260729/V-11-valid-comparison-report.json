@@ -1,0 +1,30 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-comparison-report-20260729",
+  "before_commit": "41df39529f01049ec5a0bb2c2d4b9a4ced3e2d79",
+  "after_commit": "working_tree",
+  "environment": {
+    "host": "Windows 11 x64; MSVC 19.44.35209.0; Visual Studio 17 2022",
+    "device": "alioth; Android 13 API 33; Linux 4.19.157; Magisk 30.6; SELinux Enforcing"
+  },
+  "rules_source_hash": "sha256:208e2f1d58a339bdd696e2548268f1e8dd15d62e09dbfba6664f2c3b8b2c9c89",
+  "policy_hash": "sha256:1d1ec7d63ce491979acf521e5c28d0620acd2a0515e9adc914c44fff7612ff74",
+  "module_abi_hashes": {
+    "arm64-v8a": "sha256:6caf75df2072c8ecbacf8710ab8e3c28a109caaa76531263aa9d9effd56ede90"
+  },
+  "scenario_id": "V-02+V-03-schema-replay",
+  "steps": [
+    "Copy the V-02 Host environment and 52/52 result",
+    "Copy the V-03 device, rules, policy and module identities",
+    "Validate the copy without executing a runtime mutation"
+  ],
+  "expected_result": "The complete metadata copy passes format 1 validation",
+  "before_actual": "V-02 Host 52/52 passed; V-03 C1-C5 baseline and C3 MediaStore gap recorded",
+  "after_actual": "Schema replay only; no Host or device behavior was changed",
+  "classification": "not_observed",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-bootstrap-20260729/V-02-host-baseline.md",
+    "tests/baseline/pattern-v6/p6-bootstrap-20260729/V-03-device-baseline.md"
+  ],
+  "reviewer_conclusion": "Metadata validation passed; runtime comparison remains the source V-02/V-03 evidence"
+}

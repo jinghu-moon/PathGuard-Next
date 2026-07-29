@@ -52,7 +52,7 @@ Provider query/insert 路径映射和 FUSE 覆盖状态。三类能力由不同�
 
 | 动作范围 | 必需稳定能力 | 额外要求 |
 |---|---|---|
-| Provider/SAF glob redirect | `provider_caller_uid` + `provider_query_insert_mapping` | 对应 read/write/query/insert/create/rename/delete/reverse action mask 完整 |
+| Provider/SAF glob redirect | `provider_caller_uid` + `provider_query_insert_mapping` | 对应 read/write/query/insert/create/rename/delete/reverse action mask 完整；`reverse_mode=provenance` 时 ADR-0017 store/coordinator 必须 healthy |
 | `enforcement = "provider"` glob deny | `provider_caller_uid` + `provider_query_insert_mapping` | deny 操作矩阵完整；缺项时整个 deny rule inactive |
 | `enforcement = "complete"` glob deny/redirect | `fuse_complete_path` 或未来等价 VFS complete capability | FUSE/VFS action mask 覆盖规则所需全部操作 |
 | 仅 app path Hook 的 redirect | `app_path_adapter`（bit 19）+ `execution_domain = app_path` | 按 ADR-0013 同时校验进程级 adapter state 与 required/observed operation mask，不冒充 Provider 或 complete |
@@ -117,6 +117,7 @@ admission 决定，不能在一次操作中静默降级。
 
 - [ADR-0006：SAF 系统代写进程虚拟化](0006-saf-provider-virtualization.md)
 - [ADR-0013：app-path adapter 准入](0013-app-path-api-capability.md)
+- [ADR-0017：route provenance 事务](0017-route-provenance-transactions.md)
 - [Pattern redirect design §7.3～§7.5](../08-pattern-redirect-design.md)
 - [AOSP scoped storage/FUSE](https://source.android.com/docs/core/storage/scoped)
 - [AOSP MediaProvider module](https://source.android.com/docs/core/media/media-provider)

@@ -1,6 +1,6 @@
 # ADR-0015：有界 Selector 反选与剩余集合路由
 
-状态：Proposed
+状态：Accepted
 
 日期：2026-07-29
 
@@ -18,8 +18,8 @@
 安全含义不同。如果只给 pattern 加一个含义不完整的 `!`，实现很容易重新退化为全量扫描、
 声明顺序覆盖或 deny/allow 混淆。
 
-本 ADR 定义反选的分类，提议 PathGuard 首版采用最小集合代数，并给出待评审的配置、IR、索引、
-预算、冲突和诊断语义。它不改变 ADR-0014 的 Glob token 集合。
+本 ADR 定义反选的分类，并冻结 PathGuard 首版采用的最小集合代数及其配置、IR、索引、预算、
+冲突和诊断语义。它不改变 ADR-0014 的 Glob token 集合。
 
 ## 定义
 
@@ -28,12 +28,15 @@
 反选必须先定义全集。对一个 `PathSelector`，全集不是设备上的所有路径，而是：
 
 ```text
-U = 当前 ScopeKey
+U = 当前 IdentityKey
+    ∩ 当前可信 attribution bucket（若 adapter 能提供）
     ∩ select.root 下的规范化非空相对路径
     ∩ select.type 指定的对象类型
 ```
 
-其中 `ScopeKey = (caller_uid, user_id, subject_package)`。root、scope 或 object type 不同的规则
+其中最低可信边界是 `IdentityKey = (caller_uid, user_id)`。只有 adapter 能取得并验证 package
+attribution 时，才在该 IdentityKey 下进入 package 子桶；shared UID 或 attribution 不可用时，
+不得用 policy 包名反推运行时主体。root、identity、可信 attribution 或 object type 不同的规则
 不共享全集，禁止跨 app、跨 user 或跨 storage root 计算补集。
 
 ### 有界集合差
@@ -95,21 +98,9 @@ C = U - (A ∪ B)
 
 ```toml
 redirect_rules = [
-    {
-        select = { root = "Pictures", glob = "A/**" },
-        to = "Download/a",
-        priority = 100,
-    },
-    {
-        select = { root = "Pictures", glob = "B/**" },
-        to = "Download/b",
-        priority = 100,
-    },
-    {
-        select = { root = "Pictures", glob = "**" },
-        to = "Download/c",
-        priority = 0,
-    },
+    { select = { root = "Pictures", glob = "A/**" }, to = "Download/a", priority = 100 },
+    { select = { root = "Pictures", glob = "B/**" }, to = "Download/b", priority = 100 },
+    { select = { root = "Pictures", glob = "**" }, to = "Download/c", priority = 0 },
 ]
 ```
 
@@ -124,14 +115,7 @@ redirect_rules = [
 redirect_rules = [
     { select = { root = "Pictures", glob = "A/**" }, to = "Download/a" },
     { select = { root = "Pictures", glob = "B/**" }, to = "Download/b" },
-    {
-        select = {
-            root = "Pictures",
-            glob = "**",
-            except = ["A/**", "B/**"],
-        },
-        to = "Download/c",
-    },
+    { select = { root = "Pictures", glob = "**", except = ["A/**", "B/**"] }, to = "Download/c" },
 ]
 ```
 
@@ -144,18 +128,7 @@ base 中减去允许区域：
 
 ```toml
 deny_rules = [
-    {
-        select = {
-            root = "Pictures",
-            glob = "**",
-            except = [
-                "Allowed-A", "Allowed-A/**",
-                "Allowed-B", "Allowed-B/**",
-            ],
-            type = "any",
-        },
-        enforcement = "provider",
-    },
+    { select = { root = "Pictures", glob = "**", except = ["Allowed-A", "Allowed-A/**", "Allowed-B", "Allowed-B/**"], type = "any" }, enforcement = "provider" },
 ]
 ```
 
@@ -166,13 +139,7 @@ deny_rules = [
 
 ```toml
 observe_rules = [
-    {
-        select = {
-            root = "Download",
-            glob = "**",
-            except = [".cache/**", "**/*.tmp", "**/thumbnail-*"],
-        },
-    },
+    { select = { root = "Download", glob = "**", except = [".cache/**", "**/*.tmp", "**/thumbnail-*"] } },
 ]
 ```
 
@@ -193,23 +160,32 @@ except = ["private", "private/**"]  # 同时排除目录实体及其后代
 
 ## 决策
 
+### 决策门结论
+
+P0/V-08 评审接受本 ADR，并要求 format 6 首版同时编码 except ref。接受理由是：deny 白名单和
+严格互斥剩余分区无法由低优先级 catch-all 完整表达，而显式 `Base - Union(except)` 保持
+action-neutral、正向索引和有界执行。当前 LocalSend 的普通 Pictures redirect 本身不要求
+`except`，简单 redirect 仍优先使用现有 priority/specificity，不强迫所有规则承担反选复杂度。
+
+V-08 Release 结构微基准以 4096 条固定路径、31 次采样验证 base 命中后扫描成本：单 selector
+2 个真实排除的 P95 为 9～10 ns/路径，8 个最坏非命中排除为 61 ns/路径，16×8 退化候选为
+976 ns/路径，64×8 极端 bucket 为 4010 ns/路径。该基准只证明有界扫描的增长趋势，不代表最终
+NFA 或 Android Provider 延迟；T-25/T-30 仍必须用生产 matcher、transition 计数和设备数据建立
+正确性与性能发布门。现有 8/256 except refs、64 candidate 和 4096 transition 上限维持不变。
+
 ### 1. 配置模型
 
 `select.glob` 继续是必选单字符串；`select.except` 是可选字符串数组：
 
 ```toml
-select = {
-    root = "Pictures",
-    glob = "**/*.{jpg,jpeg,png}",
-    except = ["**/private/**", "**/thumbnail-*"],
-    type = "file",
-}
+select = { root = "Pictures", glob = "**/*.{jpg,jpeg,png}", except = ["**/private/**", "**/thumbnail-*"], type = "file" }
 ```
 
 约束如下：
 
 - `glob` 必须存在，不能用只有 `except` 的 selector 表达隐式全集；
-- `except` 每项都相对于同一个 `select.root`，继承同一 `select.type` 和 ScopeKey；
+- `except` 每项都相对于同一个 `select.root`，继承同一 `select.type`、IdentityKey 和可信
+  attribution bucket；
 - `except = []` 编译失败，要求删除空字段，避免把未完成配置静默当成无反选；
 - 每项使用 ADR-0014 的 Glob v1；宿主 brace 可在每项中展开，但不进入运行时 IR；
 - `except` 内的声明顺序不影响语义；编译器按 canonical pattern 排序、去重；
@@ -238,7 +214,8 @@ lookup positive candidates by base glob
 候选索引只由 base `glob` 构建：
 
 ```text
-ScopeKey -> root -> base literal/extension bucket -> candidate selectors
+IdentityKey -> attribution bucket -> root
+            -> base literal/extension bucket -> candidate selectors
 ```
 
 `except` 永远不注册为顶层候选，因此不会让 `** - A` 变成“每次操作扫描所有反选规则”。只有
@@ -246,7 +223,8 @@ base 已命中的 selector 才检查自己的 except range。except pattern 可�
 literal suffix/prefix 以快速拒绝，但首版不建立第二套全局负向索引。
 
 多个 selector 引用相同 canonical except pattern 时可以共享 PatternTokenTable bytes；授权和作用域
-仍来自拥有该 selector 的 PackageTable/ScopeKey，不能从共享 token 推断 package。
+仍来自 PackageTable→ActionTable 引用以及运行时 IdentityKey/可信 attribution，不能从共享 token
+推断 package。
 
 ### 4. Specificity、优先级与动作语义
 
@@ -290,7 +268,6 @@ struct PathSelector {
     uint32_t first_except;
     uint16_t except_count;
     uint8_t object_type;
-    uint16_t literal_score;
     uint16_t depth;
     uint32_t first_action;
     uint16_t action_count;
@@ -302,7 +279,9 @@ struct SelectorExceptRef {
 ```
 
 format 6 的 SelectorTable 增加 `first_except/except_count`，并增加固定宽度
-`SelectorExceptRefTable`。每个 ref 只能引用已经验证的 PatternTokenTable pattern range。
+`SelectorExceptRefTable`。每个 ref 只能引用已经验证的 PatternTable row；PatternTable 再拥有连续
+PatternTokenTable range。精确 row layout、PatternId 和引用校验由
+[ADR-0016](0016-policy-format-v6.md) 唯一定义。
 
 canonical SelectorId 输入包括：
 
@@ -310,9 +289,8 @@ canonical SelectorId 输入包括：
 (root, base canonical tokens, sorted unique except canonical tokens, object_type)
 ```
 
-`policy.bin` 不保存 leading `!`、声明顺序或集合表达式字符串。由于 format 6/schema 2 尚未发布，
-本字段应在首次 format 6 实现中一次纳入；如果 format 6 已发布后才实现，必须升级 format/schema，
-不能用 reserved bytes 偷渡新语义。
+`policy.bin` 不保存 leading `!`、声明顺序或集合表达式字符串。ADR-0016 已将本字段一次纳入
+format 6/schema 3；后续改变反选语义必须升级 format/schema，不能用 reserved bytes 偷渡。
 
 ### 7. 编译顺序
 

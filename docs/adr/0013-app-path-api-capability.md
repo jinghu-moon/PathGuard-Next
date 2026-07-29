@@ -67,8 +67,8 @@ required_operations = bitmask
 - truncate；
 - watch。
 
-具体固定数值随 policy format 6 的共享格式头和 golden vectors 一次冻结，不能由每个 adapter
-自行编号。
+具体固定数值已由 [ADR-0016](0016-policy-format-v6.md) 的 operation mask v1 冻结；共享格式头和
+golden vectors 必须引用该唯一编号，不能由每个 adapter 自行编号。
 
 ### 3. Runtime observation
 
@@ -152,7 +152,7 @@ ADR-0012 已采用的“语义基线 + action mask”模型也不一致。
 
 - ADR-0012 的 app-path 悬空引用被关闭，bit 19 获得明确但有限的语义；
 - app-path 整体失败和单项操作缺失可被区分，不会重新制造“大而全 API 可用”的假设；
-- P1 必须在 policy format 6 中冻结共享 operation mask，P2 实现进程级 probe 和 admission；
+- P1 按 ADR-0016 已冻结的 operation mask v1 实现共享常量，P2 实现进程级 probe 和 admission；
 - 后续新增路径 API 通常只扩展 versioned operation mask，不再消耗 primitive bit。
 
 ## 依据

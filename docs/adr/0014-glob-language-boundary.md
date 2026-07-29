@@ -113,7 +113,7 @@ brace 是 source-language sugar，不是 Glob v1。未来运行时永远不能�
 不支持 `!pattern`。没有显式 base 的否定 selector 无法使用正向 literal/extension bucket，容易
 迫使每次操作扫描全部反选规则；同时它会把集合组合或 action precedence 塞回 pattern 字符串。
 deny 是拒绝动作，不等于排除。有界集合差的显式 base + `select.except` 设计及其 Pattern Engine
-职责正在 [ADR-0015](0015-bounded-selector-negation.md) 中评审。
+职责已由 [ADR-0015](0015-bounded-selector-negation.md) 接受。
 
 `[!abc]` 是单字符集合补集，不是 pattern 级否定，仍可编译为确定性 token。
 
@@ -179,7 +179,8 @@ selector/action/token/class tables、引用关系和 reader 自身预算。polic
 
 ## 兼容和版本
 
-- PathGuard Glob v1 属于 format 2/schema 2 的首版语法，在 policy format 6 初次实现时直接冻结；
+- PathGuard Glob v1 属于 rules format 2 的首版语法，运行时编码由 policy format 6/schema 3
+  [ADR-0016](0016-policy-format-v6.md) 冻结；
 - format 1 迁移不猜测 glob，不受影响；
 - 未知 token/class flag、非法 class、越界引用或超出 reader 预算必须拒绝新 policy；
 - 后续增加新的 runtime token、casefold 或改变现有符号语义，必须新增 ADR 并升级 schema/format；

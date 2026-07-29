@@ -1,0 +1,4 @@
+# schema=pathguard.pattern-corpus.v1 random_seed=0x70617431
+# target	seed	sha256	purpose
+tokenizer	literal-a.seed	87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7	single literal byte
+matcher	short-glob.seed	1f9ecd3c63e49d362c02f0ae10aaf935abdf45c7549100fa515f5a4457f3e00b	short path-shaped glob input

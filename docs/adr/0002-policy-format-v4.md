@@ -3,7 +3,7 @@
 > 历史：初版冻结 v4；ADR-0006 增加 `provider_compat` 后升级为 v5。本文件现描述
 > 唯一可执行的 v5 契约，v4 不再生成或读取。
 
-状态：Accepted
+状态：Superseded by [ADR-0016](0016-policy-format-v6.md)
 
 日期：2026-07-20
 

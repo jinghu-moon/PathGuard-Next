@@ -28,3 +28,36 @@ libFuzzer 的可写 corpus 和 artifact 必须放在 `build/` 下，不得直接
 
 正式运行时先把固定 seed 复制到 `build/fuzz-corpus/<target>`，再将该目录
 传给 libFuzzer，并设置 `-artifact_prefix=build/fuzz-artifacts/<target>/`。
+
+## Pattern v1 harness
+
+P0 提供 `pathguard_pattern_tokenizer_fuzzer` 和
+`pathguard_pattern_matcher_fuzzer` 两个独立 target。日常 CTest 运行
+`pathguard_pattern_fuzz_smoke`，覆盖空输入和短输入；固定只读 seed 由
+`tests/fuzz/seeds/pattern-v1/manifest.txt` 登记，随机变异统一使用 manifest 中的
+`random_seed`。
+
+运行 libFuzzer 时必须显式传入固定的 32-bit seed `1885434929`，例如：
+
+```sh
+pathguard_pattern_tokenizer_fuzzer build/fuzz-corpus/tokenizer \
+  -seed=1885434929 -runs=1000
+```
+
+Linux Clang 可选 ASan/UBSan 构建命令：
+
+```sh
+cmake -S . -B build/pattern-fuzz -DCMAKE_CXX_COMPILER=clang++ \
+  -DPATHGUARD_BUILD_TESTS=ON -DPATHGUARD_BUILD_FUZZERS=ON \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
+cmake --build build/pattern-fuzz --target \
+  pathguard_pattern_tokenizer_fuzzer pathguard_pattern_matcher_fuzzer
+```
+
+Release benchmark 输出为逐场景 JSON Lines 或带 header 的 TSV，二者均包含
+`schema_version`、构建环境、场景、候选数、迭代数和耗时：
+
+```sh
+build/tests/pathguard_pattern_benchmark --format=jsonl
+build/tests/pathguard_pattern_benchmark --format=tsv
+```
