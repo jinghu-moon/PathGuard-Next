@@ -4,6 +4,11 @@
 
 日期：2026-07-20
 
+后续扩展：[ADR-0012](0012-provider-capability-split.md) 追加冻结 bit 16～18，用于 Provider
+caller UID、Provider query/insert mapping 和完整 FUSE path 三个动态路径准入能力；本 ADR
+既有 bit 含义不变。[ADR-0013](0013-app-path-api-capability.md) 追加冻结 bit 19 作为
+app-path adapter semantic baseline；具体 API 覆盖仍由 execution domain + operation mask 准入。
+
 ## 决策
 
 capability 使用无符号 64 位 bitset。稳定 bit 位由 `core/include/pathguard/capabilities.h` 共享，不能按内核版本合并推断。
@@ -19,6 +24,10 @@ capability 使用无符号 64 位 bitset。稳定 bit 位由 `core/include/pathg
 | 9 | `fanotify_dfid_name` | DFID + entry name report 可用 |
 | 10 | `fanotify_pidfd` | PIDFD report flag 可用；单事件仍可能缺失 pidfd |
 | 11 | `fanotify_rename_target` | 完整 rename target FID report 可用 |
+| 16 | `provider_caller_uid` | Provider caller UID/user 语义基线；见 ADR-0012 |
+| 17 | `provider_query_insert_mapping` | Provider query/insert 虚拟路径语义基线；见 ADR-0012 |
+| 18 | `fuse_complete_path` | FUSE 身份和完整路径操作语义基线；见 ADR-0012 |
+| 19 | `app_path_adapter` | 目标进程 app-path adapter 语义基线；具体覆盖由 operation mask 决定，见 ADR-0013 |
 
 ## 约束
 
@@ -30,7 +39,8 @@ capability 使用无符号 64 位 bitset。稳定 bit 位由 `core/include/pathg
 - probe 使用与实际 companion 相同的 UID、SELinux domain 和权限环境；结果绑定 boot
   identity、SELinux 环境与 topology generation。daemon 重启、存储重挂载或
   generation 变化后重新探测。
-- 稳定 bitset 只描述 primitive。每次 probe 另外返回 backend action mask、
+- 稳定 bitset 只描述 primitive 或后续 ADR 明确冻结的 adapter semantic baseline。每次 probe
+  另外返回 backend action mask、
   mountinfo identity 支持和可选 `STATX_MNT_ID` 信息，不为这些运行时组合随意分配
   新稳定 bit。
 - `proc_fd_mount` 与 `open_tree_move_mount` 均未设置时，默认标记 strict unsupported。
