@@ -51,7 +51,7 @@ $common = @(
     "APP_PLATFORM=android-$Api",
     "APP_ABI=$($Abi -join ' ')"
 )
-& $ndk @common 'APP_MODULES=pathguardd pathguardctl pathguard_rules_parity_probe pathguard_rules_benchmark pathguard_policy_reader_probe pathguard_deny_anchor_probe'
+& $ndk @common 'APP_MODULES=pathguardd pathguardctl pathguard_rules_parity_probe pathguard_rules_benchmark pathguard_policy_reader_probe pathguard_deny_anchor_probe pathguard_hide_vfs_probe pathguard_hide_app_probe'
 if ($LASTEXITCODE -ne 0) { throw "daemon/cli ndk-build failed: $LASTEXITCODE" }
 
 foreach ($item in $Abi) {
@@ -84,6 +84,7 @@ foreach ($item in $Abi) {
         "-DELF=$(Join-Path $root "module/zygisk/$item.so")",
         "-DNM=$(Join-Path $toolchain 'llvm-nm.exe')",
         "-DSTRINGS=$(Join-Path $toolchain 'llvm-strings.exe')",
+        "-DREADELF=$(Join-Path $toolchain 'llvm-readelf.exe')",
         "-DLINK_MAP=$(Join-Path $native "obj/local/$item/pathguard_zygisk.map")",
         '-P', (Join-Path $root 'scripts/verify-zygisk-elf.cmake')
     )

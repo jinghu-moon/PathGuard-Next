@@ -60,10 +60,11 @@ int main() {
         kRedirectCycle) || HasCode(Compile(
         "redirect = [\"A\" -> \"B\", \"B\" -> \"A\"]\n"),
         kRuleConflict));
-    assert(HasCode(Compile(
+    const RulesBuildResult shared_target = Compile(
         "file_picker = true\n"
-        "redirect = [\"A\" -> \"Shared\", \"B\" -> \"Shared\"]\n"),
-        kProviderConflict));
+        "redirect = [\"A\" -> \"Shared\", \"B\" -> \"Shared\"]\n");
+    assert(shared_target.ok());
+    assert(shared_target.canonical->apps.front().redirects.size() == 2);
     assert(HasCode(Compile("file_picker = true\nredirect = []\n"),
                    kInvalidValue));
 
@@ -78,6 +79,12 @@ int main() {
     const RulesBuildResult deny_redirect = Compile(
         "deny = [\"A\"]\nredirect = [\"A/B\" -> \"C\"]\n");
     assert(HasCode(deny_redirect, kRuleConflict));
+
+    const RulesBuildResult nested_deny = Compile(
+        "deny = [\"A/Private\"]\nredirect = [\"A\" -> \"C\"]\n");
+    assert(nested_deny.ok());
+    assert(nested_deny.canonical->apps.front().deny.size() == 1);
+    assert(nested_deny.canonical->apps.front().redirects.size() == 1);
 
     const RulesBuildResult disabled_bad = Compile(
         "enabled = false\nredirect = [\"../bad\" -> \"Target\"]\n");

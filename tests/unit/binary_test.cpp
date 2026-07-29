@@ -205,9 +205,9 @@ int main() {
     assert(runtime_app != decoded.apps.end());
     assert(runtime_app->mounts[0].backing_path == "Users/{user}/Target");
 
-    pathguard::PolicyDocument ambiguous_provider;
-    ambiguous_provider.schema = 2;
-    ambiguous_provider.failure_mode = pathguard::FailureMode::kOpen;
+    pathguard::PolicyDocument provider_scopes;
+    provider_scopes.schema = 2;
+    provider_scopes.failure_mode = pathguard::FailureMode::kOpen;
     pathguard::AppPolicy provider_a = MakeRedirectApp(
         "com.example.provider.a", "SharedSource");
     provider_a.users = {"0"};
@@ -216,13 +216,31 @@ int main() {
     pathguard::AppPolicy provider_b = provider_a;
     provider_b.package = "com.example.provider.b";
     provider_b.mounts[0].backing_path = "TargetB";
-    ambiguous_provider.apps = {provider_a, provider_b};
-    assert(!pathguard::EncodePolicy(ambiguous_provider, &bytes, &error));
+    provider_scopes.apps = {provider_a, provider_b};
+    assert(pathguard::EncodePolicy(provider_scopes, &bytes, &error));
+    assert(pathguard::DecodePolicy(bytes, &decoded, &generation, &error));
 
     provider_b.mounts[0].visible_path = "OtherSource";
     provider_b.mounts[0].backing_path = "TargetA";
-    ambiguous_provider.apps = {provider_a, provider_b};
-    assert(!pathguard::EncodePolicy(ambiguous_provider, &bytes, &error));
+    provider_scopes.apps = {provider_a, provider_b};
+    assert(pathguard::EncodePolicy(provider_scopes, &bytes, &error));
+    assert(pathguard::DecodePolicy(bytes, &decoded, &generation, &error));
+
+    pathguard::PolicyDocument shared_target_provider;
+    shared_target_provider.schema = 2;
+    shared_target_provider.failure_mode = pathguard::FailureMode::kOpen;
+    pathguard::AppPolicy provider_shared = MakeRedirectApp(
+        "com.example.provider.shared", "Download/Source");
+    provider_shared.users = {"0"};
+    provider_shared.provider_compat = pathguard::ProviderCompat::kVirtualize;
+    provider_shared.mounts[0].backing_path = "Download/Shared";
+    pathguard::LogicalMountRule shared_alias = provider_shared.mounts[0];
+    shared_alias.visible_path = "Pictures";
+    provider_shared.mounts.push_back(shared_alias);
+    shared_target_provider.apps = {provider_shared};
+    assert(pathguard::EncodePolicy(shared_target_provider, &bytes, &error));
+    assert(pathguard::DecodePolicy(bytes, &decoded, &generation, &error));
+    assert(find_app("com.example.provider.shared").mounts.size() == 2);
 
     pathguard::PolicyDocument collision_source;
     collision_source.schema = 2;

@@ -1,13 +1,18 @@
 #include "pathguard/provider_redirect_hook.hpp"
+#include "pathguard/provider_caller_uid.hpp"
 #include "pathguard/provider_path_mapper.h"
 
+#include <android/dlext.h>
 #include <android/log.h>
 
 #include <dirent.h>
 #include <dlfcn.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <link.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -17,6 +22,7 @@
 #include <sys/inotify.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace pathguard::provider_redirect {
@@ -24,7 +30,6 @@ namespace {
 
 constexpr char kLogTag[] = "PathGuard";
 constexpr uint32_t kMaxRules = 64;
-constexpr uint32_t kMaxImages = 256;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kLogTag, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kLogTag, __VA_ARGS__)
@@ -69,16 +74,35 @@ using StatVfs64 = struct statvfs64;
 #endif
 using StatVfs64Fn = int (*)(const char*, StatVfs64*);
 using InotifyAddWatchFn = int (*)(int, const char*, uint32_t);
-using NdkCallingUidFn = uid_t (*)();
-using BinderSelfFn = void* (*)();
-using BinderCallingUidFn = uid_t (*)(void*);
-using ClearIdentityFn = int64_t (*)(void*);
-using RestoreIdentityFn = void (*)(void*, int64_t);
+using BinderGetCallingUidFn = jint (*)();
+using BinderClearIdentityFn = jlong (*)();
+using BinderRestoreIdentityFn = void (*)(jlong);
+using DlopenFn = void* (*)(const char*, int);
+using AndroidDlopenExtFn = void* (*)(const char*, int, const android_dlextinfo*);
 
-struct Image {
-    dev_t device = 0;
-    ino_t inode = 0;
+using FuseRequest = void*;
+struct FuseContext {
+    uid_t uid;
+    gid_t gid;
+    pid_t pid;
+    mode_t umask;
 };
+struct FuseEntryParam;
+struct FuseFileInfo;
+struct FuseBufferVector;
+using FuseReqUserdataFn = void* (*)(FuseRequest);
+using FuseReqContextFn = const FuseContext* (*)(FuseRequest);
+using FuseReplyErrFn = int (*)(FuseRequest, int);
+using FuseReplyEntryFn = int (*)(FuseRequest, const FuseEntryParam*);
+using FuseReplyAttrFn = int (*)(FuseRequest, const struct stat*, double);
+using FuseReplyOpenFn = int (*)(FuseRequest, const FuseFileInfo*);
+using FuseReplyWriteFn = int (*)(FuseRequest, size_t);
+using FuseReplyBufferFn = int (*)(FuseRequest, const char*, size_t);
+using FuseReplyDataFn = int (*)(FuseRequest, FuseBufferVector*, int);
+using FuseReplyStatVfsFn = int (*)(FuseRequest, const struct statvfs*);
+using FuseReplyCreateFn = int (*)(FuseRequest, const FuseEntryParam*,
+                                  const FuseFileInfo*);
+using FuseReplyNoneFn = void (*)(FuseRequest);
 
 PathRule g_rules[kMaxRules]{};
 uint32_t g_rule_count = 0;
@@ -117,16 +141,56 @@ UtimensAtFn g_utimensat = nullptr;
 StatVfsFn g_statvfs = nullptr;
 StatVfs64Fn g_statvfs64 = nullptr;
 InotifyAddWatchFn g_inotify_add_watch = nullptr;
-ClearIdentityFn g_clear_identity = nullptr;
-RestoreIdentityFn g_restore_identity = nullptr;
-NdkCallingUidFn g_ndk_calling_uid = nullptr;
-BinderSelfFn g_binder_self = nullptr;
-BinderCallingUidFn g_binder_calling_uid = nullptr;
-thread_local bool g_in_hook = false;
-thread_local int32_t g_saved_caller_uid = -1;
-thread_local uint32_t g_identity_clear_depth = 0;
+BinderGetCallingUidFn g_binder_get_calling_uid = nullptr;
+BinderClearIdentityFn g_binder_clear_identity = nullptr;
+BinderRestoreIdentityFn g_binder_restore_identity = nullptr;
+DlopenFn g_dlopen = nullptr;
+AndroidDlopenExtFn g_android_dlopen_ext = nullptr;
+FuseReqUserdataFn g_fuse_req_userdata = nullptr;
+FuseReqContextFn g_fuse_req_context = nullptr;
+FuseReplyErrFn g_fuse_reply_err = nullptr;
+FuseReplyEntryFn g_fuse_reply_entry = nullptr;
+FuseReplyAttrFn g_fuse_reply_attr = nullptr;
+FuseReplyOpenFn g_fuse_reply_open = nullptr;
+FuseReplyWriteFn g_fuse_reply_write = nullptr;
+FuseReplyBufferFn g_fuse_reply_buffer = nullptr;
+FuseReplyDataFn g_fuse_reply_data = nullptr;
+FuseReplyStatVfsFn g_fuse_reply_statvfs = nullptr;
+FuseReplyCreateFn g_fuse_reply_create = nullptr;
+FuseReplyNoneFn g_fuse_reply_none = nullptr;
+
+pthread_key_t g_thread_state_key{};
+uint32_t g_thread_state_key_ready = 0;
 uint32_t g_rewrite_log_count = 0;
-CallerMode g_caller_mode = CallerMode::kBinderUid;
+uint32_t g_hooks_enabled = 0;
+uint32_t g_fuse_install_state = 0;
+zygisk::Api* g_api = nullptr;
+
+void DestroyThreadState(void* value) {
+    free(value);
+}
+
+bool InitializeThreadStateKey() {
+    if (__atomic_load_n(&g_thread_state_key_ready, __ATOMIC_ACQUIRE) != 0) return true;
+    if (pthread_key_create(&g_thread_state_key, DestroyThreadState) != 0) return false;
+    __atomic_store_n(&g_thread_state_key_ready, 1, __ATOMIC_RELEASE);
+    return true;
+}
+
+CallerUidContext* GetThreadState() {
+    if (__atomic_load_n(&g_thread_state_key_ready, __ATOMIC_ACQUIRE) == 0) return nullptr;
+    auto* state = static_cast<CallerUidContext*>(pthread_getspecific(g_thread_state_key));
+    if (state != nullptr) return state;
+    state = static_cast<CallerUidContext*>(calloc(1, sizeof(CallerUidContext)));
+    if (state == nullptr) return nullptr;
+    state->saved_binder_uid = -1;
+    state->fuse_uid = -1;
+    if (pthread_setspecific(g_thread_state_key, state) != 0) {
+        free(state);
+        return nullptr;
+    }
+    return state;
+}
 
 bool ValidLogicalRulePath(const char* path) {
     if (path == nullptr || path[0] == '\0' || path[0] == '/'
@@ -152,47 +216,62 @@ bool ValidLogicalRulePath(const char* path) {
 
 class HookGuard final {
 public:
-    HookGuard() : outer_(!g_in_hook) { if (outer_) g_in_hook = true; }
-    ~HookGuard() { if (outer_) g_in_hook = false; }
+    HookGuard()
+        : state_(GetThreadState()),
+          outer_(state_ != nullptr && !state_->in_path_hook) {
+        if (outer_) state_->in_path_hook = true;
+    }
+    ~HookGuard() { if (outer_) state_->in_path_hook = false; }
     bool outer() const { return outer_; }
 private:
+    CallerUidContext* state_;
     bool outer_;
 };
 
 int32_t RawCallingUid() {
-    if (g_ndk_calling_uid != nullptr) {
-        return static_cast<int32_t>(g_ndk_calling_uid());
-    }
-    if (g_binder_self != nullptr && g_binder_calling_uid != nullptr) {
-        void* state = g_binder_self();
-        if (state != nullptr) return static_cast<int32_t>(g_binder_calling_uid(state));
-    }
-    return -1;
+    return g_binder_get_calling_uid != nullptr
+        ? static_cast<int32_t>(g_binder_get_calling_uid()) : -1;
 }
 
 int32_t EffectiveCallingUid() {
-    if (g_caller_mode == CallerMode::kSystemMedia) return -1;
-    const int32_t current = RawCallingUid();
-    if (current >= 10000 && current != static_cast<int32_t>(getuid())) return current;
-    return g_saved_caller_uid;
+    return EffectiveCallerUid(GetThreadState(), RawCallingUid(),
+                              static_cast<int32_t>(getuid()));
 }
 
-void ResolveBinderSymbols() {
-    void* ndk = dlopen("libbinder_ndk.so", RTLD_NOW | RTLD_LOCAL);
-    if (ndk != nullptr) {
-        g_ndk_calling_uid = reinterpret_cast<NdkCallingUidFn>(
-            dlsym(ndk, "AIBinder_getCallingUid"));
-    }
-    void* binder = dlopen("libbinder.so", RTLD_NOW | RTLD_LOCAL);
-    if (binder == nullptr) binder = RTLD_DEFAULT;
-    g_binder_self = reinterpret_cast<BinderSelfFn>(
-        dlsym(binder, "_ZN7android14IPCThreadState4selfEv"));
-    g_binder_calling_uid = reinterpret_cast<BinderCallingUidFn>(
-        dlsym(binder, "_ZNK7android14IPCThreadState13getCallingUidEv"));
-    if (g_binder_calling_uid == nullptr) {
-        g_binder_calling_uid = reinterpret_cast<BinderCallingUidFn>(
-            dlsym(binder, "_ZN7android14IPCThreadState13getCallingUidEv"));
-    }
+int64_t HookedClearCallingIdentity() {
+    BeginBinderIdentityClear(GetThreadState(), RawCallingUid(),
+                             static_cast<int32_t>(getuid()));
+    return g_binder_clear_identity();
+}
+
+void HookedRestoreCallingIdentity(int64_t token) {
+    g_binder_restore_identity(token);
+    EndBinderIdentityClear(GetThreadState());
+}
+
+bool InstallBinderIdentityHooks(zygisk::Api* api, JNIEnv* env,
+                                bool* attempted) {
+    JNINativeMethod methods[] = {
+        {const_cast<char*>("getCallingUid"), const_cast<char*>("()I"),
+         reinterpret_cast<void*>(RawCallingUid)},
+        {const_cast<char*>("clearCallingIdentity"), const_cast<char*>("()J"),
+         reinterpret_cast<void*>(HookedClearCallingIdentity)},
+        {const_cast<char*>("restoreCallingIdentity"), const_cast<char*>("(J)V"),
+         reinterpret_cast<void*>(HookedRestoreCallingIdentity)},
+    };
+    api->hookJniNativeMethods(env, "android/os/Binder", methods, 3);
+    g_binder_get_calling_uid = reinterpret_cast<BinderGetCallingUidFn>(
+        methods[0].fnPtr);
+    g_binder_clear_identity = reinterpret_cast<BinderClearIdentityFn>(
+        methods[1].fnPtr);
+    g_binder_restore_identity = reinterpret_cast<BinderRestoreIdentityFn>(
+        methods[2].fnPtr);
+    *attempted = g_binder_get_calling_uid != nullptr
+        || g_binder_clear_identity != nullptr
+        || g_binder_restore_identity != nullptr;
+    return g_binder_get_calling_uid != nullptr
+        && g_binder_clear_identity != nullptr
+        && g_binder_restore_identity != nullptr;
 }
 
 bool ResolveAtPath(int dirfd, const char* path, char* output, size_t capacity) {
@@ -217,10 +296,18 @@ bool ResolveAtPath(int dirfd, const char* path, char* output, size_t capacity) {
     return written > 0 && static_cast<size_t>(written) < capacity;
 }
 
-bool RewriteAtPath(int32_t uid, int dirfd, const char* path,
-                   char* absolute, char* output) {
-    return ResolveAtPath(dirfd, path, absolute, PATH_MAX)
-        && RewriteAbsolutePath(g_rules, g_rule_count, uid, absolute, output, PATH_MAX);
+bool RewriteAtPath(int dirfd, const char* path, char* absolute, char* output,
+                   int32_t* caller_uid) {
+    if (!ResolveAtPath(dirfd, path, absolute, PATH_MAX)
+        || !MatchesVisiblePath(g_rules, g_rule_count, absolute)) {
+        return false;
+    }
+    const int32_t uid = EffectiveCallingUid();
+    if (!RewriteAbsolutePath(g_rules, g_rule_count, uid, absolute, output, PATH_MAX)) {
+        return false;
+    }
+    *caller_uid = uid;
+    return true;
 }
 
 void LogRewrite(const char* operation, int32_t uid,
@@ -233,12 +320,15 @@ void LogRewrite(const char* operation, int32_t uid,
 template <typename Function>
 auto WithPath(const char* operation, int dirfd, const char* path,
               Function function) -> decltype(function(dirfd, path)) {
+    if (__atomic_load_n(&g_hooks_enabled, __ATOMIC_ACQUIRE) == 0) {
+        return function(dirfd, path);
+    }
     HookGuard guard;
     if (!guard.outer() || path == nullptr) return function(dirfd, path);
-    const int32_t uid = EffectiveCallingUid();
     char absolute[PATH_MAX]{};
     char rewritten[PATH_MAX]{};
-    if (!RewriteAtPath(uid, dirfd, path, absolute, rewritten)) {
+    int32_t uid = -1;
+    if (!RewriteAtPath(dirfd, path, absolute, rewritten, &uid)) {
         return function(dirfd, path);
     }
     LogRewrite(operation, uid, absolute, rewritten);
@@ -387,17 +477,22 @@ int HookedRmdir(const char* path) {
 template <typename Function>
 int WithTwoPaths(const char* operation, int old_dirfd, const char* old_path,
                  int new_dirfd, const char* new_path, Function function) {
+    if (__atomic_load_n(&g_hooks_enabled, __ATOMIC_ACQUIRE) == 0) {
+        return function(old_dirfd, old_path, new_dirfd, new_path);
+    }
     HookGuard guard;
     if (!guard.outer() || old_path == nullptr || new_path == nullptr) {
         return function(old_dirfd, old_path, new_dirfd, new_path);
     }
-    const int32_t uid = EffectiveCallingUid();
     char old_absolute[PATH_MAX]{}, old_rewritten[PATH_MAX]{};
     char new_absolute[PATH_MAX]{}, new_rewritten[PATH_MAX]{};
+    int32_t old_uid = -1;
+    int32_t new_uid = -1;
     const bool old_changed = RewriteAtPath(
-        uid, old_dirfd, old_path, old_absolute, old_rewritten);
+        old_dirfd, old_path, old_absolute, old_rewritten, &old_uid);
     const bool new_changed = RewriteAtPath(
-        uid, new_dirfd, new_path, new_absolute, new_rewritten);
+        new_dirfd, new_path, new_absolute, new_rewritten, &new_uid);
+    const int32_t uid = old_changed ? old_uid : new_uid;
     if (old_changed) LogRewrite(operation, uid, old_absolute, old_rewritten);
     if (new_changed) LogRewrite(operation, uid, new_absolute, new_rewritten);
     return function(old_changed ? AT_FDCWD : old_dirfd,
@@ -440,11 +535,14 @@ ssize_t HookedReadlink(const char* path, char* buffer, size_t size) {
 }
 
 char* HookedRealpath(const char* path, char* resolved) {
+    if (__atomic_load_n(&g_hooks_enabled, __ATOMIC_ACQUIRE) == 0) {
+        return g_realpath(path, resolved);
+    }
     HookGuard guard;
     if (!guard.outer() || path == nullptr) return g_realpath(path, resolved);
-    const int32_t uid = EffectiveCallingUid();
     char absolute[PATH_MAX]{}, rewritten[PATH_MAX]{};
-    if (!RewriteAtPath(uid, AT_FDCWD, path, absolute, rewritten)) {
+    int32_t uid = -1;
+    if (!RewriteAtPath(AT_FDCWD, path, absolute, rewritten, &uid)) {
         return g_realpath(path, resolved);
     }
     char canonical[PATH_MAX]{};
@@ -529,16 +627,106 @@ int HookedInotifyAddWatch(int fd, const char* path, uint32_t mask) {
         });
 }
 
-int64_t HookedClearCallingIdentity(void* state) {
-    if (g_identity_clear_depth++ == 0) g_saved_caller_uid = RawCallingUid();
-    return g_clear_identity(state);
+void CaptureFuseRequest(FuseRequest request, const FuseContext* context) {
+    if (context == nullptr) return;
+    BeginFuseRequest(GetThreadState(), request, static_cast<int32_t>(context->uid),
+                     static_cast<int32_t>(getuid()));
 }
 
-void HookedRestoreCallingIdentity(void* state, int64_t token) {
-    g_restore_identity(state, token);
-    if (g_identity_clear_depth > 0 && --g_identity_clear_depth == 0) {
-        g_saved_caller_uid = -1;
+void* HookedFuseReqUserdata(FuseRequest request) {
+    void* userdata = g_fuse_req_userdata(request);
+    if (g_fuse_req_context != nullptr) {
+        CaptureFuseRequest(request, g_fuse_req_context(request));
     }
+    return userdata;
+}
+
+const FuseContext* HookedFuseReqContext(FuseRequest request) {
+    const FuseContext* context = g_fuse_req_context(request);
+    CaptureFuseRequest(request, context);
+    return context;
+}
+
+void FinishFuseRequest(FuseRequest request) {
+    EndFuseRequest(GetThreadState(), request);
+}
+
+int HookedFuseReplyErr(FuseRequest request, int error) {
+    const int result = g_fuse_reply_err(request, error);
+    FinishFuseRequest(request);
+    return result;
+}
+
+int HookedFuseReplyEntry(FuseRequest request, const FuseEntryParam* entry) {
+    const int result = g_fuse_reply_entry(request, entry);
+    FinishFuseRequest(request);
+    return result;
+}
+
+int HookedFuseReplyAttr(FuseRequest request, const struct stat* value,
+                        double timeout) {
+    const int result = g_fuse_reply_attr(request, value, timeout);
+    FinishFuseRequest(request);
+    return result;
+}
+
+int HookedFuseReplyOpen(FuseRequest request, const FuseFileInfo* file_info) {
+    const int result = g_fuse_reply_open(request, file_info);
+    FinishFuseRequest(request);
+    return result;
+}
+
+int HookedFuseReplyWrite(FuseRequest request, size_t count) {
+    const int result = g_fuse_reply_write(request, count);
+    FinishFuseRequest(request);
+    return result;
+}
+
+int HookedFuseReplyBuffer(FuseRequest request, const char* buffer, size_t size) {
+    const int result = g_fuse_reply_buffer(request, buffer, size);
+    FinishFuseRequest(request);
+    return result;
+}
+
+int HookedFuseReplyData(FuseRequest request, FuseBufferVector* buffer, int flags) {
+    const int result = g_fuse_reply_data(request, buffer, flags);
+    FinishFuseRequest(request);
+    return result;
+}
+
+int HookedFuseReplyStatVfs(FuseRequest request, const struct statvfs* value) {
+    const int result = g_fuse_reply_statvfs(request, value);
+    FinishFuseRequest(request);
+    return result;
+}
+
+int HookedFuseReplyCreate(FuseRequest request, const FuseEntryParam* entry,
+                          const FuseFileInfo* file_info) {
+    const int result = g_fuse_reply_create(request, entry, file_info);
+    FinishFuseRequest(request);
+    return result;
+}
+
+void HookedFuseReplyNone(FuseRequest request) {
+    g_fuse_reply_none(request);
+    FinishFuseRequest(request);
+}
+
+void MaybeInstallFuseHooks(const char* path, void* handle);
+
+void* HookedDlopen(const char* path, int flags) {
+    if (g_dlopen == nullptr) return nullptr;
+    void* handle = g_dlopen(path, flags);
+    MaybeInstallFuseHooks(path, handle);
+    return handle;
+}
+
+void* HookedAndroidDlopenExt(const char* path, int flags,
+                             const android_dlextinfo* info) {
+    if (g_android_dlopen_ext == nullptr) return nullptr;
+    void* handle = g_android_dlopen_ext(path, flags, info);
+    MaybeInstallFuseHooks(path, handle);
+    return handle;
 }
 
 // Only PLT-hook libraries that live for the entire lifetime of the process.
@@ -555,6 +743,7 @@ const char* const kHookTargetBasenames[] = {
     "libopenjdk.so",         // java.nio / java.io native file access
     "libnativehelper.so",    // JNI file helpers
     "libandroid_runtime.so", // framework native file access
+    "libnativeloader.so",    // Runtime.nativeLoad -> android_dlopen_ext
 };
 
 const char* PathBasename(const char* path) {
@@ -570,108 +759,233 @@ bool IsPermanentHookTarget(const char* path) {
     return false;
 }
 
-uint32_t CollectImages(Image* images, uint32_t capacity) {
-    FILE* maps = fopen("/proc/self/maps", "re");
-    if (maps == nullptr) return 0;
-    uint32_t count = 0;
-    char line[PATH_MAX + 256]{};
-    while (fgets(line, sizeof(line), maps) != nullptr && count < capacity) {
-        unsigned major = 0, minor = 0;
-        unsigned long long inode = 0;
-        char path[PATH_MAX]{};
-        if (sscanf(line, "%*s %*s %*s %x:%x %llu %4095s",
-                   &major, &minor, &inode, path) != 4
-            || inode == 0 || path[0] != '/'
-            || !IsPermanentHookTarget(path)) continue;
-        const Image image{static_cast<dev_t>(makedev(major, minor)),
-                          static_cast<ino_t>(inode)};
-        bool duplicate = false;
-        for (uint32_t index = 0; index < count; ++index) {
-            if (images[index].device == image.device
-                && images[index].inode == image.inode) {
-                duplicate = true;
+bool IsFuseHookTarget(const char* path) {
+    return path != nullptr && strcmp(PathBasename(path), "libfuse_jni.so") == 0;
+}
+
+struct HookSpec {
+    const char* symbol;
+    void* replacement;
+    void** original;
+};
+
+struct RegistrationContext {
+    zygisk::Api* api;
+    const HookSpec* specs;
+    size_t spec_count;
+    bool (*target)(const char*);
+    uint32_t image_count = 0;
+    uint32_t registration_count = 0;
+};
+
+bool AddressInImage(const dl_phdr_info& info, uintptr_t address) {
+    for (ElfW(Half) index = 0; index < info.dlpi_phnum; ++index) {
+        const ElfW(Phdr)& header = info.dlpi_phdr[index];
+        if (header.p_type != PT_LOAD) continue;
+        const uintptr_t begin = info.dlpi_addr + header.p_vaddr;
+        if (address >= begin && address < begin + header.p_memsz) return true;
+    }
+    return false;
+}
+
+uintptr_t ResolveDynamicAddress(const dl_phdr_info& info, ElfW(Addr) value) {
+    const uintptr_t absolute = static_cast<uintptr_t>(value);
+    if (AddressInImage(info, absolute)) return absolute;
+    const uintptr_t relative = info.dlpi_addr + absolute;
+    return AddressInImage(info, relative) ? relative : 0;
+}
+
+size_t RelocationSymbolIndex(ElfW(Xword) info) {
+#if defined(__LP64__)
+    return ELF64_R_SYM(info);
+#else
+    return ELF32_R_SYM(info);
+#endif
+}
+
+bool StatMappedImage(const char* path, struct stat* identity) {
+    if (path == nullptr || identity == nullptr) return false;
+    if (stat(path, identity) == 0) return true;
+    const char* separator = strchr(path, '!');
+    if (separator == nullptr) return false;
+    const size_t length = static_cast<size_t>(separator - path);
+    if (length == 0 || length >= PATH_MAX) return false;
+    char container[PATH_MAX]{};
+    memcpy(container, path, length);
+    return stat(container, identity) == 0;
+}
+
+void RegisterImportedSymbol(RegistrationContext* context, dev_t device,
+                            ino_t inode, const char* symbol,
+                            uint64_t* registered) {
+    for (size_t index = 0; index < context->spec_count; ++index) {
+        const HookSpec& spec = context->specs[index];
+        if (strcmp(spec.symbol, symbol) != 0) continue;
+        const uint64_t bit = uint64_t{1} << index;
+        if ((*registered & bit) != 0) return;
+        context->api->pltHookRegister(
+            device, inode, spec.symbol, spec.replacement, spec.original);
+        *registered |= bit;
+        ++context->registration_count;
+        return;
+    }
+
+}
+
+int RegisterImageImports(dl_phdr_info* info, size_t, void* opaque) {
+    auto* context = static_cast<RegistrationContext*>(opaque);
+    if (info == nullptr || info->dlpi_name == nullptr || context == nullptr
+        || context->target == nullptr
+        || !context->target(info->dlpi_name)) return 0;
+
+    struct stat identity{};
+    if (!StatMappedImage(info->dlpi_name, &identity)
+        || identity.st_dev == 0 || identity.st_ino == 0) return 0;
+
+    const ElfW(Dyn)* dynamic = nullptr;
+    size_t dynamic_count = 0;
+    for (ElfW(Half) index = 0; index < info->dlpi_phnum; ++index) {
+        const ElfW(Phdr)& header = info->dlpi_phdr[index];
+        if (header.p_type != PT_DYNAMIC) continue;
+        dynamic = reinterpret_cast<const ElfW(Dyn)*>(
+            info->dlpi_addr + header.p_vaddr);
+        dynamic_count = header.p_memsz / sizeof(ElfW(Dyn));
+        break;
+    }
+    if (dynamic == nullptr || dynamic_count == 0) return 0;
+
+    uintptr_t string_table = 0;
+    uintptr_t symbol_table = 0;
+    uintptr_t relocations = 0;
+    size_t string_size = 0;
+    size_t relocation_size = 0;
+    ElfW(Sxword) relocation_type = 0;
+    for (size_t index = 0; index < dynamic_count; ++index) {
+        const ElfW(Dyn)& entry = dynamic[index];
+        if (entry.d_tag == DT_NULL) break;
+        switch (entry.d_tag) {
+            case DT_STRTAB:
+                string_table = ResolveDynamicAddress(*info, entry.d_un.d_ptr);
                 break;
-            }
+            case DT_STRSZ: string_size = entry.d_un.d_val; break;
+            case DT_SYMTAB:
+                symbol_table = ResolveDynamicAddress(*info, entry.d_un.d_ptr);
+                break;
+            case DT_JMPREL:
+                relocations = ResolveDynamicAddress(*info, entry.d_un.d_ptr);
+                break;
+            case DT_PLTRELSZ: relocation_size = entry.d_un.d_val; break;
+            case DT_PLTREL: relocation_type = entry.d_un.d_val; break;
+            default: break;
         }
-        if (!duplicate) images[count++] = image;
     }
-    fclose(maps);
-    return count;
+    if (string_table == 0 || symbol_table == 0 || relocations == 0
+        || string_size == 0 || relocation_size == 0
+        || (relocation_type != DT_REL && relocation_type != DT_RELA)) return 0;
+
+    ++context->image_count;
+    const auto* symbols = reinterpret_cast<const ElfW(Sym)*>(symbol_table);
+    const auto* strings = reinterpret_cast<const char*>(string_table);
+    const size_t entry_size = relocation_type == DT_RELA
+        ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+    const size_t count = relocation_size / entry_size;
+    uint64_t registered = 0;
+    for (size_t index = 0; index < count; ++index) {
+        const ElfW(Xword) relocation_info = relocation_type == DT_RELA
+            ? reinterpret_cast<const ElfW(Rela)*>(relocations)[index].r_info
+            : reinterpret_cast<const ElfW(Rel)*>(relocations)[index].r_info;
+        const ElfW(Sym)& imported = symbols[RelocationSymbolIndex(relocation_info)];
+        if (imported.st_name >= string_size) continue;
+        RegisterImportedSymbol(context, identity.st_dev, identity.st_ino,
+                               strings + imported.st_name, &registered);
+    }
+    return 0;
 }
 
-void Register(zygisk::Api* api, const Image* images, uint32_t count,
-              const char* symbol, void* replacement, void** original) {
-    for (uint32_t index = 0; index < count; ++index) {
-        api->pltHookRegister(images[index].device, images[index].inode,
-                             symbol, replacement, original);
-    }
+#define HOOK(symbol, hook, original) \
+        {symbol, reinterpret_cast<void*>(hook), \
+         reinterpret_cast<void**>(&(original))}
+const HookSpec kHookSpecs[] = {
+        HOOK("open", HookedOpen, g_open),
+        HOOK("open64", HookedOpen64, g_open64),
+        HOOK("openat", HookedOpenAt, g_openat),
+        HOOK("openat64", HookedOpenAt64, g_openat64),
+        HOOK("stat", HookedStat, g_stat),
+        HOOK("lstat", HookedLstat, g_lstat),
+        HOOK("fstatat", HookedFstatAt, g_fstatat),
+        HOOK("stat64", HookedStat64, g_stat64),
+        HOOK("lstat64", HookedLstat64, g_lstat64),
+        HOOK("fstatat64", HookedFstatAt64, g_fstatat64),
+        HOOK("access", HookedAccess, g_access),
+        HOOK("faccessat", HookedFaccessAt, g_faccessat),
+        HOOK("opendir", HookedOpenDir, g_opendir),
+        HOOK("mkdir", HookedMkdir, g_mkdir),
+        HOOK("mkdirat", HookedMkdirAt, g_mkdirat),
+        HOOK("unlink", HookedUnlink, g_unlink),
+        HOOK("unlinkat", HookedUnlinkAt, g_unlinkat),
+        HOOK("remove", HookedRemove, g_remove),
+        HOOK("rmdir", HookedRmdir, g_rmdir),
+        HOOK("rename", HookedRename, g_rename),
+        HOOK("renameat", HookedRenameAt, g_renameat),
+        HOOK("renameat2", HookedRenameAt2, g_renameat2),
+        HOOK("readlink", HookedReadlink, g_readlink),
+        HOOK("realpath", HookedRealpath, g_realpath),
+        HOOK("chmod", HookedChmod, g_chmod),
+        HOOK("fchmodat", HookedFchmodAt, g_fchmodat),
+        HOOK("chown", HookedChown, g_chown),
+        HOOK("lchown", HookedLchown, g_lchown),
+        HOOK("fchownat", HookedFchownAt, g_fchownat),
+        HOOK("truncate", HookedTruncate, g_truncate),
+        HOOK("truncate64", HookedTruncate64, g_truncate64),
+        HOOK("utimensat", HookedUtimensAt, g_utimensat),
+        HOOK("statvfs", HookedStatVfs, g_statvfs),
+        HOOK("statvfs64", HookedStatVfs64, g_statvfs64),
+        HOOK("inotify_add_watch", HookedInotifyAddWatch, g_inotify_add_watch),
+        HOOK("dlopen", HookedDlopen, g_dlopen),
+        HOOK("android_dlopen_ext", HookedAndroidDlopenExt, g_android_dlopen_ext),
+        HOOK("fuse_req_userdata", HookedFuseReqUserdata, g_fuse_req_userdata),
+        HOOK("fuse_req_ctx", HookedFuseReqContext, g_fuse_req_context),
+        HOOK("fuse_reply_err", HookedFuseReplyErr, g_fuse_reply_err),
+        HOOK("fuse_reply_entry", HookedFuseReplyEntry, g_fuse_reply_entry),
+        HOOK("fuse_reply_attr", HookedFuseReplyAttr, g_fuse_reply_attr),
+        HOOK("fuse_reply_open", HookedFuseReplyOpen, g_fuse_reply_open),
+        HOOK("fuse_reply_write", HookedFuseReplyWrite, g_fuse_reply_write),
+        HOOK("fuse_reply_buf", HookedFuseReplyBuffer, g_fuse_reply_buffer),
+        HOOK("fuse_reply_data", HookedFuseReplyData, g_fuse_reply_data),
+        HOOK("fuse_reply_statfs", HookedFuseReplyStatVfs, g_fuse_reply_statvfs),
+        HOOK("fuse_reply_create", HookedFuseReplyCreate, g_fuse_reply_create),
+        HOOK("fuse_reply_none", HookedFuseReplyNone, g_fuse_reply_none),
+};
+#undef HOOK
+static_assert(sizeof(kHookSpecs) / sizeof(kHookSpecs[0]) <= 64);
+
+RegistrationContext RegisterMappedHooks(zygisk::Api* api,
+                                        bool (*target)(const char*)) {
+    RegistrationContext context{
+        api, kHookSpecs, sizeof(kHookSpecs) / sizeof(kHookSpecs[0]), target};
+    dl_iterate_phdr(RegisterImageImports, &context);
+    return context;
 }
 
-InstallResult RegisterHooks(zygisk::Api* api) {
-    Image images[kMaxImages]{};
-    const uint32_t count = CollectImages(images, kMaxImages);
-#define REGISTER(symbol, hook, original) \
-    Register(api, images, count, symbol, reinterpret_cast<void*>(hook), \
-             reinterpret_cast<void**>(&(original)))
-    REGISTER("open", HookedOpen, g_open);
-    REGISTER("open64", HookedOpen64, g_open64);
-    REGISTER("openat", HookedOpenAt, g_openat);
-    REGISTER("openat64", HookedOpenAt64, g_openat64);
-    REGISTER("stat", HookedStat, g_stat);
-    REGISTER("lstat", HookedLstat, g_lstat);
-    REGISTER("fstatat", HookedFstatAt, g_fstatat);
-    REGISTER("stat64", HookedStat64, g_stat64);
-    REGISTER("lstat64", HookedLstat64, g_lstat64);
-    REGISTER("fstatat64", HookedFstatAt64, g_fstatat64);
-    REGISTER("access", HookedAccess, g_access);
-    REGISTER("faccessat", HookedFaccessAt, g_faccessat);
-    REGISTER("opendir", HookedOpenDir, g_opendir);
-    REGISTER("mkdir", HookedMkdir, g_mkdir);
-    REGISTER("mkdirat", HookedMkdirAt, g_mkdirat);
-    REGISTER("unlink", HookedUnlink, g_unlink);
-    REGISTER("unlinkat", HookedUnlinkAt, g_unlinkat);
-    REGISTER("remove", HookedRemove, g_remove);
-    REGISTER("rmdir", HookedRmdir, g_rmdir);
-    REGISTER("rename", HookedRename, g_rename);
-    REGISTER("renameat", HookedRenameAt, g_renameat);
-    REGISTER("renameat2", HookedRenameAt2, g_renameat2);
-    REGISTER("readlink", HookedReadlink, g_readlink);
-    REGISTER("realpath", HookedRealpath, g_realpath);
-    REGISTER("chmod", HookedChmod, g_chmod);
-    REGISTER("fchmodat", HookedFchmodAt, g_fchmodat);
-    REGISTER("chown", HookedChown, g_chown);
-    REGISTER("lchown", HookedLchown, g_lchown);
-    REGISTER("fchownat", HookedFchownAt, g_fchownat);
-    REGISTER("truncate", HookedTruncate, g_truncate);
-    REGISTER("truncate64", HookedTruncate64, g_truncate64);
-    REGISTER("utimensat", HookedUtimensAt, g_utimensat);
-    REGISTER("statvfs", HookedStatVfs, g_statvfs);
-    REGISTER("statvfs64", HookedStatVfs64, g_statvfs64);
-    REGISTER("inotify_add_watch", HookedInotifyAddWatch, g_inotify_add_watch);
-    REGISTER("_ZN7android14IPCThreadState20clearCallingIdentityEv",
-             HookedClearCallingIdentity, g_clear_identity);
-    REGISTER("_ZN7android14IPCThreadState21restoreCallingIdentityEl",
-             HookedRestoreCallingIdentity, g_restore_identity);
-#undef REGISTER
+InstallResult RegisterHooks(zygisk::Api* api, bool binder_identity_hooks) {
+    const RegistrationContext context = RegisterMappedHooks(
+        api, IsPermanentHookTarget);
     InstallResult result;
+    result.hook_registration_attempted = context.registration_count != 0;
     result.hooks_committed = api->pltHookCommit();
     const bool has_open = g_open != nullptr || g_openat != nullptr;
     const bool has_stat = g_stat != nullptr || g_stat64 != nullptr
         || g_fstatat != nullptr || g_fstatat64 != nullptr;
-    result.identity_hooks = g_clear_identity != nullptr
-        && g_restore_identity != nullptr;
+    result.identity_hook_attempted = binder_identity_hooks;
+    result.identity_hooks = binder_identity_hooks;
     const bool filesystem_complete = has_open && has_stat
         && g_access != nullptr && g_opendir != nullptr
         && g_mkdir != nullptr && g_remove != nullptr && g_rename != nullptr
         && g_realpath != nullptr && g_readlink != nullptr
         && g_chmod != nullptr && g_chown != nullptr
         && g_statvfs != nullptr && g_inotify_add_watch != nullptr;
-    const bool raw_caller_uid = g_ndk_calling_uid != nullptr
-        || (g_binder_self != nullptr && g_binder_calling_uid != nullptr);
-    const bool identity_safe = g_caller_mode == CallerMode::kSystemMedia
-        || result.identity_hooks || raw_caller_uid;
     result.virtualization_active = result.hooks_committed
-        && filesystem_complete && identity_safe;
+        && filesystem_complete && binder_identity_hooks;
     uint32_t capability = 0;
     if (has_open) capability |= 1u << 0;
     if (has_stat) capability |= 1u << 1;
@@ -682,29 +996,64 @@ InstallResult RegisterHooks(zygisk::Api* api) {
     if (g_rename != nullptr) capability |= 1u << 6;
     if (g_realpath != nullptr) capability |= 1u << 7;
     if (g_chmod != nullptr && g_chown != nullptr) capability |= 1u << 8;
-    if (g_clear_identity != nullptr && g_restore_identity != nullptr) capability |= 1u << 9;
+    if (binder_identity_hooks) capability |= 1u << 9;
     if (g_inotify_add_watch != nullptr) capability |= 1u << 10;
-    const unsigned identity_mode = g_caller_mode == CallerMode::kSystemMedia
-        ? 0u : result.identity_hooks ? 1u : raw_caller_uid ? 2u : 3u;
-    LOGI("provider virtual hooks: images=%u committed=%d active=%d capability=%x identity_mode=%u "
+    if (g_android_dlopen_ext != nullptr || g_dlopen != nullptr) capability |= 1u << 11;
+    LOGI("provider virtual hooks: images=%u registrations=%u attempted=%d committed=%d active=%d capability=%x identity_mode=%u "
          "open=%p openat=%p stat=%p stat64=%p access=%p opendir=%p mkdir=%p "
          "remove=%p rename=%p realpath=%p",
-         count, result.hooks_committed ? 1 : 0,
-         result.virtualization_active ? 1 : 0, capability, identity_mode,
+         context.image_count, context.registration_count,
+         result.hook_registration_attempted ? 1 : 0,
+         result.hooks_committed ? 1 : 0,
+         result.virtualization_active ? 1 : 0, capability,
+         binder_identity_hooks ? 1u : 0u,
          g_open, g_openat, g_stat, g_stat64, g_access, g_opendir, g_mkdir,
          g_remove, g_rename, g_realpath);
     return result;
 }
 
+void MaybeInstallFuseHooks(const char* path, void* handle) {
+    if (!IsFuseHookTarget(path) || g_api == nullptr) return;
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(&g_fuse_install_state, &expected, 1, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    if (handle != nullptr && g_fuse_req_context == nullptr) {
+        g_fuse_req_context = reinterpret_cast<FuseReqContextFn>(
+            dlsym(handle, "fuse_req_ctx"));
+    }
+    const RegistrationContext context = RegisterMappedHooks(g_api, IsFuseHookTarget);
+    const bool committed = context.registration_count != 0
+        && g_api->pltHookCommit();
+    const bool request_scope = g_fuse_req_userdata != nullptr
+        && g_fuse_req_context != nullptr && g_fuse_reply_err != nullptr
+        && g_fuse_reply_create != nullptr;
+    const bool active = committed && request_scope;
+    __atomic_store_n(&g_fuse_install_state, active ? 2u : 3u, __ATOMIC_RELEASE);
+    LOGI("provider FUSE hooks: images=%u registrations=%u committed=%d active=%d "
+         "request=%p context=%p reply_err=%p reply_create=%p",
+         context.image_count, context.registration_count, committed ? 1 : 0,
+         active ? 1 : 0, g_fuse_req_userdata, g_fuse_req_context,
+         g_fuse_reply_err, g_fuse_reply_create);
+}
+
 }  // namespace
 
-InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
-                      uint32_t rule_count, CallerMode caller_mode) {
-    if (api == nullptr || rules == nullptr || rule_count == 0 || rule_count > kMaxRules) {
+InstallResult Install(zygisk::Api* api, JNIEnv* env, const Rule* rules,
+                      uint32_t rule_count) {
+    if (api == nullptr || env == nullptr || rules == nullptr
+        || rule_count == 0 || rule_count > kMaxRules) {
         return {};
     }
+    if (!InitializeThreadStateKey()) {
+        LOGE("provider virtual thread state initialization failed");
+        return {};
+    }
+    __atomic_store_n(&g_hooks_enabled, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_fuse_install_state, 0, __ATOMIC_RELEASE);
+    g_api = api;
     g_rule_count = 0;
-    g_caller_mode = caller_mode;
     for (uint32_t index = 0; index < rule_count; ++index) {
         const Rule& input = rules[index];
         if (input.caller_uid < 10000
@@ -712,10 +1061,8 @@ InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
             || !ValidLogicalRulePath(input.backing_path)) return {};
         for (uint32_t existing = 0; existing < g_rule_count; ++existing) {
             const PathRule& current = g_rules[existing];
-            const bool same_scope = caller_mode == CallerMode::kSystemMedia
-                ? current.user_id == input.user_id
-                : current.caller_uid == input.caller_uid
-                    && current.user_id == input.user_id;
+            const bool same_scope = current.caller_uid == input.caller_uid
+                && current.user_id == input.user_id;
             if (same_scope && strcmp(current.visible_path, input.visible_path) == 0
                 && strcmp(current.backing_path, input.backing_path) != 0) {
                 LOGE("provider virtual ambiguous rule: uid=%d user=%u visible=%s",
@@ -724,26 +1071,30 @@ InstallResult Install(zygisk::Api* api, JNIEnv*, const Rule* rules,
             }
         }
         PathRule& output = g_rules[g_rule_count++];
-        output.caller_uid = caller_mode == CallerMode::kSystemMedia
-            ? -1 : input.caller_uid;
+        output.caller_uid = input.caller_uid;
         output.user_id = input.user_id;
         strcpy(output.visible_path, input.visible_path);
         strcpy(output.backing_path, input.backing_path);
     }
-    ResolveBinderSymbols();
-    if (caller_mode == CallerMode::kBinderUid
-        && g_ndk_calling_uid == nullptr
-        && (g_binder_self == nullptr || g_binder_calling_uid == nullptr)) {
-        LOGE("provider virtual Binder calling UID unavailable");
-        return {};
+    bool binder_identity_attempted = false;
+    const bool binder_identity_hooks = InstallBinderIdentityHooks(
+        api, env, &binder_identity_attempted);
+    if (!binder_identity_hooks) {
+        LOGE("provider virtual Binder JNI identity hooks unavailable");
+        InstallResult result;
+        result.identity_hook_attempted = binder_identity_attempted;
+        return result;
     }
-    const InstallResult result = RegisterHooks(api);
-    LOGI("provider virtual installed: rules=%u caller_mode=%u binder_ndk=%d binder_cpp=%d "
-         "identity_hooks=%d committed=%d active=%d",
-         g_rule_count, static_cast<unsigned>(g_caller_mode),
-         g_ndk_calling_uid != nullptr ? 1 : 0,
-         g_binder_self != nullptr && g_binder_calling_uid != nullptr ? 1 : 0,
+    const InstallResult result = RegisterHooks(api, binder_identity_hooks);
+    if (ShouldEnableHooks(result)) {
+        __atomic_store_n(&g_hooks_enabled, 1, __ATOMIC_RELEASE);
+    }
+    LOGI("provider virtual installed: rules=%u caller_scope=request_uid "
+         "binder_jni=%d late_loader=%d attempted=%d committed=%d active=%d",
+         g_rule_count,
          result.identity_hooks ? 1 : 0,
+         g_android_dlopen_ext != nullptr || g_dlopen != nullptr ? 1 : 0,
+         result.hook_registration_attempted ? 1 : 0,
          result.hooks_committed ? 1 : 0,
          result.virtualization_active ? 1 : 0);
     if (!result.virtualization_active) g_rule_count = 0;

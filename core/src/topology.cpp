@@ -14,6 +14,7 @@ namespace {
 
 struct MountRecord {
     std::uint64_t mount_id = 0;
+    std::string device_id;
     std::string root;
     std::string mountpoint;
     std::string filesystem_type;
@@ -38,6 +39,20 @@ bool ParseUnsigned(std::string_view value, std::uint64_t* output) {
     const char* last = first + value.size();
     const auto result = std::from_chars(first, last, *output);
     return result.ec == std::errc() && result.ptr == last;
+}
+
+bool IsDeviceId(std::string_view value) {
+    const std::size_t separator = value.find(':');
+    if (separator == std::string_view::npos
+        || separator == 0
+        || separator + 1 == value.size()
+        || value.find(':', separator + 1) != std::string_view::npos) {
+        return false;
+    }
+    std::uint64_t major = 0;
+    std::uint64_t minor = 0;
+    return ParseUnsigned(value.substr(0, separator), &major)
+        && ParseUnsigned(value.substr(separator + 1), &minor);
 }
 
 bool DecodeMountInfoPath(std::string_view input, std::string* output) {
@@ -128,6 +143,34 @@ bool DeriveBackendRoot(std::string_view source, std::uint32_t user_id,
     return false;
 }
 
+bool DerivePassThroughBackendRoot(const MountRecord& record,
+                                  const std::vector<MountRecord>& records,
+                                  std::uint32_t user_id,
+                                  std::string* backend_root) {
+    if (DeriveBackendRoot(record.source, user_id, backend_root)) return true;
+
+    std::uint32_t mount_user_id = 0;
+    if (record.root != "/media"
+        || !ParseUserMountpoint(record.mountpoint, "/mnt/pass_through/",
+                                "/emulated", &mount_user_id)
+        || mount_user_id != user_id) {
+        return false;
+    }
+
+    const auto data_mount = std::find_if(
+        records.begin(), records.end(), [&record](const MountRecord& candidate) {
+            return candidate.mountpoint == "/data"
+                && candidate.root == "/"
+                && candidate.device_id == record.device_id
+                && candidate.filesystem_type == record.filesystem_type
+                && candidate.source == record.source;
+        });
+    if (data_mount == records.end()) return false;
+
+    *backend_root = "/data/media/" + std::to_string(user_id);
+    return true;
+}
+
 StorageTopologyMount* FindUserMount(StorageTopology* topology,
                                     std::uint32_t user_id) {
     for (StorageTopologyMount& mount : topology->mounts) {
@@ -203,6 +246,7 @@ bool ParseMountInfo(std::string_view mountinfo, StorageTopology* topology,
         }
         MountRecord record;
         if (!ParseUnsigned(tokens[0], &record.mount_id)
+            || !IsDeviceId(tokens[2])
             || !DecodeMountInfoPath(tokens[3], &record.root)
             || !DecodeMountInfoPath(tokens[4], &record.mountpoint)
             || !DecodeMountInfoPath(*(separator + 2), &record.source)
@@ -210,6 +254,7 @@ bool ParseMountInfo(std::string_view mountinfo, StorageTopology* topology,
             return Unsupported(topology, error, "invalid mountinfo line "
                 + std::to_string(line_number));
         }
+        record.device_id = tokens[2];
         record.filesystem_type = *(separator + 1);
         records.push_back(std::move(record));
     }
@@ -244,7 +289,7 @@ bool ParseMountInfo(std::string_view mountinfo, StorageTopology* topology,
     }
 
     std::unordered_map<std::uint32_t, const MountRecord*> user_visible_aliases;
-    std::unordered_map<std::uint32_t, const MountRecord*> backend_evidence;
+    std::unordered_map<std::uint32_t, std::string> backend_evidence;
     for (const MountRecord& record : records) {
         std::uint32_t user_id = 0;
         if (ParseUserMountpoint(record.mountpoint, "/mnt/user/", "/emulated",
@@ -254,8 +299,9 @@ bool ParseMountInfo(std::string_view mountinfo, StorageTopology* topology,
         if (ParseUserMountpoint(record.mountpoint, "/mnt/pass_through/", "/emulated",
                                 &user_id)) {
             std::string backend_root;
-            if (DeriveBackendRoot(record.source, user_id, &backend_root)) {
-                backend_evidence.emplace(user_id, &record);
+            if (DerivePassThroughBackendRoot(
+                    record, records, user_id, &backend_root)) {
+                backend_evidence.emplace(user_id, std::move(backend_root));
             }
         }
     }
@@ -273,16 +319,11 @@ bool ParseMountInfo(std::string_view mountinfo, StorageTopology* topology,
                 return Unsupported(topology, error,
                     "missing backend evidence for user " + std::to_string(user_id));
             }
-            std::string backend_root;
-            if (!DeriveBackendRoot(backend->second->source, user_id, &backend_root)) {
-                return Unsupported(topology, error,
-                    "invalid backend evidence for user " + std::to_string(user_id));
-            }
             topology->mounts.push_back({
                 user_id,
                 aggregate_visible->mount_id,
                 "/storage/emulated/" + std::to_string(user_id),
-                backend_root,
+                backend->second,
                 aggregate_visible->filesystem_type,
                 {},
             });

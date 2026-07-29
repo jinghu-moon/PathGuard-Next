@@ -1,0 +1,63 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = 'dev.pathguard.hideprobe'
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = 'dev.pathguard.hideprobe'
+        minSdk = 31
+        targetSdk = 35
+        versionCode = 1
+        versionName = '0.1-h0'
+    }
+
+    buildTypes {
+        debug {
+            debuggable = true
+        }
+        release {
+            minifyEnabled = false
+        }
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDir "$buildDir/generated/jniLibs"
+        }
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+}
+
+// The final APP_STL=none Zygisk link rewrites native/libs. NDK object output
+// keeps the independently linked probe library available for APK staging.
+def nativeOutput = rootProject.file('../../../../native/obj/local')
+def generatedJniLibs = layout.buildDirectory.dir('generated/jniLibs')
+
+tasks.register('stageNativeProbe', Copy) {
+    from(nativeOutput) {
+        include '**/libpathguard_hide_app_probe.so'
+    }
+    into(generatedJniLibs)
+    doLast {
+        if (fileTree(generatedJniLibs).matching {
+            include '**/libpathguard_hide_app_probe.so'
+        }.isEmpty()) {
+            throw new GradleException(
+                'Build pathguard_hide_app_probe with scripts/build-native.ps1 first')
+        }
+    }
+}
+
+tasks.named('preBuild').configure {
+    dependsOn tasks.named('stageNativeProbe')
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}

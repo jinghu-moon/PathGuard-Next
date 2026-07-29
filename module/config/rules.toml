@@ -13,4 +13,5 @@ deny = [
 ]
 redirect = [
     "Download/localsend-source" -> "Download/localsend-redirect",
+    "Pictures" -> "Download/localsend-redirect",
 ]

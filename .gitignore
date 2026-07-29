@@ -15,6 +15,9 @@
 /.ninja_deps
 /.ninja_log
 /.cache/
+**/.gradle/
+**/build/
+**/local.properties
 /module/run/
 /module/bin/
 /native/libs/

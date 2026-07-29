@@ -5,14 +5,10 @@
 #include <limits.h>
 #include <sys/types.h>
 
+#include "pathguard/provider_redirect_lifecycle.hpp"
 #include "zygisk.hpp"
 
 namespace pathguard::provider_redirect {
-
-enum class CallerMode : uint8_t {
-    kBinderUid = 0,
-    kSystemMedia = 1,
-};
 
 struct Rule {
     int32_t caller_uid;
@@ -21,13 +17,7 @@ struct Rule {
     char backing_path[PATH_MAX];
 };
 
-struct InstallResult {
-    bool hooks_committed = false;
-    bool virtualization_active = false;
-    bool identity_hooks = false;
-};
-
 InstallResult Install(zygisk::Api* api, JNIEnv* env, const Rule* rules,
-                      uint32_t rule_count, CallerMode caller_mode);
+                      uint32_t rule_count);
 
 }  // namespace pathguard::provider_redirect

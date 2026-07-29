@@ -57,6 +57,24 @@ LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include $(ROOT_PATH)/native/include
 include $(BUILD_EXECUTABLE)
 
 include $(CLEAR_VARS)
+LOCAL_MODULE := pathguard_hide_vfs_probe
+LOCAL_SRC_FILES := ../tests/device/hide/hide_vfs_probe.cpp \
+    ../tests/device/hide/hide_probe_contract.cpp
+LOCAL_C_INCLUDES := $(ROOT_PATH)/tests/device/hide
+LOCAL_CPPFLAGS := -Wall -Wextra -Werror
+include $(BUILD_EXECUTABLE)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := pathguard_hide_app_probe
+LOCAL_SRC_FILES := ../tests/device/hide/hide_app_probe_jni.cpp \
+    ../tests/device/hide/hide_vfs_probe.cpp \
+    ../tests/device/hide/hide_probe_contract.cpp
+LOCAL_C_INCLUDES := $(ROOT_PATH)/tests/device/hide
+LOCAL_CPPFLAGS := -Wall -Wextra -Werror \
+    -DPATHGUARD_HIDE_PROBE_NO_MAIN=1
+include $(BUILD_SHARED_LIBRARY)
+
+include $(CLEAR_VARS)
 LOCAL_MODULE := pathguard_rules_benchmark
 LOCAL_SRC_FILES := ../tests/perf/policy_benchmark.cpp \
     ../daemon/src/rules_control.cpp

@@ -56,11 +56,26 @@ bool HasSafeTail(const char* tail) {
 
 }  // namespace
 
+bool MatchesVisiblePath(const PathRule* rules, uint32_t rule_count,
+                        const char* path) {
+    if (rules == nullptr || path == nullptr || path[0] != '/') return false;
+    for (uint32_t index = 0; index < rule_count; ++index) {
+        const PathRule& rule = rules[index];
+        const char* suffix = nullptr;
+        char root[128]{};
+        if (!LogicalSuffix(path, rule.user_id, &suffix, root, sizeof(root))) continue;
+        const char* tail = nullptr;
+        if (MatchesLogicalPath(suffix, rule.visible_path, &tail) && HasSafeTail(tail)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool RewriteAbsolutePath(const PathRule* rules, uint32_t rule_count,
                          int32_t caller_uid, const char* path,
                          char* output, size_t capacity) {
-    if (rules == nullptr || output == nullptr || capacity == 0
-        || (caller_uid < 10000 && caller_uid != -1)
+    if (rules == nullptr || output == nullptr || capacity == 0 || caller_uid < 10000
         || path == nullptr || path[0] != '/') return false;
     const PathRule* selected = nullptr;
     const char* selected_tail = nullptr;
@@ -68,7 +83,7 @@ bool RewriteAbsolutePath(const PathRule* rules, uint32_t rule_count,
     size_t selected_length = 0;
     for (uint32_t index = 0; index < rule_count; ++index) {
         const PathRule& rule = rules[index];
-        if (rule.caller_uid != -1 && rule.caller_uid != caller_uid) continue;
+        if (rule.caller_uid != caller_uid) continue;
         const char* suffix = nullptr;
         char root[128]{};
         if (!LogicalSuffix(path, rule.user_id, &suffix, root, sizeof(root))) continue;
@@ -93,8 +108,7 @@ bool RewriteAbsolutePath(const PathRule* rules, uint32_t rule_count,
 bool RestoreAbsolutePath(const PathRule* rules, uint32_t rule_count,
                          int32_t caller_uid, const char* path,
                          char* output, size_t capacity) {
-    if (rules == nullptr || output == nullptr || capacity == 0
-        || (caller_uid < 10000 && caller_uid != -1)
+    if (rules == nullptr || output == nullptr || capacity == 0 || caller_uid < 10000
         || path == nullptr || path[0] != '/') return false;
     const PathRule* selected = nullptr;
     const char* selected_tail = nullptr;
@@ -102,7 +116,7 @@ bool RestoreAbsolutePath(const PathRule* rules, uint32_t rule_count,
     size_t selected_length = 0;
     for (uint32_t index = 0; index < rule_count; ++index) {
         const PathRule& rule = rules[index];
-        if (rule.caller_uid != -1 && rule.caller_uid != caller_uid) continue;
+        if (rule.caller_uid != caller_uid) continue;
         const char* suffix = nullptr;
         char root[128]{};
         if (!LogicalSuffix(path, rule.user_id, &suffix, root, sizeof(root))) continue;
@@ -110,7 +124,9 @@ bool RestoreAbsolutePath(const PathRule* rules, uint32_t rule_count,
         if (!MatchesLogicalPath(suffix, rule.backing_path, &tail)) continue;
         if (!HasSafeTail(tail)) return false;
         const size_t backing_length = strlen(rule.backing_path);
-        if (selected == nullptr || backing_length > selected_length) {
+        if (selected == nullptr || backing_length > selected_length
+            || (backing_length == selected_length
+                && strcmp(rule.visible_path, selected->visible_path) < 0)) {
             selected = &rule;
             selected_tail = tail;
             selected_length = backing_length;
