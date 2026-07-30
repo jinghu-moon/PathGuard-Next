@@ -7,7 +7,9 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <map>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -316,7 +318,7 @@ std::optional<PolicyBlob> EncodeAndVerify(const CanonicalPolicy& canonical,
 }  // namespace
 
 bool RulesBuildResult::ok() const {
-    return resolved.has_value() && canonical.has_value() && blob.has_value()
+    return canonical_v2.has_value() && policy_v6.has_value() && blob.has_value()
         && !HasErrors(diagnostics);
 }
 
@@ -361,8 +363,8 @@ bool IsSameOrAncestor(const NormalizedPath& ancestor,
             && path.bytes[ancestor.bytes.size()] == '/');
 }
 
-RulesBuildResult CompileRules(const SourceBuffer& source,
-                              const RulesLimits& limits) {
+static RulesBuildResult CompileRulesLegacy(const SourceBuffer& source,
+                                           const RulesLimits& limits) {
     RulesBuildResult output;
     RulesCompileResult parsed = ParseRulesDocument(source, limits);
     output.statistics = parsed.statistics;
@@ -507,6 +509,175 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
     return output;
 }
 
+RulesBuildResult CompileRules(const SourceBuffer& source,
+                              const RulesLimits& limits) {
+    RulesBuildResult output;
+    RulesV2ParseResult parsed = ParseRulesDocumentV2(source, limits);
+    output.diagnostics = std::move(parsed.diagnostics);
+    if (!parsed.ok()) return output;
+    RulesV2BuildResult built = BuildCanonicalPolicyV2(*parsed.document, limits);
+    output.diagnostics.insert(output.diagnostics.end(),
+                              built.diagnostics.begin(), built.diagnostics.end());
+    if (!built.ok() || HasErrors(output.diagnostics)) return output;
+
+    pathguard::PolicyV6 policy;
+    policy.allow_legacy_mount = built.canonical->allow_legacy_mount;
+    for (const CanonicalAppPolicyV2& source_app : built.canonical->apps) {
+        pathguard::PolicyPackageV6 package;
+        package.package = source_app.package;
+        package.all_processes = source_app.processes.empty();
+        package.processes = source_app.processes;
+        package.provider_enabled = source_app.provider.enabled;
+        for (std::int32_t user : source_app.users) {
+            package.users.push_back(static_cast<std::uint32_t>(user));
+        }
+        std::map<std::string, std::uint32_t> selector_ids;
+        for (const CanonicalActionV2& source_action : source_app.actions) {
+            const std::string selector_root = source_action.selector.source_kind
+                    == SelectorSourceKind::kLiteral
+                ? source_action.selector.root + "/" + source_action.selector.glob
+                : source_action.selector.root;
+            std::string selector_key = selector_root;
+            selector_key.push_back('\0');
+            selector_key.push_back(static_cast<char>(source_action.selector.source_kind));
+            selector_key.push_back(static_cast<char>(source_action.selector.object_type));
+            selector_key.append(source_action.selector.base_pattern.canonical);
+            for (const auto& except : source_action.selector.except_patterns) {
+                selector_key.push_back('\0');
+                selector_key.append(except.canonical);
+            }
+            auto found = selector_ids.find(selector_key);
+            std::uint32_t selector_id = 0;
+            if (found == selector_ids.end()) {
+                selector_id = static_cast<std::uint32_t>(package.selectors.size());
+                pathguard::PolicySelectorV6 selector;
+                selector.match_kind = source_action.selector.source_kind
+                        == SelectorSourceKind::kLiteral
+                    ? pathguard::PolicyMatchKind::kLiteralPrefix
+                    : pathguard::PolicyMatchKind::kGlob;
+                selector.object_type = source_action.selector.object_type
+                        == SelectorObjectType::kFile
+                    ? pathguard::PolicyObjectType::kFile
+                    : source_action.selector.object_type == SelectorObjectType::kDirectory
+                        ? pathguard::PolicyObjectType::kDirectory
+                        : pathguard::PolicyObjectType::kAny;
+                selector.root = selector_root;
+                selector.base_pattern = source_action.selector.base_pattern;
+                selector.except_patterns = source_action.selector.except_patterns;
+                package.selectors.push_back(std::move(selector));
+                selector_ids.emplace(std::move(selector_key), selector_id);
+            } else {
+                selector_id = found->second;
+            }
+            pathguard::PolicyActionV6 action;
+            action.selector_index = selector_id;
+            action.kind = source_action.action == RuleActionKind::kDeny
+                ? pathguard::PolicyActionKind::kDeny
+                : pathguard::PolicyActionKind::kRedirect;
+            if (source_action.enforcement == RuleEnforcement::kProvider) {
+                action.domain = pathguard::PolicyExecutionDomain::kProvider;
+                // Forward Provider routing only needs a trustworthy Binder caller
+                // and the concrete path operations exercised by the adapter. Query/
+                // insert/reverse visibility is admitted separately when requested.
+                action.required_capabilities = kCapabilityProviderCallerUid;
+                action.required_operations = action.kind
+                        == pathguard::PolicyActionKind::kDeny
+                    ? kProviderCompositeOperationsV1 & ~
+                        (kOperationProviderQuery | kOperationProviderInsert
+                         | kOperationMediaScan | kOperationReverseMapping)
+                    : kOperationOpenRead | kOperationOpenWrite | kOperationCreate
+                        | kOperationLookupStat | kOperationAccess
+                        | kOperationRename | kOperationUnlink;
+            } else if (source_action.enforcement == RuleEnforcement::kComplete) {
+                action.domain = pathguard::PolicyExecutionDomain::kCompleteVfs;
+                action.required_capabilities = kCapabilityFuseCompletePath;
+                action.required_operations = kCompleteVfsOperationsV1;
+            } else if (source_action.selector.source_kind == SelectorSourceKind::kGlob) {
+                action.domain = pathguard::PolicyExecutionDomain::kAppPath;
+                action.required_capabilities = kCapabilityAppPathAdapter;
+                action.required_operations = kAppPathOperationsV1;
+            } else {
+                action.domain = pathguard::PolicyExecutionDomain::kMount;
+            }
+            action.priority = source_action.priority;
+            if (action.kind == pathguard::PolicyActionKind::kRedirect) {
+                action.target = source_action.target;
+                action.preserve = pathguard::PolicyPreserveMode::kRelative;
+                action.collision = pathguard::PolicyCollisionMode::kReject;
+                action.reverse = pathguard::PolicyReverseMode::kStaticUnique;
+            }
+            package.actions.push_back(std::move(action));
+        }
+        for (auto& action : package.actions) {
+            if (action.kind != pathguard::PolicyActionKind::kRedirect
+                || action.domain == pathguard::PolicyExecutionDomain::kMount) {
+                continue;
+            }
+            std::vector<std::string_view> source_roots;
+            for (const auto& candidate : package.actions) {
+                if (candidate.kind == pathguard::PolicyActionKind::kRedirect
+                    && candidate.domain == action.domain
+                    && candidate.target == action.target
+                    && candidate.selector_index < package.selectors.size()) {
+                    const std::string& root =
+                        package.selectors[candidate.selector_index].root;
+                    if (std::find(source_roots.begin(), source_roots.end(), root)
+                        == source_roots.end()) {
+                        source_roots.emplace_back(root);
+                    }
+                }
+            }
+            action.reverse = source_roots.size() == 1
+                ? pathguard::PolicyReverseMode::kStaticUnique
+                : pathguard::PolicyReverseMode::kProvenance;
+            // Reverse visibility is admitted at reverse/query operation time. It
+            // must not make the forward create/write route unavailable: when the
+            // provenance service is absent, forward routing remains deterministic
+            // while reverse lookup reports ambiguous/unsupported instead of
+            // inventing a canonical source.
+        }
+        policy.packages.push_back(std::move(package));
+    }
+    PolicyBlob blob;
+    std::string encode_error;
+    const auto encode_started = Clock::now();
+    if (!pathguard::EncodePolicyV6(policy, &blob.bytes, &encode_error)) {
+        output.statistics.encode_ns = ElapsedNs(encode_started);
+        AddDiagnostic(&output.diagnostics, kPolicyEncode, "policy_encode_failed",
+                      {}, DiagnosticSeverity::kError, limits);
+        return output;
+    }
+    output.statistics.encode_ns = ElapsedNs(encode_started);
+    blob.content_generation = pathguard::ComputePolicyV6ContentGeneration(policy);
+    pathguard::PolicyV6 decoded;
+    const auto verify_started = Clock::now();
+    const auto verified = pathguard::DecodePolicyV6(blob.bytes, &decoded);
+    output.statistics.verify_ns = ElapsedNs(verify_started);
+    if (!verified.ok || verified.content_generation != blob.content_generation) {
+        AddDiagnostic(&output.diagnostics, kPolicyEncode, "policy_verify_failed",
+                      {}, DiagnosticSeverity::kError, limits);
+        return output;
+    }
+    output.requirements.mount_actions = 0;
+    for (const auto& package : policy.packages) {
+        for (const auto& action : package.actions) {
+            if (action.domain == pathguard::PolicyExecutionDomain::kMount) {
+                output.requirements.mount_actions |= action.kind
+                        == pathguard::PolicyActionKind::kDeny
+                    ? kMountActionDenyAnchor : kMountActionRedirect;
+            }
+            if (action.domain == pathguard::PolicyExecutionDomain::kProvider) {
+                output.requirements.provider = true;
+            }
+        }
+    }
+    output.requirements.topology = !policy.packages.empty();
+    output.blob = std::move(blob);
+    output.policy_v6 = std::move(policy);
+    output.canonical_v2 = std::move(*built.canonical);
+    return output;
+}
+
 AdmissionResult AdmitPolicy(const CanonicalPolicy& policy,
                             const PolicyRequirements& requirements,
                             const DeviceSnapshot& snapshot) {
@@ -526,20 +697,45 @@ AdmissionResult AdmitPolicy(const CanonicalPolicy& policy,
     return output;
 }
 
+AdmissionResult AdmitPolicy(const pathguard::PolicyV6& policy,
+                            const PolicyRequirements& requirements,
+                            const DeviceSnapshot& snapshot) {
+    AdmissionResult output;
+    output.content_generation = pathguard::ComputePolicyV6ContentGeneration(policy);
+    output.capability_generation = snapshot.capability_generation;
+    output.topology_generation = snapshot.topology_generation;
+    const MountBackendSelection selection = SelectMountBackend(
+        requirements.mount_actions, snapshot.mount, policy.allow_legacy_mount);
+    output.backend = requirements.mount_actions == 0
+        ? MountBackendKind::kStrictOpenTree : selection.backend;
+    output.reason = requirements.mount_actions == 0
+        ? MountBackendReason::kNone : selection.reason;
+    output.admitted = (requirements.mount_actions == 0
+            || selection.backend != MountBackendKind::kUnsupported)
+        && (!requirements.topology || snapshot.topology_supported);
+    return output;
+}
+
 bool VerifyPolicyBytes(const std::vector<std::uint8_t>& bytes,
                        std::uint64_t expected_content_generation) {
-    pathguard::PolicyDocument decoded;
-    pathguard::ParseError error;
-    std::uint64_t decoded_generation = 0;
-    return pathguard::DecodePolicy(bytes, &decoded, &decoded_generation, &error)
-        && decoded_generation == expected_content_generation
-        && pathguard::ComputeContentGeneration(decoded)
+    pathguard::PolicyV6 decoded;
+    const pathguard::PolicyV6DecodeResult result =
+        pathguard::DecodePolicyV6(bytes, &decoded);
+    return result.ok && result.content_generation == expected_content_generation
+        && pathguard::ComputePolicyV6ContentGeneration(decoded)
             == expected_content_generation;
 }
 
 bool VerifyPolicyBlob(const CanonicalPolicy& policy, const PolicyBlob& blob) {
     const pathguard::PolicyDocument expected = ToPolicyDocument(policy);
     return pathguard::ComputeContentGeneration(expected)
+            == blob.content_generation
+        && VerifyPolicyBytes(blob.bytes, blob.content_generation);
+}
+
+bool VerifyPolicyBlob(const pathguard::PolicyV6& policy,
+                      const PolicyBlob& blob) {
+    return pathguard::ComputePolicyV6ContentGeneration(policy)
             == blob.content_generation
         && VerifyPolicyBytes(blob.bytes, blob.content_generation);
 }

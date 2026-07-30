@@ -8,9 +8,11 @@
 #include <vector>
 
 #include "pathguard/mount_backend.h"
+#include "pathguard/policy_v6.h"
 #include "pathguard/rules/diagnostic.h"
 #include "pathguard/rules/document.h"
 #include "pathguard/rules/source.h"
+#include "pathguard/rules/schema_v2.h"
 #include "pathguard/rules_contract.h"
 
 namespace pathguard::rules {
@@ -104,6 +106,8 @@ struct AdmissionResult {
 struct RulesBuildResult {
     std::optional<ResolvedPolicy> resolved;
     std::optional<CanonicalPolicy> canonical;
+    std::optional<CanonicalPolicyV2> canonical_v2;
+    std::optional<pathguard::PolicyV6> policy_v6;
     PolicyRequirements requirements;
     std::optional<PolicyBlob> blob;
     CompileStatistics statistics;
@@ -124,7 +128,11 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
 AdmissionResult AdmitPolicy(const CanonicalPolicy& policy,
                             const PolicyRequirements& requirements,
                             const DeviceSnapshot& snapshot);
+AdmissionResult AdmitPolicy(const pathguard::PolicyV6& policy,
+                            const PolicyRequirements& requirements,
+                            const DeviceSnapshot& snapshot);
 bool VerifyPolicyBlob(const CanonicalPolicy& policy, const PolicyBlob& blob);
+bool VerifyPolicyBlob(const pathguard::PolicyV6& policy, const PolicyBlob& blob);
 bool VerifyPolicyBytes(const std::vector<std::uint8_t>& bytes,
                        std::uint64_t expected_content_generation);
 

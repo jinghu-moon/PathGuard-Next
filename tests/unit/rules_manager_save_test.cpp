@@ -28,9 +28,12 @@ std::string Read(const fs::path& path) {
 }
 
 std::string Rules(std::string_view target, bool provider = false) {
-    return "format = 1\n[apps.\"com.example.app\"]\n"
-        + std::string(provider ? "users = [0]\nfile_picker = true\n" : "")
-        + "redirect = [\"A\" -> \"" + std::string(target) + "\"]\n";
+    return "format = 2\n[apps.\"com.example.app\"]\n"
+        + std::string(provider ? "users=[0]\nprovider={enabled=true}\n" : "")
+        + "redirect_rules=[{select={root=\"A\",glob=\"item\"},to=\""
+        + std::string(target) + "\""
+        + std::string(provider ? ",enforcement=\"provider\"" : "")
+        + "}]\n";
 }
 
 void ReplaceDuringSave(const fs::path&) {
@@ -75,7 +78,7 @@ int main() {
     assert(reconciler.state().active_content_generation == generation);
 
     ManagerSaveResult invalid = reconciler.SaveRules(
-        digest, "format = 1\ninvalid = true\n");
+        digest, "format = 2\ninvalid = true\n");
     assert(!invalid.ok() && !invalid.saved);
     assert(!invalid.error_code.empty());
     assert(Read(source_path) == Rules("Initial"));
@@ -85,21 +88,20 @@ int main() {
     unsupported.provider_supported = false;
     ++unsupported.capability_generation;
     reconciler.SetDeviceSnapshot(unsupported);
-    ManagerSaveResult denied = reconciler.SaveRules(
+    ManagerSaveResult deferred = reconciler.SaveRules(
         digest, Rules("Provider", true));
-    assert(!denied.ok() && !denied.saved);
-    assert(denied.error_code == "PG-ADMISSION-UNSUPPORTED");
-    assert(Read(source_path) == Rules("Initial"));
-    assert(denied.reconcile.state.active_content_generation == generation);
-    assert(denied.reconcile.state.deployment_epoch == epoch);
+    assert(deferred.ok() && deferred.saved);
+    assert(Read(source_path) == Rules("Provider", true));
+    assert(deferred.reconcile.state.deployment_epoch == epoch + 1);
+    const std::string provider_digest = deferred.reconcile.state.source_digest;
 
     reconciler.SetDeviceSnapshot(device);
-    ManagerSaveResult saved = reconciler.SaveRules(digest, Rules("Saved"));
+    ManagerSaveResult saved = reconciler.SaveRules(provider_digest, Rules("Saved"));
     assert(saved.ok() && saved.saved && saved.reconcile.published);
     assert(Read(source_path) == Rules("Saved"));
     assert(saved.reconcile.state.source_digest != digest);
     assert(saved.reconcile.state.active_content_generation != generation);
-    assert(saved.reconcile.state.deployment_epoch == epoch + 1);
+    assert(saved.reconcile.state.deployment_epoch == epoch + 2);
     assert(saved.reconcile.state.capability_generation
            == device.capability_generation);
     assert(saved.reconcile.state.topology_generation

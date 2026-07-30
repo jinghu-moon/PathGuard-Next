@@ -1,254 +1,172 @@
 #include "pathguard/binary.h"
 
 #include <algorithm>
-#include <cstdint>
-#include <limits>
-#include <string>
+#include <charconv>
+#include <map>
 #include <string_view>
-#include <tuple>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
-#include <vector>
 
-#include "pathguard/policy_format.h"
-#include "pathguard/validation.h"
+#include "pathguard/policy_v6.h"
 
 namespace pathguard {
 namespace {
-
-using binary_format::kEventRuleSize;
-using binary_format::kHeaderSize;
-using binary_format::kMountRuleSize;
-using binary_format::kPackageSize;
 
 bool Fail(ParseError* error, std::string message) {
     if (error != nullptr) *error = {0, std::move(message)};
     return false;
 }
 
-void Put8(std::vector<std::uint8_t>* output, std::uint8_t value) {
-    output->push_back(value);
+std::uint32_t UserId(std::string_view value, bool* ok) {
+    std::uint32_t result = 0;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+    *ok = parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size();
+    return result;
 }
 
-void Put16(std::vector<std::uint8_t>* output, std::uint16_t value) {
-    output->push_back(static_cast<std::uint8_t>(value));
-    output->push_back(static_cast<std::uint8_t>(value >> 8));
-}
-
-void Put32(std::vector<std::uint8_t>* output, std::uint32_t value) {
-    for (int index = 0; index < 4; ++index) {
-        output->push_back(static_cast<std::uint8_t>(value >> (index * 8)));
+bool ToPolicyV6(const PolicyDocument& document, PolicyV6* output,
+                ParseError* error) {
+    if (document.failure_mode != FailureMode::kOpen || document.apps.empty()) {
+        return Fail(error, "policy document is not executable");
     }
-}
-
-void Put64(std::vector<std::uint8_t>* output, std::uint64_t value) {
-    for (int index = 0; index < 8; ++index) {
-        output->push_back(static_cast<std::uint8_t>(value >> (index * 8)));
+    output->allow_legacy_mount = document.allow_legacy_string_bind;
+    for (const AppPolicy& app : document.apps) {
+        PolicyPackageV6 package;
+        package.package = app.package;
+        package.provider_enabled = app.provider_compat == ProviderCompat::kVirtualize;
+        package.all_processes = app.processes.empty()
+            || std::find(app.processes.begin(), app.processes.end(), "*") != app.processes.end();
+        if (!package.all_processes) package.processes = app.processes;
+        package.all_users = std::find(app.users.begin(), app.users.end(), "*") != app.users.end();
+        if (!package.all_users) {
+            for (const std::string& user : app.users) {
+                bool ok = false;
+                const std::uint32_t id = UserId(user, &ok);
+                if (!ok) return Fail(error, "invalid user id");
+                package.users.push_back(id);
+            }
+        }
+        std::map<std::string, std::uint32_t> selectors;
+        auto selector_for = [&](const std::string& root) {
+            const auto found = selectors.find(root);
+            if (found != selectors.end()) return found->second;
+            const std::uint32_t id = static_cast<std::uint32_t>(package.selectors.size());
+            PolicySelectorV6 selector;
+            selector.match_kind = PolicyMatchKind::kLiteralPrefix;
+            selector.object_type = PolicyObjectType::kAny;
+            selector.root = root;
+            package.selectors.push_back(std::move(selector));
+            selectors.emplace(root, id);
+            return id;
+        };
+        for (const LogicalMountRule& rule : app.mounts) {
+            PolicyActionV6 action;
+            action.selector_index = selector_for(rule.visible_path);
+            action.kind = rule.action == MountAction::kDeny
+                ? PolicyActionKind::kDeny : PolicyActionKind::kRedirect;
+            action.domain = PolicyExecutionDomain::kMount;
+            if (action.kind == PolicyActionKind::kRedirect) {
+                action.target = rule.backing_path;
+                action.preserve = PolicyPreserveMode::kRelative;
+                action.collision = PolicyCollisionMode::kReject;
+                action.reverse = PolicyReverseMode::kStaticUnique;
+            }
+            package.actions.push_back(std::move(action));
+        }
+        for (const EventRule& rule : app.events) {
+            PolicyActionV6 action;
+            action.selector_index = selector_for(rule.source_path);
+            action.kind = rule.action == EventAction::kObserve
+                ? PolicyActionKind::kObserve : PolicyActionKind::kExport;
+            action.domain = PolicyExecutionDomain::kEvent;
+            action.options = rule.options;
+            if (action.kind == PolicyActionKind::kExport) {
+                action.target = rule.target_path;
+                action.preserve = PolicyPreserveMode::kRelative;
+                action.collision = PolicyCollisionMode::kReject;
+            }
+            package.actions.push_back(std::move(action));
+        }
+        output->packages.push_back(std::move(package));
     }
-}
-
-void Store32(std::vector<std::uint8_t>* output, std::size_t offset,
-             std::uint32_t value) {
-    for (int index = 0; index < 4; ++index) {
-        (*output)[offset + index] = static_cast<std::uint8_t>(value >> (index * 8));
-    }
-}
-
-std::uint16_t Read16(const std::uint8_t* input) {
-    return static_cast<std::uint16_t>(input[0])
-        | static_cast<std::uint16_t>(input[1]) << 8;
-}
-
-std::uint32_t Read32(const std::uint8_t* input) {
-    std::uint32_t value = 0;
-    for (int index = 0; index < 4; ++index) {
-        value |= static_cast<std::uint32_t>(input[index]) << (index * 8);
-    }
-    return value;
-}
-
-std::uint64_t Read64(const std::uint8_t* input) {
-    std::uint64_t value = 0;
-    for (int index = 0; index < 8; ++index) {
-        value |= static_cast<std::uint64_t>(input[index]) << (index * 8);
-    }
-    return value;
-}
-
-void PutCanonicalString(std::vector<std::uint8_t>* output, std::string_view value) {
-    Put32(output, static_cast<std::uint32_t>(value.size()));
-    output->insert(output->end(), value.begin(), value.end());
-}
-
-std::vector<std::uint8_t> CanonicalPlan(const AppPolicy& policy,
-                                        FailureMode failure_mode,
-                                        bool allow_legacy_string_bind) {
-    std::vector<std::uint8_t> bytes = {'P', 'G', 'P', 'L', '5', 0};
-    Put8(&bytes, static_cast<std::uint8_t>(failure_mode));
-    Put8(&bytes, static_cast<std::uint8_t>(policy.media_compat));
-    Put8(&bytes, static_cast<std::uint8_t>(policy.provider_compat));
-    Put8(&bytes, allow_legacy_string_bind ? 1 : 0);
-    PutCanonicalString(&bytes, policy.package);
-    Put32(&bytes, static_cast<std::uint32_t>(policy.users.size()));
-    for (const std::string& user : policy.users) PutCanonicalString(&bytes, user);
-    Put32(&bytes, static_cast<std::uint32_t>(policy.processes.size()));
-    for (const std::string& process : policy.processes) {
-        PutCanonicalString(&bytes, process);
-    }
-    Put32(&bytes, static_cast<std::uint32_t>(policy.mounts.size()));
-    for (const LogicalMountRule& rule : policy.mounts) {
-        Put8(&bytes, static_cast<std::uint8_t>(rule.action));
-        Put16(&bytes, rule.depth);
-        Put16(&bytes, rule.flags);
-        PutCanonicalString(&bytes, rule.visible_path);
-        PutCanonicalString(&bytes, rule.backing_path);
-    }
-    Put32(&bytes, static_cast<std::uint32_t>(policy.events.size()));
-    for (const EventRule& rule : policy.events) {
-        Put8(&bytes, static_cast<std::uint8_t>(rule.action));
-        Put32(&bytes, rule.options);
-        PutCanonicalString(&bytes, rule.source_path);
-        PutCanonicalString(&bytes, rule.target_path);
-    }
-    return bytes;
-}
-
-std::uint64_t PlanGeneration(const AppPolicy& policy, FailureMode failure_mode,
-                             bool allow_legacy_string_bind) {
-    const std::vector<std::uint8_t> bytes = CanonicalPlan(
-        policy, failure_mode, allow_legacy_string_bind);
-    return binary_format::Fnv1a64(bytes.data(), bytes.size());
-}
-
-std::uint64_t ContentGeneration(const PolicyDocument& document) {
-    std::vector<const AppPolicy*> apps;
-    apps.reserve(document.apps.size());
-    for (const AppPolicy& app : document.apps) apps.push_back(&app);
-    std::sort(apps.begin(), apps.end(), [](const AppPolicy* lhs, const AppPolicy* rhs) {
-        return lhs->package < rhs->package;
-    });
-
-    std::vector<std::uint8_t> bytes = {'P', 'G', 'I', 'R', '5', 0};
-    Put16(&bytes, static_cast<std::uint16_t>(document.schema));
-    Put8(&bytes, static_cast<std::uint8_t>(document.failure_mode));
-    Put8(&bytes, document.allow_legacy_string_bind ? 1 : 0);
-    Put32(&bytes, static_cast<std::uint32_t>(apps.size()));
-    for (const AppPolicy* app : apps) {
-        const std::vector<std::uint8_t> plan = CanonicalPlan(
-            *app, document.failure_mode, document.allow_legacy_string_bind);
-        Put32(&bytes, static_cast<std::uint32_t>(plan.size()));
-        bytes.insert(bytes.end(), plan.begin(), plan.end());
-    }
-    return binary_format::Fnv1a64(bytes.data(), bytes.size());
-}
-
-std::string Join(const std::vector<std::string>& values) {
-    std::string joined;
-    for (std::size_t index = 0; index < values.size(); ++index) {
-        if (index != 0) joined.push_back(',');
-        joined.append(values[index]);
-    }
-    return joined;
-}
-
-bool Split(std::string_view value, std::vector<std::string>* output) {
-    output->clear();
-    std::size_t start = 0;
-    while (start <= value.size()) {
-        const std::size_t end = value.find(',', start);
-        const std::string_view item = value.substr(
-            start, end == std::string_view::npos ? value.size() - start : end - start);
-        if (item.empty()) return false;
-        output->emplace_back(item);
-        if (end == std::string_view::npos) break;
-        start = end + 1;
-    }
-    return !output->empty();
-}
-
-class StringTable {
-public:
-    StringTable() { Add(""); }
-
-    std::uint32_t Add(std::string_view value) {
-        const auto existing = offsets_.find(std::string(value));
-        if (existing != offsets_.end()) return existing->second;
-        const std::uint32_t offset = static_cast<std::uint32_t>(bytes_.size());
-        std::string key(value);
-        offsets_.emplace(key, offset);
-        bytes_.insert(bytes_.end(), key.begin(), key.end());
-        bytes_.push_back(0);
-        return offset;
-    }
-
-    const std::vector<std::uint8_t>& bytes() const { return bytes_; }
-
-private:
-    std::unordered_map<std::string, std::uint32_t> offsets_;
-    std::vector<std::uint8_t> bytes_;
-};
-
-bool ReadString(const std::vector<std::uint8_t>& input, std::uint32_t string_offset,
-                std::uint32_t relative_offset, std::string* output) {
-    if (string_offset > input.size() || relative_offset >= input.size() - string_offset) {
-        return false;
-    }
-    const std::size_t begin = string_offset + relative_offset;
-    const auto end = std::find(input.begin() + static_cast<std::ptrdiff_t>(begin),
-                               input.end(), 0);
-    if (end == input.end()) return false;
-    output->assign(input.begin() + static_cast<std::ptrdiff_t>(begin), end);
     return true;
 }
 
-bool SameMount(const LogicalMountRule& lhs, const LogicalMountRule& rhs) {
-    return lhs.action == rhs.action && lhs.visible_path == rhs.visible_path
-        && lhs.backing_path == rhs.backing_path && lhs.depth == rhs.depth
-        && lhs.flags == rhs.flags;
-}
-
-bool SameEvent(const EventRule& lhs, const EventRule& rhs) {
-    return lhs.action == rhs.action && lhs.source_path == rhs.source_path
-        && lhs.target_path == rhs.target_path && lhs.options == rhs.options;
-}
-
-bool CanonicalizeDocument(const PolicyDocument& input, PolicyDocument* output,
-                          ParseError* error) {
-    if (input.schema != binary_format::kSchemaVersion
-        || input.failure_mode != FailureMode::kOpen || input.apps.empty()) {
-        return Fail(error, "policy document is not executable schema 2");
-    }
-    *output = input;
-    std::unordered_set<std::string> packages;
-    for (AppPolicy& app : output->apps) {
-        if (!packages.insert(app.package).second) {
-            return Fail(error, "duplicate package");
-        }
-        if (!ValidatePolicy(&app, error)) return false;
-        if (app.media_compat != MediaCompat::kOff) {
-            return Fail(error,
-                        "media compatibility is not executable in redirect-only R1");
-        }
-        for (const LogicalMountRule& rule : app.mounts) {
-            if (rule.action != MountAction::kRedirect
-                && rule.action != MountAction::kDeny) {
-                return Fail(error, "mount action is not executable in Phase R1");
+bool FromPolicyV6(const PolicyV6& input, PolicyDocument* output,
+                  ParseError* error) {
+    PolicyDocument document;
+    document.schema = 2;  // Compatibility DTO only; bytes are always schema 3.
+    document.failure_mode = FailureMode::kOpen;
+    document.allow_legacy_string_bind = input.allow_legacy_mount;
+    for (const PolicyPackageV6& package : input.packages) {
+        AppPolicy app;
+        app.package = package.package;
+        app.provider_compat = package.provider_enabled
+            ? ProviderCompat::kVirtualize : ProviderCompat::kOff;
+        if (package.all_users) app.users = {"*"};
+        else for (std::uint32_t user : package.users) app.users.push_back(std::to_string(user));
+        if (package.all_processes) app.processes = {"*"};
+        else app.processes = package.processes;
+        for (const PolicyActionV6& action : package.actions) {
+            if (action.selector_index >= package.selectors.size()) {
+                return Fail(error, "invalid selector reference");
+            }
+            const PolicySelectorV6& selector = package.selectors[action.selector_index];
+            if (selector.match_kind != PolicyMatchKind::kLiteralPrefix) {
+                return Fail(error, "glob policy cannot be represented by legacy DTO");
+            }
+            if (action.domain == PolicyExecutionDomain::kMount) {
+                LogicalMountRule rule;
+                rule.action = action.kind == PolicyActionKind::kDeny
+                    ? MountAction::kDeny : MountAction::kRedirect;
+                rule.visible_path = selector.root;
+                rule.backing_path = action.target;
+                rule.depth = static_cast<std::uint16_t>(
+                    1 + std::count(rule.visible_path.begin(), rule.visible_path.end(), '/'));
+                app.mounts.push_back(std::move(rule));
+            } else if (action.domain == PolicyExecutionDomain::kEvent) {
+                EventRule rule;
+                rule.action = action.kind == PolicyActionKind::kObserve
+                    ? EventAction::kObserve : EventAction::kExport;
+                rule.source_path = selector.root;
+                rule.target_path = action.target;
+                rule.options = action.options;
+                app.events.push_back(std::move(rule));
+            } else {
+                return Fail(error, "runtime action cannot be represented by legacy DTO");
             }
         }
-        if (!app.events.empty()) {
-            return Fail(error, "event action is not executable before Phase R4");
-        }
+        document.apps.push_back(std::move(app));
     }
+    *output = std::move(document);
     return true;
 }
 
 }  // namespace
 
+bool EncodePolicy(const PolicyDocument& document, std::vector<std::uint8_t>* output,
+                  ParseError* error) {
+    PolicyV6 policy;
+    if (!ToPolicyV6(document, &policy, error)) return false;
+    std::string message;
+    if (!EncodePolicyV6(policy, output, &message)) return Fail(error, std::move(message));
+    return true;
+}
+
+bool DecodePolicy(const std::vector<std::uint8_t>& input, PolicyDocument* document,
+                  std::uint64_t* content_generation, ParseError* error) {
+    if (document == nullptr || content_generation == nullptr) return false;
+    PolicyV6 policy;
+    const PolicyV6DecodeResult decoded = DecodePolicyV6(input, &policy);
+    if (!decoded.ok) return Fail(error, decoded.error);
+    if (!FromPolicyV6(policy, document, error)) return false;
+    *content_generation = decoded.content_generation;
+    return true;
+}
+
 std::uint64_t ComputeContentGeneration(const PolicyDocument& document) {
-    PolicyDocument canonical;
-    if (!CanonicalizeDocument(document, &canonical, nullptr)) return 0;
-    return ContentGeneration(canonical);
+    PolicyV6 policy;
+    if (!ToPolicyV6(document, &policy, nullptr)) return 0;
+    return ComputePolicyV6ContentGeneration(policy);
 }
 
 std::uint64_t ComputePlanGeneration(const AppPolicy& policy,
@@ -259,310 +177,14 @@ std::uint64_t ComputePlanGeneration(const AppPolicy& policy,
 std::uint64_t ComputePlanGeneration(const AppPolicy& policy,
                                     FailureMode failure_mode,
                                     bool allow_legacy_string_bind) {
-    AppPolicy canonical = policy;
-    if (failure_mode != FailureMode::kOpen
-        || !ValidatePolicy(&canonical, nullptr)) {
-        return 0;
-    }
-    return PlanGeneration(canonical, failure_mode, allow_legacy_string_bind);
-}
-
-bool EncodePolicy(const PolicyDocument& document, std::vector<std::uint8_t>* output,
-                  ParseError* error) {
-    if (output == nullptr) return false;
-    PolicyDocument canonical;
-    if (!CanonicalizeDocument(document, &canonical, error)) return false;
-
-    std::vector<const AppPolicy*> apps;
-    apps.reserve(canonical.apps.size());
-    std::uint64_t mount_count64 = 0;
-    std::uint64_t event_count64 = 0;
-    for (const AppPolicy& app : canonical.apps) {
-        apps.push_back(&app);
-        mount_count64 += app.mounts.size();
-        event_count64 += app.events.size();
-    }
-    if (apps.size() > std::numeric_limits<std::uint32_t>::max()
-        || mount_count64 > std::numeric_limits<std::uint32_t>::max()
-        || event_count64 > std::numeric_limits<std::uint32_t>::max()) {
-        return Fail(error, "policy table count overflow");
-    }
-    std::sort(apps.begin(), apps.end(), [](const AppPolicy* lhs, const AppPolicy* rhs) {
-        const std::uint32_t lhs_hash = binary_format::PackageNameHash(
-            lhs->package.data(), lhs->package.size());
-        const std::uint32_t rhs_hash = binary_format::PackageNameHash(
-            rhs->package.data(), rhs->package.size());
-        return std::tuple(lhs_hash, lhs->package) < std::tuple(rhs_hash, rhs->package);
-    });
-
-    std::vector<std::uint8_t> packages;
-    std::vector<std::uint8_t> mounts;
-    std::vector<std::uint8_t> events;
-    packages.reserve(apps.size() * kPackageSize);
-    mounts.reserve(static_cast<std::size_t>(mount_count64) * kMountRuleSize);
-    events.reserve(static_cast<std::size_t>(event_count64) * kEventRuleSize);
-    StringTable strings;
-    std::uint32_t first_mount = 0;
-    std::uint32_t first_event = 0;
-    for (const AppPolicy* app : apps) {
-        Put32(&packages, binary_format::PackageNameHash(
-            app->package.data(), app->package.size()));
-        Put32(&packages, strings.Add(app->package));
-        Put32(&packages, strings.Add(Join(app->users)));
-        Put32(&packages, strings.Add(Join(app->processes)));
-        Put32(&packages, first_mount);
-        Put32(&packages, static_cast<std::uint32_t>(app->mounts.size()));
-        Put32(&packages, first_event);
-        Put32(&packages, static_cast<std::uint32_t>(app->events.size()));
-        Put64(&packages, PlanGeneration(*app, canonical.failure_mode,
-                                        canonical.allow_legacy_string_bind));
-        Put8(&packages, static_cast<std::uint8_t>(canonical.failure_mode));
-        Put8(&packages, static_cast<std::uint8_t>(app->media_compat));
-        Put8(&packages, static_cast<std::uint8_t>(app->provider_compat));
-        Put8(&packages, 0);
-        Put32(&packages, 0);
-
-        for (const LogicalMountRule& rule : app->mounts) {
-            Put8(&mounts, static_cast<std::uint8_t>(rule.action));
-            Put8(&mounts, 0);
-            Put16(&mounts, rule.depth);
-            Put16(&mounts, rule.flags);
-            Put16(&mounts, 0);
-            Put32(&mounts, strings.Add(rule.visible_path));
-            Put32(&mounts, strings.Add(rule.backing_path));
-        }
-        for (const EventRule& rule : app->events) {
-            Put8(&events, static_cast<std::uint8_t>(rule.action));
-            Put8(&events, 0);
-            Put16(&events, 0);
-            Put32(&events, strings.Add(rule.source_path));
-            Put32(&events, strings.Add(rule.target_path));
-            Put32(&events, rule.options);
-        }
-        first_mount += static_cast<std::uint32_t>(app->mounts.size());
-        first_event += static_cast<std::uint32_t>(app->events.size());
-    }
-
-    const std::uint64_t file_size64 = kHeaderSize + packages.size() + mounts.size()
-        + events.size() + strings.bytes().size();
-    if (file_size64 > std::numeric_limits<std::uint32_t>::max()) {
-        return Fail(error, "policy file too large");
-    }
-    const std::uint32_t package_offset = static_cast<std::uint32_t>(kHeaderSize);
-    const std::uint32_t mount_offset = package_offset
-        + static_cast<std::uint32_t>(packages.size());
-    const std::uint32_t event_offset = mount_offset
-        + static_cast<std::uint32_t>(mounts.size());
-    const std::uint32_t string_offset = event_offset
-        + static_cast<std::uint32_t>(events.size());
-
-    output->clear();
-    output->reserve(static_cast<std::size_t>(file_size64));
-    Put32(output, binary_format::kMagic);
-    Put16(output, binary_format::kFormatVersion);
-    Put16(output, binary_format::kSchemaVersion);
-    Put32(output, static_cast<std::uint32_t>(file_size64));
-    Put32(output, 0);
-    Put64(output, ContentGeneration(canonical));
-    Put32(output, static_cast<std::uint32_t>(apps.size()));
-    Put32(output, static_cast<std::uint32_t>(mount_count64));
-    Put32(output, static_cast<std::uint32_t>(event_count64));
-    Put32(output, package_offset);
-    Put32(output, mount_offset);
-    Put32(output, event_offset);
-    Put32(output, string_offset);
-    Put32(output, canonical.allow_legacy_string_bind
-        ? binary_format::kPolicyFlagAllowLegacyStringBind : 0);
-    output->insert(output->end(), packages.begin(), packages.end());
-    output->insert(output->end(), mounts.begin(), mounts.end());
-    output->insert(output->end(), events.begin(), events.end());
-    output->insert(output->end(), strings.bytes().begin(), strings.bytes().end());
-    const std::uint32_t checksum = binary_format::Crc32(
-        output->data() + kHeaderSize, output->size() - kHeaderSize);
-    Store32(output, binary_format::kPayloadChecksumOffset, checksum);
-    return true;
-}
-
-bool DecodePolicy(const std::vector<std::uint8_t>& input, PolicyDocument* document,
-                  std::uint64_t* content_generation, ParseError* error) {
-    if (document == nullptr || content_generation == nullptr || input.size() < kHeaderSize) {
-        return false;
-    }
-    const std::uint8_t* data = input.data();
-    const std::uint32_t file_size = Read32(data + binary_format::kFileSizeOffset);
-    const std::uint32_t checksum = Read32(data + binary_format::kPayloadChecksumOffset);
-    const std::uint32_t package_count = Read32(data + binary_format::kPackageCountOffset);
-    const std::uint32_t mount_count = Read32(data + binary_format::kMountRuleCountOffset);
-    const std::uint32_t event_count = Read32(data + binary_format::kEventRuleCountOffset);
-    const std::uint32_t package_offset = Read32(data + binary_format::kPackageTableOffset);
-    const std::uint32_t mount_offset = Read32(data + binary_format::kMountRuleTableOffset);
-    const std::uint32_t event_offset = Read32(data + binary_format::kEventRuleTableOffset);
-    const std::uint32_t string_offset = Read32(data + binary_format::kStringTableOffset);
-    const std::uint32_t header_flags = Read32(
-        data + binary_format::kHeaderFlagsOffset);
-    const std::uint64_t expected_mount_offset = kHeaderSize
-        + static_cast<std::uint64_t>(package_count) * kPackageSize;
-    const std::uint64_t expected_event_offset = expected_mount_offset
-        + static_cast<std::uint64_t>(mount_count) * kMountRuleSize;
-    const std::uint64_t expected_string_offset = expected_event_offset
-        + static_cast<std::uint64_t>(event_count) * kEventRuleSize;
-    if (Read32(data) != binary_format::kMagic
-        || Read16(data + 4) != binary_format::kFormatVersion
-        || Read16(data + 6) != binary_format::kSchemaVersion
-        || file_size != input.size() || package_count == 0
-        || package_offset != kHeaderSize || mount_offset != expected_mount_offset
-        || event_offset != expected_event_offset || string_offset != expected_string_offset
-        || string_offset >= input.size()
-        || (header_flags & ~binary_format::kPolicyFlagAllowLegacyStringBind) != 0
-        || binary_format::Crc32(data + kHeaderSize, input.size() - kHeaderSize)
-            != checksum) {
-        return Fail(error, "invalid policy header or checksum");
-    }
-
-    PolicyDocument decoded;
-    decoded.schema = binary_format::kSchemaVersion;
-    decoded.allow_legacy_string_bind =
-        (header_flags & binary_format::kPolicyFlagAllowLegacyStringBind) != 0;
-    std::uint32_t previous_hash = 0;
-    std::uint32_t expected_first_mount = 0;
-    std::uint32_t expected_first_event = 0;
-    std::string previous_package;
-    for (std::uint32_t index = 0; index < package_count; ++index) {
-        const std::uint8_t* entry = data + package_offset + index * kPackageSize;
-        const std::uint32_t package_hash = Read32(entry + binary_format::kPackageHashOffset);
-        AppPolicy app;
-        std::string users;
-        std::string processes;
-        if (!ReadString(input, string_offset,
-                        Read32(entry + binary_format::kPackageNameOffset), &app.package)
-            || !ReadString(input, string_offset,
-                           Read32(entry + binary_format::kPackageUsersOffset), &users)
-            || !ReadString(input, string_offset,
-                           Read32(entry + binary_format::kPackageProcessesOffset), &processes)
-            || !Split(users, &app.users) || !Split(processes, &app.processes)) {
-            return Fail(error, "invalid package strings");
-        }
-        if (binary_format::PackageNameHash(app.package.data(), app.package.size())
-                != package_hash
-            || (index > 0 && (package_hash < previous_hash
-                || (package_hash == previous_hash && app.package <= previous_package)))) {
-            return Fail(error, "invalid package index");
-        }
-        previous_hash = package_hash;
-        previous_package = app.package;
-
-        const std::uint8_t failure = entry[binary_format::kPackageFailureModeOffset];
-        const std::uint8_t media = entry[binary_format::kPackageMediaCompatOffset];
-        const std::uint8_t provider = entry[binary_format::kPackageProviderCompatOffset];
-        if (failure > static_cast<std::uint8_t>(FailureMode::kClosed)
-            || media > static_cast<std::uint8_t>(MediaCompat::kHideDenied)
-            || provider > static_cast<std::uint8_t>(ProviderCompat::kVirtualize)
-            || entry[43] != 0 || Read32(entry + 44) != 0) {
-            return Fail(error, "invalid package flags");
-        }
-        const FailureMode package_failure = static_cast<FailureMode>(failure);
-        if (package_failure != FailureMode::kOpen
-            || (index > 0 && package_failure != decoded.failure_mode)) {
-            return Fail(error, "unsupported failure mode");
-        }
-        decoded.failure_mode = package_failure;
-        app.media_compat = static_cast<MediaCompat>(media);
-        app.provider_compat = static_cast<ProviderCompat>(provider);
-
-        const std::uint32_t first_mount = Read32(
-            entry + binary_format::kPackageFirstMountOffset);
-        const std::uint32_t app_mount_count = Read32(
-            entry + binary_format::kPackageMountCountOffset);
-        const std::uint32_t first_event = Read32(
-            entry + binary_format::kPackageFirstEventOffset);
-        const std::uint32_t app_event_count = Read32(
-            entry + binary_format::kPackageEventCountOffset);
-        if (first_mount != expected_first_mount
-            || app_mount_count > mount_count - first_mount
-            || first_event != expected_first_event
-            || app_event_count > event_count - first_event) {
-            return Fail(error, "invalid package rule range");
-        }
-        expected_first_mount += app_mount_count;
-        expected_first_event += app_event_count;
-        for (std::uint32_t rule_index = 0; rule_index < app_mount_count; ++rule_index) {
-            const std::uint8_t* rule = data + mount_offset
-                + (first_mount + rule_index) * kMountRuleSize;
-            if (rule[1] != 0 || Read16(rule + 6) != 0
-                || rule[binary_format::kMountActionOffset]
-                    > static_cast<std::uint8_t>(MountAction::kIsolateRoot)) {
-                return Fail(error, "invalid mount action");
-            }
-            LogicalMountRule mount;
-            mount.action = static_cast<MountAction>(rule[binary_format::kMountActionOffset]);
-            mount.depth = Read16(rule + binary_format::kMountDepthOffset);
-            mount.flags = Read16(rule + binary_format::kMountFlagsOffset);
-            if (!ReadString(input, string_offset,
-                            Read32(rule + binary_format::kMountVisiblePathOffset),
-                            &mount.visible_path)
-                || !ReadString(input, string_offset,
-                               Read32(rule + binary_format::kMountBackingPathOffset),
-                               &mount.backing_path)) {
-                return Fail(error, "invalid mount strings");
-            }
-            app.mounts.push_back(std::move(mount));
-        }
-        for (std::uint32_t rule_index = 0; rule_index < app_event_count; ++rule_index) {
-            const std::uint8_t* rule = data + event_offset
-                + (first_event + rule_index) * kEventRuleSize;
-            if (rule[1] != 0 || Read16(rule + 2) != 0
-                || rule[binary_format::kEventActionOffset]
-                    > static_cast<std::uint8_t>(EventAction::kExport)) {
-                return Fail(error, "invalid event action");
-            }
-            EventRule event;
-            event.action = static_cast<EventAction>(rule[binary_format::kEventActionOffset]);
-            event.options = Read32(rule + binary_format::kEventOptionsOffset);
-            if (!ReadString(input, string_offset,
-                            Read32(rule + binary_format::kEventSourcePathOffset),
-                            &event.source_path)
-                || !ReadString(input, string_offset,
-                               Read32(rule + binary_format::kEventTargetPathOffset),
-                               &event.target_path)) {
-                return Fail(error, "invalid event strings");
-            }
-            app.events.push_back(std::move(event));
-        }
-
-        const AppPolicy encoded_order = app;
-        if (!ValidatePolicy(&app, error) || app.mounts.size() != encoded_order.mounts.size()
-            || app.events.size() != encoded_order.events.size()) {
-            return Fail(error, "invalid canonical package plan");
-        }
-        for (std::size_t rule_index = 0; rule_index < app.mounts.size(); ++rule_index) {
-            if (!SameMount(app.mounts[rule_index], encoded_order.mounts[rule_index])) {
-                return Fail(error, "unordered mount table");
-            }
-        }
-        for (std::size_t rule_index = 0; rule_index < app.events.size(); ++rule_index) {
-            if (!SameEvent(app.events[rule_index], encoded_order.events[rule_index])) {
-                return Fail(error, "unordered event table");
-            }
-        }
-        if (PlanGeneration(app, decoded.failure_mode,
-                           decoded.allow_legacy_string_bind)
-            != Read64(entry + binary_format::kPackagePlanGenerationOffset)) {
-            return Fail(error, "invalid plan generation");
-        }
-        decoded.apps.push_back(std::move(app));
-    }
-    if (expected_first_mount != mount_count || expected_first_event != event_count) {
-        return Fail(error, "unreferenced policy rule");
-    }
-
-    const std::uint64_t encoded_generation = Read64(
-        data + binary_format::kContentGenerationOffset);
-    if (ContentGeneration(decoded) != encoded_generation) {
-        return Fail(error, "invalid content generation");
-    }
-    *content_generation = encoded_generation;
-    *document = std::move(decoded);
-    return true;
+    PolicyDocument document;
+    document.schema = 2;
+    document.failure_mode = failure_mode;
+    document.allow_legacy_string_bind = allow_legacy_string_bind;
+    document.apps = {policy};
+    PolicyV6 converted;
+    if (!ToPolicyV6(document, &converted, nullptr) || converted.packages.size() != 1) return 0;
+    return ComputePolicyV6PlanGeneration(converted.packages.front(), allow_legacy_string_bind);
 }
 
 }  // namespace pathguard

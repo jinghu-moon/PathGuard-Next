@@ -465,7 +465,9 @@ Zygisk/Provider bootstrap reader、CLI 和 device probe 共同消费。至少冻
 - root `Pictures`，glob `**/IMG_[0-9]?.jpg`，type=file；
 - except `private/**` 与 `**/thumbnail-*/**`，两者都与 base 存在有效交集；
 - provider redirect 到 `Download/images`，preserve relative、collision reject、reverse provenance；
-- canonical action 的 required capabilities 固定为 bits 16/17（mask `0x0000000000030000`），
+- canonical action 的 required capabilities 由动作实际保障范围决定：Provider 前向 path-I/O
+  redirect 固定要求 bit 16；只有 query/insert/reverse 视图或 `reverse=provenance` 才额外要求
+  bit 17。禁止仅因 Provider 进程名或 PLT Hook 成功就添加 bit 17；
   required operations 固定为 bits 0～7、9～19（mask `0x00000000000ffeff`）；bit 8 hard link
   不属于首版 Provider composite contract；
 - 断言 PatternTable 三条 canonical program、token kinds、ASCII class bitmap、ExceptRef order、

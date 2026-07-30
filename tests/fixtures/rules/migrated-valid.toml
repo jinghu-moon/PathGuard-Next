@@ -1,7 +1,7 @@
-format = 1
+format = 2
 
 [apps."com.example.redirect"]
 users = [0]
-redirect = [
-    "Download/Source" -> "PathGuard/Target",
+redirect_rules = [
+    { select = { root = "Download", glob = "Source", type = "directory" }, to = "PathGuard/Target" },
 ]

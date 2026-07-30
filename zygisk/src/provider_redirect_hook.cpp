@@ -1,6 +1,10 @@
 #include "pathguard/provider_redirect_hook.hpp"
+#include "pathguard/path_hook_contract.h"
 #include "pathguard/provider_caller_uid.hpp"
-#include "pathguard/provider_path_mapper.h"
+#include "pathguard/provider_route_context.h"
+#include "pathguard/provenance_protocol.h"
+#include "pathguard/secure_path_resolver.h"
+#include "pathguard/policy_snapshot_domain.hpp"
 
 #include <android/dlext.h>
 #include <android/log.h>
@@ -11,6 +15,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <link.h>
+#include <linux/stat.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -18,8 +23,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/statvfs.h>
 #include <sys/inotify.h>
+#include <sys/socket.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <time.h>
@@ -29,7 +36,7 @@ namespace pathguard::provider_redirect {
 namespace {
 
 constexpr char kLogTag[] = "PathGuard";
-constexpr uint32_t kMaxRules = 64;
+constexpr uint32_t kMaxScopes = 64;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kLogTag, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kLogTag, __VA_ARGS__)
@@ -56,6 +63,8 @@ using RemoveFn = int (*)(const char*);
 using RmdirFn = int (*)(const char*);
 using RenameFn = int (*)(const char*, const char*);
 using RenameAtFn = int (*)(int, const char*, int, const char*);
+using LinkFn = int (*)(const char*, const char*);
+using LinkAtFn = int (*)(int, const char*, int, const char*, int);
 using ReadlinkFn = ssize_t (*)(const char*, char*, size_t);
 using RealpathFn = char* (*)(const char*, char*);
 using ChmodFn = int (*)(const char*, mode_t);
@@ -104,8 +113,32 @@ using FuseReplyCreateFn = int (*)(FuseRequest, const FuseEntryParam*,
                                   const FuseFileInfo*);
 using FuseReplyNoneFn = void (*)(FuseRequest);
 
-PathRule g_rules[kMaxRules]{};
-uint32_t g_rule_count = 0;
+struct RuntimePolicySnapshot final {
+    uint8_t* bytes = nullptr;
+    size_t size = 0;
+    policy_v6_view::PolicyV6View policy;
+    storage_path_adapter::PolicyScope scopes[kMaxScopes]{};
+    uint32_t scope_count = 0;
+    AdmissionDomain domain = AdmissionDomain::kAppPath;
+    CapabilitySnapshot capabilities{};
+
+};
+
+void ReleaseRuntimePolicy(RuntimePolicySnapshot* snapshot) {
+    if (snapshot == nullptr) return;
+    free(snapshot->bytes);
+    free(snapshot);
+}
+
+PolicySnapshotDomain<RuntimePolicySnapshot, 128> g_app_policy_domain(
+    ReleaseRuntimePolicy);
+PolicySnapshotDomain<RuntimePolicySnapshot, 256> g_provider_policy_domain(
+    ReleaseRuntimePolicy);
+PolicySnapshotDomainBase<RuntimePolicySnapshot>* g_policy_domain = nullptr;
+AdmissionDomain g_domain = AdmissionDomain::kAppPath;
+IdentityMode g_identity_mode = IdentityMode::kProcessUid;
+CapabilitySnapshot g_capabilities{};
+ResolverProbeCache g_resolver_probe;
 OpenFn g_open = nullptr;
 OpenFn g_open64 = nullptr;
 OpenAtFn g_openat = nullptr;
@@ -128,6 +161,8 @@ RmdirFn g_rmdir = nullptr;
 RenameFn g_rename = nullptr;
 RenameAtFn g_renameat = nullptr;
 RenameAtFn g_renameat2 = nullptr;
+LinkFn g_link = nullptr;
+LinkAtFn g_linkat = nullptr;
 ReadlinkFn g_readlink = nullptr;
 RealpathFn g_realpath = nullptr;
 ChmodFn g_chmod = nullptr;
@@ -164,9 +199,33 @@ uint32_t g_thread_state_key_ready = 0;
 uint32_t g_rewrite_log_count = 0;
 uint32_t g_hooks_enabled = 0;
 uint32_t g_fuse_install_state = 0;
+uint64_t g_transaction_nonce = 0;
+uint64_t g_transaction_sequence = 0;
+uint32_t g_transaction_atfork_state = 0;
 zygisk::Api* g_api = nullptr;
 
+void ResetTransactionStateAfterFork() {
+    g_transaction_nonce = 0;
+    g_transaction_sequence = 0;
+}
+
+bool InitializeTransactionAtFork() {
+    uint32_t state = __atomic_load_n(
+        &g_transaction_atfork_state, __ATOMIC_ACQUIRE);
+    if (state != 0) return state == 1;
+    const bool ready = pthread_atfork(
+        nullptr, nullptr, ResetTransactionStateAfterFork) == 0;
+    __atomic_store_n(&g_transaction_atfork_state, ready ? 1u : 2u,
+                     __ATOMIC_RELEASE);
+    return ready;
+}
+
 void DestroyThreadState(void* value) {
+    auto* state = static_cast<CallerUidContext*>(value);
+    if (state != nullptr && state->policy_domain != nullptr) {
+        static_cast<PolicySnapshotDomainBase<RuntimePolicySnapshot>*>(
+            state->policy_domain)->Release(state);
+    }
     free(value);
 }
 
@@ -192,28 +251,6 @@ CallerUidContext* GetThreadState() {
     return state;
 }
 
-bool ValidLogicalRulePath(const char* path) {
-    if (path == nullptr || path[0] == '\0' || path[0] == '/'
-        || strlen(path) >= PATH_MAX || strchr(path, '{') != nullptr
-        || strchr(path, '}') != nullptr) {
-        return false;
-    }
-    const char* component = path;
-    while (*component != '\0') {
-        const char* separator = strchr(component, '/');
-        const size_t length = separator == nullptr
-            ? strlen(component) : static_cast<size_t>(separator - component);
-        if (length == 0 || length > NAME_MAX
-            || (length == 1 && component[0] == '.')
-            || (length == 2 && component[0] == '.' && component[1] == '.')) {
-            return false;
-        }
-        if (separator == nullptr) break;
-        component = separator + 1;
-    }
-    return true;
-}
-
 class HookGuard final {
 public:
     HookGuard()
@@ -234,6 +271,9 @@ int32_t RawCallingUid() {
 }
 
 int32_t EffectiveCallingUid() {
+    if (g_identity_mode == IdentityMode::kProcessUid) {
+        return static_cast<int32_t>(getuid());
+    }
     return EffectiveCallerUid(GetThreadState(), RawCallingUid(),
                               static_cast<int32_t>(getuid()));
 }
@@ -296,18 +336,20 @@ bool ResolveAtPath(int dirfd, const char* path, char* output, size_t capacity) {
     return written > 0 && static_cast<size_t>(written) < capacity;
 }
 
-bool RewriteAtPath(int dirfd, const char* path, char* absolute, char* output,
-                   int32_t* caller_uid) {
-    if (!ResolveAtPath(dirfd, path, absolute, PATH_MAX)
-        || !MatchesVisiblePath(g_rules, g_rule_count, absolute)) {
-        return false;
-    }
+storage_path_adapter::RewriteResult RewriteAtPath(
+        const RuntimePolicySnapshot& snapshot,
+        int dirfd, const char* path, OperationMask operation,
+        uint8_t object_type, char* absolute, char* output,
+        int32_t* caller_uid) {
+    storage_path_adapter::RewriteResult result;
+    if (!ResolveAtPath(dirfd, path, absolute, PATH_MAX)) return result;
     const int32_t uid = EffectiveCallingUid();
-    if (!RewriteAbsolutePath(g_rules, g_rule_count, uid, absolute, output, PATH_MAX)) {
-        return false;
-    }
     *caller_uid = uid;
-    return true;
+    policy_pattern_runtime::MatchScratch scratch;
+    return storage_path_adapter::Rewrite(
+        snapshot.policy, snapshot.scopes, snapshot.scope_count, uid, absolute,
+        snapshot.domain, operation, object_type, snapshot.capabilities, &scratch,
+        output, PATH_MAX);
 }
 
 void LogRewrite(const char* operation, int32_t uid,
@@ -317,29 +359,452 @@ void LogRewrite(const char* operation, int32_t uid,
          operation, uid, from, to);
 }
 
+template <size_t Capacity>
+bool CopyWireText(char (&output)[Capacity], const char* input, size_t size) {
+    if (input == nullptr || size == 0 || size >= Capacity) return false;
+    memcpy(output, input, size);
+    output[size] = '\0';
+    return true;
+}
+
+template <size_t Capacity>
+bool CopyLogicalRelative(char (&output)[Capacity], const char* root,
+                         size_t root_size, const char* relative,
+                         size_t relative_size) {
+    if (root == nullptr || relative == nullptr || root_size == 0
+        || relative_size == 0 || root_size + 1 + relative_size >= Capacity) {
+        return false;
+    }
+    memcpy(output, root, root_size);
+    output[root_size] = '/';
+    memcpy(output + root_size + 1, relative, relative_size);
+    output[root_size + 1 + relative_size] = '\0';
+    return true;
+}
+
+bool BuildProvenanceRecord(
+        const storage_path_adapter::RewriteResult& rewrite, int32_t uid,
+        const char* logical_path, const char* target_path,
+        provenance_protocol::Record* output) {
+    if (output == nullptr || rewrite.rule_id == 0) return false;
+    storage_path_adapter::LogicalPath logical;
+    storage_path_adapter::LogicalPath target;
+    if (!storage_path_adapter::ParseLogicalPath(logical_path, &logical)
+        || !storage_path_adapter::ParseLogicalPath(target_path, &target)) return false;
+    *output = {};
+    output->caller_uid = uid;
+    output->user_id = rewrite.user_id;
+    output->identity_epoch = rewrite.content_generation;
+    output->rule_id = rewrite.rule_id;
+    output->content_generation = rewrite.content_generation;
+    output->created_plan_generation = rewrite.plan_generation;
+    output->bound_plan_generation = rewrite.plan_generation;
+    char storage_root[provenance_protocol::kVolumeCapacity]{};
+    const int root_size = snprintf(storage_root, sizeof(storage_root),
+                                   "emulated:%u", rewrite.user_id);
+    return root_size > 0 && static_cast<size_t>(root_size) < sizeof(storage_root)
+        && CopyWireText(output->storage_root, storage_root,
+                        static_cast<size_t>(root_size))
+        && CopyLogicalRelative(output->logical_source, logical.root,
+                               logical.root_size, logical.relative,
+                               logical.relative_size)
+        && CopyLogicalRelative(output->target_relative, target.root,
+                               target.root_size, target.relative,
+                               target.relative_size);
+}
+
+bool CallProvenance(const provenance_protocol::Request& request,
+                    provenance_protocol::Response* response) {
+    if (g_api == nullptr || response == nullptr) return false;
+    const int socket = g_api->connectCompanion();
+    if (socket < 0) return false;
+    timeval timeout{0, 250000};
+    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    const bool ok = send(socket, &request, sizeof(request), MSG_NOSIGNAL)
+            == static_cast<ssize_t>(sizeof(request))
+        && recv(socket, response, sizeof(*response), MSG_WAITALL)
+            == static_cast<ssize_t>(sizeof(*response))
+        && response->magic == provenance_protocol::kMagic
+        && response->version == provenance_protocol::kVersion;
+    close(socket);
+    return ok;
+}
+
+provenance_protocol::Request MakeProvenanceRequest(
+        provenance_protocol::Command command,
+        const provenance_protocol::Record& record, int32_t uid) {
+    provenance_protocol::Request request;
+    request.command = command;
+    request.record = record;
+    uint64_t nonce = __atomic_load_n(&g_transaction_nonce, __ATOMIC_ACQUIRE);
+    if (nonce == 0) {
+        uint64_t candidate = 0;
+        if (syscall(SYS_getrandom, &candidate, sizeof(candidate), 0)
+                != static_cast<ssize_t>(sizeof(candidate))
+            || candidate == 0) {
+            timespec now{};
+            clock_gettime(CLOCK_BOOTTIME, &now);
+            candidate = (static_cast<uint64_t>(now.tv_sec) << 32)
+                ^ static_cast<uint64_t>(now.tv_nsec)
+                ^ (static_cast<uint64_t>(static_cast<uint32_t>(getpid())) << 16)
+                ^ static_cast<uint32_t>(uid);
+            if (candidate == 0) candidate = 1;
+        }
+        uint64_t empty = 0;
+        __atomic_compare_exchange_n(&g_transaction_nonce, &empty, candidate,
+                                    false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE);
+        nonce = __atomic_load_n(&g_transaction_nonce, __ATOMIC_ACQUIRE);
+    }
+    request.transaction_high = nonce;
+    request.transaction_low = __atomic_add_fetch(
+        &g_transaction_sequence, UINT64_C(1), __ATOMIC_RELAXED);
+    return request;
+}
+
+bool CaptureIdentity(int fd, provenance_protocol::Identity* output) {
+    if (fd < 0 || output == nullptr) return false;
+    struct statx value {};
+    if (syscall(SYS_statx, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                STATX_INO | STATX_BTIME | STATX_TYPE, &value) != 0
+        || (value.stx_mask & (STATX_INO | STATX_BTIME))
+            != (STATX_INO | STATX_BTIME)
+        || value.stx_ino == 0) return false;
+    *output = {};
+    output->inode = value.stx_ino;
+    output->birth_seconds = value.stx_btime.tv_sec;
+    output->birth_nanoseconds = value.stx_btime.tv_nsec;
+    output->object_type = S_ISDIR(value.stx_mode) ? 2 : 1;
+    const int size = snprintf(output->volume, sizeof(output->volume),
+                              "dev:%u:%u", value.stx_dev_major,
+                              value.stx_dev_minor);
+    return size > 0 && static_cast<size_t>(size) < sizeof(output->volume);
+}
+
+bool SendTransactionStep(provenance_protocol::Request* request,
+                         provenance_protocol::Command command) {
+    request->command = command;
+    provenance_protocol::Response response;
+    return CallProvenance(*request, &response)
+        && response.provenance_error == provenance_protocol::Error::kNone;
+}
+
+bool ResolveOwnedRecord(const provenance_protocol::Record& record,
+                        int32_t uid) {
+    const auto request = MakeProvenanceRequest(
+        provenance_protocol::Command::kResolve, record, uid);
+    provenance_protocol::Response response;
+    return CallProvenance(request, &response)
+        && response.provenance_error == provenance_protocol::Error::kNone
+        && response.resolve_status == provenance_protocol::ResolveStatus::kUnique
+        && strcmp(response.logical_source, record.logical_source) == 0;
+}
+
+template <typename T>
+T FailureValue(T*) { return static_cast<T>(-1); }
+
+template <typename T>
+T* FailureValue(T**) { return nullptr; }
+
 template <typename Function>
-auto WithPath(const char* operation, int dirfd, const char* path,
+auto WithPath(const char* operation_name, OperationMask operation,
+              uint8_t object_type, int dirfd, const char* path,
               Function function) -> decltype(function(dirfd, path)) {
     if (__atomic_load_n(&g_hooks_enabled, __ATOMIC_ACQUIRE) == 0) {
         return function(dirfd, path);
     }
     HookGuard guard;
     if (!guard.outer() || path == nullptr) return function(dirfd, path);
+    if (g_policy_domain == nullptr) return function(dirfd, path);
+    auto snapshot_guard = g_policy_domain->Acquire(GetThreadState());
+    if (!snapshot_guard) return function(dirfd, path);
+    const int saved_errno = errno;
     char absolute[PATH_MAX]{};
     char rewritten[PATH_MAX]{};
     int32_t uid = -1;
-    if (!RewriteAtPath(dirfd, path, absolute, rewritten, &uid)) {
+    const auto rewrite = RewriteAtPath(
+        *snapshot_guard, dirfd, path, operation, object_type, absolute,
+        rewritten, &uid);
+    if (rewrite.disposition == storage_path_adapter::RewriteDisposition::kDeny) {
+        errno = EACCES;
+        using Return = decltype(function(dirfd, path));
+        return FailureValue(static_cast<Return*>(nullptr));
+    }
+    if (rewrite.disposition != storage_path_adapter::RewriteDisposition::kRedirect) {
+        errno = saved_errno;
         return function(dirfd, path);
     }
-    LogRewrite(operation, uid, absolute, rewritten);
-    return function(AT_FDCWD, rewritten);
+    LogRewrite(operation_name, uid, absolute, rewritten);
+    errno = saved_errno;
+    const bool create_parents = (operation & (kOperationCreate | kOperationMkdir)) != 0;
+    SecureResolvedPath pinned = ResolveStoragePathParent(
+        rewritten, create_parents, &g_resolver_probe);
+    if (!pinned.ok()) {
+        errno = pinned.error == 0 ? EACCES : pinned.error;
+        using Return = decltype(function(dirfd, path));
+        return FailureValue(static_cast<Return*>(nullptr));
+    }
+    char pinned_path[PATH_MAX]{};
+    if (!BuildPinnedProcPath(pinned, pinned_path, sizeof(pinned_path))) {
+        CloseSecureResolvedPath(&pinned);
+        errno = ENAMETOOLONG;
+        using Return = decltype(function(dirfd, path));
+        return FailureValue(static_cast<Return*>(nullptr));
+    }
+    using Return = decltype(function(dirfd, path));
+    if constexpr (__is_same(Return, int)) {
+        const bool transactional_create = rewrite.reverse_mode == 2
+            && (operation & kOperationMkdir) != 0;
+        if (transactional_create) {
+            provenance_protocol::Record record;
+            if (!BuildProvenanceRecord(
+                    rewrite, uid, absolute, rewritten, &record)) {
+                CloseSecureResolvedPath(&pinned);
+                errno = EIO;
+                return -1;
+            }
+            const int existing = openat(
+                pinned.parent_fd, pinned.basename,
+                O_PATH | O_NOFOLLOW | O_CLOEXEC);
+            if (existing >= 0) {
+                close(existing);
+                CloseSecureResolvedPath(&pinned);
+                errno = EEXIST;
+                return -1;
+            }
+            if (errno != ENOENT) {
+                const int call_errno = errno;
+                CloseSecureResolvedPath(&pinned);
+                errno = call_errno;
+                return -1;
+            }
+            provenance_protocol::Request transaction = MakeProvenanceRequest(
+                provenance_protocol::Command::kPrepareCreate, record, uid);
+            provenance_protocol::Response response;
+            if (!CallProvenance(transaction, &response)
+                || response.provenance_error
+                    != provenance_protocol::Error::kNone) {
+                const bool collision = response.provenance_error
+                    == provenance_protocol::Error::kRouteBusy;
+                CloseSecureResolvedPath(&pinned);
+                errno = collision ? EEXIST : EIO;
+                return -1;
+            }
+            const int value = function(AT_FDCWD, pinned_path);
+            const int call_errno = errno;
+            const int created = value == 0 ? openat(
+                pinned.parent_fd, pinned.basename,
+                O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+            const bool committed = created >= 0
+                && CaptureIdentity(created, &transaction.record.identity)
+                && SendTransactionStep(
+                    &transaction, provenance_protocol::Command::kMaterialize)
+                && SendTransactionStep(
+                    &transaction, provenance_protocol::Command::kCommit);
+            if (created >= 0) close(created);
+            if (value != 0) {
+                SendTransactionStep(&transaction,
+                                    provenance_protocol::Command::kAbort);
+            } else if (!committed) {
+                unlinkat(pinned.parent_fd, pinned.basename, AT_REMOVEDIR);
+                SendTransactionStep(&transaction,
+                                    provenance_protocol::Command::kAbort);
+                CloseSecureResolvedPath(&pinned);
+                errno = EIO;
+                return -1;
+            }
+            CloseSecureResolvedPath(&pinned);
+            errno = call_errno;
+            return value;
+        }
+        const bool transactional_delete = rewrite.reverse_mode == 2
+            && (operation & (kOperationUnlink | kOperationRmdir)) != 0;
+        if (transactional_delete) {
+            provenance_protocol::Record record;
+            const int target = openat(pinned.parent_fd, pinned.basename,
+                                      O_PATH | O_NOFOLLOW | O_CLOEXEC);
+            const bool owned = target >= 0
+                && BuildProvenanceRecord(
+                    rewrite, uid, absolute, rewritten, &record)
+                && CaptureIdentity(target, &record.identity)
+                && ResolveOwnedRecord(record, uid);
+            if (target >= 0) close(target);
+            if (!owned) {
+                CloseSecureResolvedPath(&pinned);
+                errno = EXDEV;
+                return -1;
+            }
+            provenance_protocol::Request transaction = MakeProvenanceRequest(
+                provenance_protocol::Command::kPrepareDelete, record, uid);
+            transaction.previous = record;
+            provenance_protocol::Response response;
+            if (!CallProvenance(transaction, &response)
+                || response.provenance_error
+                    != provenance_protocol::Error::kNone) {
+                CloseSecureResolvedPath(&pinned);
+                errno = EIO;
+                return -1;
+            }
+            const int value = function(AT_FDCWD, pinned_path);
+            const int call_errno = errno;
+            if (value != 0) {
+                SendTransactionStep(&transaction,
+                                    provenance_protocol::Command::kAbort);
+            } else if (!SendTransactionStep(
+                           &transaction,
+                           provenance_protocol::Command::kCommit)) {
+                LOGE("provenance delete commit failed: uid=%d rule=%llu",
+                     uid, static_cast<unsigned long long>(rewrite.rule_id));
+            }
+            CloseSecureResolvedPath(&pinned);
+            errno = call_errno;
+            return value;
+        }
+    }
+    const auto value = function(AT_FDCWD, pinned_path);
+    const int call_errno = errno;
+    CloseSecureResolvedPath(&pinned);
+    errno = call_errno;
+    return value;
+}
+
+template <typename Function>
+int WithOpenPath(const char* operation_name, int dirfd, const char* path,
+                 int flags, Function function) {
+    if (__atomic_load_n(&g_hooks_enabled, __ATOMIC_ACQUIRE) == 0) {
+        return function(dirfd, path, flags);
+    }
+    HookGuard guard;
+    if (!guard.outer() || path == nullptr || g_policy_domain == nullptr) {
+        return function(dirfd, path, flags);
+    }
+    auto snapshot_guard = g_policy_domain->Acquire(GetThreadState());
+    if (!snapshot_guard) return function(dirfd, path, flags);
+    const int saved_errno = errno;
+    char absolute[PATH_MAX]{};
+    char rewritten[PATH_MAX]{};
+    int32_t uid = -1;
+    const OperationMask operation = path_hook_contract::OpenOperation(flags);
+    const auto rewrite = RewriteAtPath(
+        *snapshot_guard, dirfd, path, operation, 1, absolute, rewritten, &uid);
+    if (rewrite.disposition == storage_path_adapter::RewriteDisposition::kDeny) {
+        errno = EACCES;
+        return -1;
+    }
+    if (rewrite.disposition != storage_path_adapter::RewriteDisposition::kRedirect) {
+        errno = saved_errno;
+        return function(dirfd, path, flags);
+    }
+    LogRewrite(operation_name, uid, absolute, rewritten);
+    SecureResolvedPath pinned = ResolveStoragePathParent(
+        rewritten, (flags & O_CREAT) != 0, &g_resolver_probe);
+    if (!pinned.ok()) {
+        errno = pinned.error == 0 ? EACCES : pinned.error;
+        return -1;
+    }
+    char pinned_path[PATH_MAX]{};
+    if (!BuildPinnedProcPath(pinned, pinned_path, sizeof(pinned_path))) {
+        CloseSecureResolvedPath(&pinned);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    const bool transactional = (flags & O_CREAT) != 0
+        && rewrite.reverse_mode == 2;
+    if (!transactional) {
+        errno = saved_errno;
+        const int value = function(AT_FDCWD, pinned_path, flags);
+        const int call_errno = errno;
+        CloseSecureResolvedPath(&pinned);
+        errno = call_errno;
+        return value;
+    }
+
+    provenance_protocol::Record record;
+    if (!BuildProvenanceRecord(rewrite, uid, absolute, rewritten, &record)) {
+        CloseSecureResolvedPath(&pinned);
+        errno = EIO;
+        return -1;
+    }
+    const int existing = openat(pinned.parent_fd, pinned.basename,
+                                O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    if (existing >= 0) {
+        const bool identified = CaptureIdentity(existing, &record.identity);
+        close(existing);
+        provenance_protocol::Request resolve = MakeProvenanceRequest(
+            provenance_protocol::Command::kResolve, record, uid);
+        provenance_protocol::Response response;
+        const bool same_owner = identified && CallProvenance(resolve, &response)
+            && response.provenance_error == provenance_protocol::Error::kNone
+            && response.resolve_status
+                == provenance_protocol::ResolveStatus::kUnique
+            && strcmp(response.logical_source, record.logical_source) == 0;
+        if (!same_owner) {
+            CloseSecureResolvedPath(&pinned);
+            errno = EEXIST;
+            return -1;
+        }
+        errno = saved_errno;
+        const int value = function(AT_FDCWD, pinned_path, flags);
+        const int call_errno = errno;
+        CloseSecureResolvedPath(&pinned);
+        errno = call_errno;
+        return value;
+    }
+    if (errno != ENOENT) {
+        const int call_errno = errno;
+        CloseSecureResolvedPath(&pinned);
+        errno = call_errno;
+        return -1;
+    }
+
+    provenance_protocol::Request transaction = MakeProvenanceRequest(
+        provenance_protocol::Command::kPrepareCreate, record, uid);
+    provenance_protocol::Response response;
+    if (!CallProvenance(transaction, &response)
+        || response.provenance_error != provenance_protocol::Error::kNone) {
+        const bool collision = response.provenance_error
+            == provenance_protocol::Error::kRouteBusy;
+        CloseSecureResolvedPath(&pinned);
+        errno = collision ? EEXIST : EIO;
+        return -1;
+    }
+    errno = saved_errno;
+    const int value = function(AT_FDCWD, pinned_path, flags | O_EXCL);
+    const int call_errno = errno;
+    if (value < 0) {
+        SendTransactionStep(&transaction,
+                            provenance_protocol::Command::kAbort);
+        CloseSecureResolvedPath(&pinned);
+        errno = call_errno;
+        return -1;
+    }
+    const bool identified = CaptureIdentity(value, &transaction.record.identity);
+    const bool committed = identified
+        && SendTransactionStep(&transaction,
+                               provenance_protocol::Command::kMaterialize)
+        && SendTransactionStep(&transaction,
+                               provenance_protocol::Command::kCommit);
+    if (!committed) {
+        close(value);
+        unlinkat(pinned.parent_fd, pinned.basename, 0);
+        SendTransactionStep(&transaction,
+                            provenance_protocol::Command::kAbort);
+        CloseSecureResolvedPath(&pinned);
+        errno = EIO;
+        return -1;
+    }
+    CloseSecureResolvedPath(&pinned);
+    errno = call_errno;
+    return value;
 }
 
 int HookedOpenCommon(OpenFn original, const char* operation,
                      const char* path, int flags, mode_t mode) {
     if (original == nullptr) { errno = ENOSYS; return -1; }
-    return WithPath(operation, AT_FDCWD, path,
-        [&](int, const char* final_path) { return original(final_path, flags, mode); });
+    return WithOpenPath(operation, AT_FDCWD, path, flags,
+        [&](int, const char* final_path, int final_flags) {
+            return original(final_path, final_flags, mode);
+        });
 }
 
 int HookedOpen(const char* path, int flags, ...) {
@@ -364,9 +829,9 @@ int HookedOpen64(const char* path, int flags, ...) {
 int HookedOpenAtCommon(OpenAtFn original, const char* operation, int dirfd,
                        const char* path, int flags, mode_t mode) {
     if (original == nullptr) { errno = ENOSYS; return -1; }
-    return WithPath(operation, dirfd, path,
-        [&](int final_dirfd, const char* final_path) {
-            return original(final_dirfd, final_path, flags, mode);
+    return WithOpenPath(operation, dirfd, path, flags,
+        [&](int final_dirfd, const char* final_path, int final_flags) {
+            return original(final_dirfd, final_path, final_flags, mode);
         });
 }
 
@@ -390,93 +855,97 @@ int HookedOpenAt64(int dirfd, const char* path, int flags, ...) {
 }
 
 int HookedStat(const char* path, struct stat* value) {
-    return WithPath("stat", AT_FDCWD, path,
+    return WithPath("stat", kOperationLookupStat, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_stat(final_path, value); });
 }
 
 int HookedLstat(const char* path, struct stat* value) {
-    return WithPath("lstat", AT_FDCWD, path,
+    return WithPath("lstat", kOperationLookupStat, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_lstat(final_path, value); });
 }
 
 int HookedFstatAt(int dirfd, const char* path, struct stat* value, int flags) {
-    return WithPath("fstatat", dirfd, path,
+    return WithPath("fstatat", kOperationLookupStat, 1, dirfd, path,
         [&](int final_dirfd, const char* final_path) {
             return g_fstatat(final_dirfd, final_path, value, flags);
         });
 }
 
 int HookedStat64(const char* path, Stat64* value) {
-    return WithPath("stat64", AT_FDCWD, path,
+    return WithPath("stat64", kOperationLookupStat, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_stat64(final_path, value); });
 }
 
 int HookedLstat64(const char* path, Stat64* value) {
-    return WithPath("lstat64", AT_FDCWD, path,
+    return WithPath("lstat64", kOperationLookupStat, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_lstat64(final_path, value); });
 }
 
 int HookedFstatAt64(int dirfd, const char* path, Stat64* value, int flags) {
-    return WithPath("fstatat64", dirfd, path,
+    return WithPath("fstatat64", kOperationLookupStat, 1, dirfd, path,
         [&](int final_dirfd, const char* final_path) {
             return g_fstatat64(final_dirfd, final_path, value, flags);
         });
 }
 
 int HookedAccess(const char* path, int mode) {
-    return WithPath("access", AT_FDCWD, path,
+    return WithPath("access", kOperationAccess, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_access(final_path, mode); });
 }
 
 int HookedFaccessAt(int dirfd, const char* path, int mode, int flags) {
-    return WithPath("faccessat", dirfd, path,
+    return WithPath("faccessat", kOperationAccess, 1, dirfd, path,
         [&](int final_dirfd, const char* final_path) {
             return g_faccessat(final_dirfd, final_path, mode, flags);
         });
 }
 
 DIR* HookedOpenDir(const char* path) {
-    return WithPath("opendir", AT_FDCWD, path,
+    return WithPath("opendir", kOperationDirectoryIterate, 2, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_opendir(final_path); });
 }
 
 int HookedMkdir(const char* path, mode_t mode) {
-    return WithPath("mkdir", AT_FDCWD, path,
+    return WithPath("mkdir", kOperationMkdir, 2, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_mkdir(final_path, mode); });
 }
 
 int HookedMkdirAt(int dirfd, const char* path, mode_t mode) {
-    return WithPath("mkdirat", dirfd, path,
+    return WithPath("mkdirat", kOperationMkdir, 2, dirfd, path,
         [&](int final_dirfd, const char* final_path) {
             return g_mkdirat(final_dirfd, final_path, mode);
         });
 }
 
 int HookedUnlink(const char* path) {
-    return WithPath("unlink", AT_FDCWD, path,
+    return WithPath("unlink", kOperationUnlink, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_unlink(final_path); });
 }
 
 int HookedUnlinkAt(int dirfd, const char* path, int flags) {
-    return WithPath("unlinkat", dirfd, path,
+    return WithPath("unlinkat", (flags & AT_REMOVEDIR) != 0
+        ? kOperationRmdir : kOperationUnlink, (flags & AT_REMOVEDIR) != 0 ? 2 : 1,
+        dirfd, path,
         [&](int final_dirfd, const char* final_path) {
             return g_unlinkat(final_dirfd, final_path, flags);
         });
 }
 
 int HookedRemove(const char* path) {
-    return WithPath("remove", AT_FDCWD, path,
+    return WithPath("remove", kOperationUnlink, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_remove(final_path); });
 }
 
 int HookedRmdir(const char* path) {
-    return WithPath("rmdir", AT_FDCWD, path,
+    return WithPath("rmdir", kOperationRmdir, 2, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_rmdir(final_path); });
 }
 
 template <typename Function>
-int WithTwoPaths(const char* operation, int old_dirfd, const char* old_path,
-                 int new_dirfd, const char* new_path, Function function) {
+int WithTwoPaths(const char* operation, OperationMask operation_mask,
+                 int old_dirfd, const char* old_path,
+                 int new_dirfd, const char* new_path, unsigned mutation_flags,
+                 Function function) {
     if (__atomic_load_n(&g_hooks_enabled, __ATOMIC_ACQUIRE) == 0) {
         return function(old_dirfd, old_path, new_dirfd, new_path);
     }
@@ -484,25 +953,229 @@ int WithTwoPaths(const char* operation, int old_dirfd, const char* old_path,
     if (!guard.outer() || old_path == nullptr || new_path == nullptr) {
         return function(old_dirfd, old_path, new_dirfd, new_path);
     }
+    if (g_policy_domain == nullptr) {
+        return function(old_dirfd, old_path, new_dirfd, new_path);
+    }
+    auto snapshot_guard = g_policy_domain->Acquire(GetThreadState());
+    if (!snapshot_guard) {
+        return function(old_dirfd, old_path, new_dirfd, new_path);
+    }
     char old_absolute[PATH_MAX]{}, old_rewritten[PATH_MAX]{};
     char new_absolute[PATH_MAX]{}, new_rewritten[PATH_MAX]{};
     int32_t old_uid = -1;
     int32_t new_uid = -1;
-    const bool old_changed = RewriteAtPath(
-        old_dirfd, old_path, old_absolute, old_rewritten, &old_uid);
-    const bool new_changed = RewriteAtPath(
-        new_dirfd, new_path, new_absolute, new_rewritten, &new_uid);
+    const auto old_result = RewriteAtPath(
+        *snapshot_guard, old_dirfd, old_path, operation_mask, 1,
+        old_absolute, old_rewritten, &old_uid);
+    const auto new_result = RewriteAtPath(
+        *snapshot_guard, new_dirfd, new_path, operation_mask, 1,
+        new_absolute, new_rewritten, &new_uid);
+    const auto old_plan = path_hook_contract::PlanOperand(
+        old_path, old_rewritten, old_result);
+    const auto new_plan = path_hook_contract::PlanOperand(
+        new_path, new_rewritten, new_result);
+    const auto plan = path_hook_contract::PlanRename(old_plan, new_plan);
+    if (plan.disposition == path_hook_contract::Disposition::kReject) {
+        errno = plan.error_number;
+        return -1;
+    }
+    const bool old_changed = old_result.disposition
+        == storage_path_adapter::RewriteDisposition::kRedirect;
+    const bool new_changed = new_result.disposition
+        == storage_path_adapter::RewriteDisposition::kRedirect;
     const int32_t uid = old_changed ? old_uid : new_uid;
     if (old_changed) LogRewrite(operation, uid, old_absolute, old_rewritten);
     if (new_changed) LogRewrite(operation, uid, new_absolute, new_rewritten);
-    return function(old_changed ? AT_FDCWD : old_dirfd,
-                    old_changed ? old_rewritten : old_path,
-                    new_changed ? AT_FDCWD : new_dirfd,
-                    new_changed ? new_rewritten : new_path);
+    SecureResolvedPath old_pinned;
+    SecureResolvedPath new_pinned;
+    if (old_changed) old_pinned = ResolveStoragePathParent(
+        plan.first, false, &g_resolver_probe);
+    if (new_changed) new_pinned = ResolveStoragePathParent(
+        plan.second, true, &g_resolver_probe);
+    if ((old_changed && !old_pinned.ok()) || (new_changed && !new_pinned.ok())) {
+        const int error = old_changed && !old_pinned.ok()
+            ? old_pinned.error : new_pinned.error;
+        CloseSecureResolvedPath(&old_pinned);
+        CloseSecureResolvedPath(&new_pinned);
+        errno = error == 0 ? EACCES : error;
+        return -1;
+    }
+    char old_pinned_path[PATH_MAX]{};
+    char new_pinned_path[PATH_MAX]{};
+    if ((old_changed && !BuildPinnedProcPath(
+            old_pinned, old_pinned_path, sizeof(old_pinned_path)))
+        || (new_changed && !BuildPinnedProcPath(
+            new_pinned, new_pinned_path, sizeof(new_pinned_path)))) {
+        CloseSecureResolvedPath(&old_pinned);
+        CloseSecureResolvedPath(&new_pinned);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    const bool transactional_link = operation_mask == kOperationHardLink
+        && new_changed && new_result.reverse_mode == 2;
+    if (transactional_link) {
+        provenance_protocol::Record candidate;
+        bool source_owned = true;
+        if (old_result.reverse_mode == 2) {
+            provenance_protocol::Record previous;
+            const int old_target = openat(
+                old_pinned.parent_fd, old_pinned.basename,
+                O_PATH | O_NOFOLLOW | O_CLOEXEC);
+            source_owned = old_target >= 0
+                && BuildProvenanceRecord(
+                    old_result, old_uid, old_absolute, old_rewritten, &previous)
+                && CaptureIdentity(old_target, &previous.identity)
+                && ResolveOwnedRecord(previous, old_uid);
+            if (old_target >= 0) close(old_target);
+        }
+        const bool candidate_ready = BuildProvenanceRecord(
+            new_result, new_uid, new_absolute, new_rewritten, &candidate);
+        if (!source_owned || !candidate_ready) {
+            CloseSecureResolvedPath(&old_pinned);
+            CloseSecureResolvedPath(&new_pinned);
+            errno = source_owned ? EIO : EXDEV;
+            return -1;
+        }
+        provenance_protocol::Request transaction = MakeProvenanceRequest(
+            provenance_protocol::Command::kPrepareCreate, candidate, new_uid);
+        provenance_protocol::Response response;
+        if (!CallProvenance(transaction, &response)
+            || response.provenance_error != provenance_protocol::Error::kNone) {
+            const bool collision = response.provenance_error
+                == provenance_protocol::Error::kRouteBusy;
+            CloseSecureResolvedPath(&old_pinned);
+            CloseSecureResolvedPath(&new_pinned);
+            errno = collision ? EEXIST : EIO;
+            return -1;
+        }
+        const int value = function(
+            AT_FDCWD, old_pinned_path, AT_FDCWD, new_pinned_path);
+        const int call_errno = errno;
+        const int new_target = value == 0 ? openat(
+            new_pinned.parent_fd, new_pinned.basename,
+            O_PATH | O_NOFOLLOW | O_CLOEXEC) : -1;
+        const bool committed = new_target >= 0
+            && CaptureIdentity(new_target, &transaction.record.identity)
+            && SendTransactionStep(
+                &transaction, provenance_protocol::Command::kMaterialize)
+            && SendTransactionStep(
+                &transaction, provenance_protocol::Command::kCommit);
+        if (new_target >= 0) close(new_target);
+        if (value != 0) {
+            SendTransactionStep(&transaction,
+                                provenance_protocol::Command::kAbort);
+        } else if (!committed) {
+            unlinkat(new_pinned.parent_fd, new_pinned.basename, 0);
+            SendTransactionStep(&transaction,
+                                provenance_protocol::Command::kAbort);
+            CloseSecureResolvedPath(&old_pinned);
+            CloseSecureResolvedPath(&new_pinned);
+            errno = EIO;
+            return -1;
+        }
+        CloseSecureResolvedPath(&old_pinned);
+        CloseSecureResolvedPath(&new_pinned);
+        errno = call_errno;
+        return value;
+    }
+    const bool transactional_rename = operation_mask == kOperationRename
+        && old_changed && new_changed
+        && old_result.reverse_mode == 2 && new_result.reverse_mode == 2;
+    if (transactional_rename) {
+        if ((mutation_flags & ~static_cast<unsigned>(RENAME_NOREPLACE)) != 0) {
+            CloseSecureResolvedPath(&old_pinned);
+            CloseSecureResolvedPath(&new_pinned);
+            errno = EOPNOTSUPP;
+            return -1;
+        }
+        provenance_protocol::Record previous;
+        provenance_protocol::Record candidate;
+        const int old_target = openat(old_pinned.parent_fd, old_pinned.basename,
+                                      O_PATH | O_NOFOLLOW | O_CLOEXEC);
+        const bool owned = old_target >= 0
+            && BuildProvenanceRecord(
+                old_result, old_uid, old_absolute, old_rewritten, &previous)
+            && CaptureIdentity(old_target, &previous.identity)
+            && ResolveOwnedRecord(previous, old_uid)
+            && BuildProvenanceRecord(
+                new_result, new_uid, new_absolute, new_rewritten, &candidate);
+        if (old_target >= 0) close(old_target);
+        if (!owned) {
+            CloseSecureResolvedPath(&old_pinned);
+            CloseSecureResolvedPath(&new_pinned);
+            errno = EXDEV;
+            return -1;
+        }
+        candidate.identity = previous.identity;
+        provenance_protocol::Request transaction = MakeProvenanceRequest(
+            provenance_protocol::Command::kPrepareRename, candidate, old_uid);
+        transaction.previous = previous;
+        provenance_protocol::Response response;
+        if (!CallProvenance(transaction, &response)
+            || response.provenance_error != provenance_protocol::Error::kNone) {
+            const bool collision = response.provenance_error
+                == provenance_protocol::Error::kRouteBusy;
+            CloseSecureResolvedPath(&old_pinned);
+            CloseSecureResolvedPath(&new_pinned);
+            errno = collision ? EEXIST : EIO;
+            return -1;
+        }
+        const int value = static_cast<int>(syscall(
+            SYS_renameat2, AT_FDCWD, old_pinned_path, AT_FDCWD,
+            new_pinned_path, RENAME_NOREPLACE));
+        const int call_errno = errno;
+        if (value != 0) {
+            SendTransactionStep(&transaction,
+                                provenance_protocol::Command::kAbort);
+            CloseSecureResolvedPath(&old_pinned);
+            CloseSecureResolvedPath(&new_pinned);
+            errno = call_errno;
+            return -1;
+        }
+        const int new_target = openat(
+            new_pinned.parent_fd, new_pinned.basename,
+            O_PATH | O_NOFOLLOW | O_CLOEXEC);
+        const bool identified = new_target >= 0
+            && CaptureIdentity(new_target, &transaction.record.identity);
+        if (new_target >= 0) close(new_target);
+        const bool committed = identified
+            && SendTransactionStep(&transaction,
+                                   provenance_protocol::Command::kMaterialize)
+            && SendTransactionStep(&transaction,
+                                   provenance_protocol::Command::kCommit);
+        if (!committed) {
+            const bool compensated = syscall(
+                SYS_renameat2, AT_FDCWD, new_pinned_path, AT_FDCWD,
+                old_pinned_path, RENAME_NOREPLACE) == 0;
+            SendTransactionStep(&transaction,
+                                provenance_protocol::Command::kAbort);
+            LOGE("provenance rename commit failed: uid=%d compensated=%d",
+                 old_uid, compensated ? 1 : 0);
+            CloseSecureResolvedPath(&old_pinned);
+            CloseSecureResolvedPath(&new_pinned);
+            errno = EIO;
+            return -1;
+        }
+        CloseSecureResolvedPath(&old_pinned);
+        CloseSecureResolvedPath(&new_pinned);
+        errno = call_errno;
+        return 0;
+    }
+    const int value = function(
+        old_changed ? AT_FDCWD : old_dirfd,
+        old_changed ? old_pinned_path : plan.first,
+        new_changed ? AT_FDCWD : new_dirfd,
+        new_changed ? new_pinned_path : plan.second);
+    const int call_errno = errno;
+    CloseSecureResolvedPath(&old_pinned);
+    CloseSecureResolvedPath(&new_pinned);
+    errno = call_errno;
+    return value;
 }
 
 int HookedRename(const char* old_path, const char* new_path) {
-    return WithTwoPaths("rename", AT_FDCWD, old_path, AT_FDCWD, new_path,
+    return WithTwoPaths("rename", kOperationRename,
+        AT_FDCWD, old_path, AT_FDCWD, new_path, 0,
         [&](int, const char* final_old, int, const char* final_new) {
             return g_rename(final_old, final_new);
         });
@@ -510,7 +1183,8 @@ int HookedRename(const char* old_path, const char* new_path) {
 
 int HookedRenameAt(int old_dirfd, const char* old_path,
                    int new_dirfd, const char* new_path) {
-    return WithTwoPaths("renameat", old_dirfd, old_path, new_dirfd, new_path,
+    return WithTwoPaths("renameat", kOperationRename,
+        old_dirfd, old_path, new_dirfd, new_path, 0,
         [&](int final_old_dirfd, const char* final_old,
             int final_new_dirfd, const char* final_new) {
             return g_renameat(final_old_dirfd, final_old,
@@ -520,7 +1194,8 @@ int HookedRenameAt(int old_dirfd, const char* old_path,
 
 int HookedRenameAt2(int old_dirfd, const char* old_path,
                     int new_dirfd, const char* new_path, unsigned flags) {
-    return WithTwoPaths("renameat2", old_dirfd, old_path, new_dirfd, new_path,
+    return WithTwoPaths("renameat2", kOperationRename,
+        old_dirfd, old_path, new_dirfd, new_path, flags,
         [&](int final_old_dirfd, const char* final_old,
             int final_new_dirfd, const char* final_new) {
             using RenameAt2Fn = int (*)(int, const char*, int, const char*, unsigned);
@@ -529,8 +1204,27 @@ int HookedRenameAt2(int old_dirfd, const char* old_path,
         });
 }
 
+int HookedLink(const char* old_path, const char* new_path) {
+    return WithTwoPaths("link", kOperationHardLink,
+        AT_FDCWD, old_path, AT_FDCWD, new_path, 0,
+        [&](int, const char* final_old, int, const char* final_new) {
+            return g_link(final_old, final_new);
+        });
+}
+
+int HookedLinkAt(int old_dirfd, const char* old_path,
+                 int new_dirfd, const char* new_path, int flags) {
+    return WithTwoPaths("linkat", kOperationHardLink,
+        old_dirfd, old_path, new_dirfd, new_path, 0,
+        [&](int final_old_dirfd, const char* final_old,
+            int final_new_dirfd, const char* final_new) {
+            return g_linkat(final_old_dirfd, final_old,
+                            final_new_dirfd, final_new, flags);
+        });
+}
+
 ssize_t HookedReadlink(const char* path, char* buffer, size_t size) {
-    return WithPath("readlink", AT_FDCWD, path,
+    return WithPath("readlink", kOperationReadlink, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_readlink(final_path, buffer, size); });
 }
 
@@ -540,88 +1234,141 @@ char* HookedRealpath(const char* path, char* resolved) {
     }
     HookGuard guard;
     if (!guard.outer() || path == nullptr) return g_realpath(path, resolved);
+    if (g_policy_domain == nullptr) return g_realpath(path, resolved);
+    auto snapshot_guard = g_policy_domain->Acquire(GetThreadState());
+    if (!snapshot_guard) return g_realpath(path, resolved);
     char absolute[PATH_MAX]{}, rewritten[PATH_MAX]{};
     int32_t uid = -1;
-    if (!RewriteAtPath(AT_FDCWD, path, absolute, rewritten, &uid)) {
+    const auto rewrite = RewriteAtPath(
+        *snapshot_guard, AT_FDCWD, path, kOperationCanonicalPath, 1,
+        absolute, rewritten, &uid);
+    if (rewrite.disposition == storage_path_adapter::RewriteDisposition::kDeny) {
+        errno = EACCES;
+        return nullptr;
+    }
+    if (rewrite.disposition != storage_path_adapter::RewriteDisposition::kRedirect) {
         return g_realpath(path, resolved);
     }
-    char canonical[PATH_MAX]{};
-    if (g_realpath(rewritten, canonical) == nullptr) return nullptr;
-    char restored[PATH_MAX]{};
-    if (!RestoreAbsolutePath(g_rules, g_rule_count, uid, canonical,
-                             restored, sizeof(restored))) {
+    const auto canonical_plan = path_hook_contract::PlanCanonicalPath(rewrite);
+    if (canonical_plan
+        == path_hook_contract::CanonicalPathDisposition::kAmbiguousReverse) {
         errno = EXDEV;
         return nullptr;
     }
+    SecureResolvedPath pinned = ResolveStoragePathParent(
+        rewritten, false, &g_resolver_probe);
+    if (!pinned.ok()) {
+        errno = pinned.error == 0 ? EACCES : pinned.error;
+        return nullptr;
+    }
+    char pinned_path[PATH_MAX]{};
+    if (!BuildPinnedProcPath(pinned, pinned_path, sizeof(pinned_path))) {
+        CloseSecureResolvedPath(&pinned);
+        errno = ENAMETOOLONG;
+        return nullptr;
+    }
+    if (canonical_plan
+        == path_hook_contract::CanonicalPathDisposition::kProvenanceLookup) {
+        provenance_protocol::Record record;
+        const int target = openat(pinned.parent_fd, pinned.basename,
+                                  O_PATH | O_NOFOLLOW | O_CLOEXEC);
+        const bool record_ready = target >= 0
+            && BuildProvenanceRecord(rewrite, uid, absolute, rewritten, &record)
+            && CaptureIdentity(target, &record.identity);
+        if (target >= 0) close(target);
+        provenance_protocol::Response response;
+        const auto request = MakeProvenanceRequest(
+            provenance_protocol::Command::kResolve, record, uid);
+        const bool unique = record_ready && CallProvenance(request, &response)
+            && response.provenance_error == provenance_protocol::Error::kNone
+            && response.resolve_status
+                == provenance_protocol::ResolveStatus::kUnique
+            && strcmp(response.logical_source, record.logical_source) == 0;
+        if (!unique) {
+            CloseSecureResolvedPath(&pinned);
+            errno = EXDEV;
+            return nullptr;
+        }
+    }
+    char canonical[PATH_MAX]{};
+    if (g_realpath(pinned_path, canonical) == nullptr) {
+        const int call_errno = errno;
+        CloseSecureResolvedPath(&pinned);
+        errno = call_errno;
+        return nullptr;
+    }
+    CloseSecureResolvedPath(&pinned);
     char* target = resolved;
     if (target == nullptr) {
-        target = static_cast<char*>(malloc(strlen(restored) + 1));
+        target = static_cast<char*>(malloc(strlen(absolute) + 1));
         if (target == nullptr) return nullptr;
     }
-    strcpy(target, restored);
+    // Do not leak the backing path through realpath. A provenance-aware
+    // reverse adapter may refine the logical source later.
+    strcpy(target, absolute);
     LogRewrite("realpath", uid, absolute, rewritten);
     return target;
 }
 
 int HookedChmod(const char* path, mode_t mode) {
-    return WithPath("chmod", AT_FDCWD, path,
+    return WithPath("chmod", kOperationMetadataMutation, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_chmod(final_path, mode); });
 }
 
 int HookedFchmodAt(int dirfd, const char* path, mode_t mode, int flags) {
-    return WithPath("fchmodat", dirfd, path,
+    return WithPath("fchmodat", kOperationMetadataMutation, 1, dirfd, path,
         [&](int final_dirfd, const char* final_path) {
             return g_fchmodat(final_dirfd, final_path, mode, flags);
         });
 }
 
 int HookedChown(const char* path, uid_t owner, gid_t group) {
-    return WithPath("chown", AT_FDCWD, path,
+    return WithPath("chown", kOperationMetadataMutation, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_chown(final_path, owner, group); });
 }
 
 int HookedLchown(const char* path, uid_t owner, gid_t group) {
-    return WithPath("lchown", AT_FDCWD, path,
+    return WithPath("lchown", kOperationMetadataMutation, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_lchown(final_path, owner, group); });
 }
 
 int HookedFchownAt(int dirfd, const char* path, uid_t owner, gid_t group, int flags) {
-    return WithPath("fchownat", dirfd, path,
+    return WithPath("fchownat", kOperationMetadataMutation, 1, dirfd, path,
         [&](int final_dirfd, const char* final_path) {
             return g_fchownat(final_dirfd, final_path, owner, group, flags);
         });
 }
 
 int HookedTruncate(const char* path, off_t length) {
-    return WithPath("truncate", AT_FDCWD, path,
+    return WithPath("truncate", kOperationTruncate, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_truncate(final_path, length); });
 }
 
 int HookedTruncate64(const char* path, off64_t length) {
-    return WithPath("truncate64", AT_FDCWD, path,
+    return WithPath("truncate64", kOperationTruncate, 1, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_truncate64(final_path, length); });
 }
 
 int HookedUtimensAt(int dirfd, const char* path,
                     const struct timespec times[2], int flags) {
-    return WithPath("utimensat", dirfd, path,
+    return WithPath("utimensat", kOperationMetadataMutation, 1, dirfd, path,
         [&](int final_dirfd, const char* final_path) {
             return g_utimensat(final_dirfd, final_path, times, flags);
         });
 }
 
 int HookedStatVfs(const char* path, struct statvfs* value) {
-    return WithPath("statvfs", AT_FDCWD, path,
+    return WithPath("statvfs", kOperationLookupStat, 2, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_statvfs(final_path, value); });
 }
 
 int HookedStatVfs64(const char* path, StatVfs64* value) {
-    return WithPath("statvfs64", AT_FDCWD, path,
+    return WithPath("statvfs64", kOperationLookupStat, 2, AT_FDCWD, path,
         [&](int, const char* final_path) { return g_statvfs64(final_path, value); });
 }
 
 int HookedInotifyAddWatch(int fd, const char* path, uint32_t mask) {
-    return WithPath("inotify_add_watch", AT_FDCWD, path,
+    return WithPath("inotify_add_watch", kOperationWatch, 2, AT_FDCWD, path,
         [&](int, const char* final_path) {
             return g_inotify_add_watch(fd, final_path, mask);
         });
@@ -928,6 +1675,8 @@ const HookSpec kHookSpecs[] = {
         HOOK("rename", HookedRename, g_rename),
         HOOK("renameat", HookedRenameAt, g_renameat),
         HOOK("renameat2", HookedRenameAt2, g_renameat2),
+        HOOK("link", HookedLink, g_link),
+        HOOK("linkat", HookedLinkAt, g_linkat),
         HOOK("readlink", HookedReadlink, g_readlink),
         HOOK("realpath", HookedRealpath, g_realpath),
         HOOK("chmod", HookedChmod, g_chmod),
@@ -978,14 +1727,27 @@ InstallResult RegisterHooks(zygisk::Api* api, bool binder_identity_hooks) {
         || g_fstatat != nullptr || g_fstatat64 != nullptr;
     result.identity_hook_attempted = binder_identity_hooks;
     result.identity_hooks = binder_identity_hooks;
-    const bool filesystem_complete = has_open && has_stat
-        && g_access != nullptr && g_opendir != nullptr
-        && g_mkdir != nullptr && g_remove != nullptr && g_rename != nullptr
-        && g_realpath != nullptr && g_readlink != nullptr
-        && g_chmod != nullptr && g_chown != nullptr
-        && g_statvfs != nullptr && g_inotify_add_watch != nullptr;
+    OperationMask operations = 0;
+    if (has_stat) operations |= kOperationLookupStat;
+    if (g_access != nullptr || g_faccessat != nullptr) operations |= kOperationAccess;
+    if (has_open) operations |= kOperationOpenRead | kOperationOpenWrite
+        | kOperationCreate;
+    if (g_opendir != nullptr) operations |= kOperationDirectoryIterate;
+    if (g_mkdir != nullptr || g_mkdirat != nullptr) operations |= kOperationMkdir;
+    if (g_rename != nullptr || g_renameat != nullptr) operations |= kOperationRename;
+    if (g_link != nullptr || g_linkat != nullptr) operations |= kOperationHardLink;
+    if (g_remove != nullptr || g_unlink != nullptr) operations |= kOperationUnlink;
+    if (g_rmdir != nullptr) operations |= kOperationRmdir;
+    if (g_realpath != nullptr) operations |= kOperationCanonicalPath;
+    if (g_readlink != nullptr) operations |= kOperationReadlink;
+    if (g_chmod != nullptr && g_chown != nullptr) {
+        operations |= kOperationMetadataMutation;
+    }
+    if (g_truncate != nullptr || g_truncate64 != nullptr) operations |= kOperationTruncate;
+    if (g_inotify_add_watch != nullptr) operations |= kOperationWatch;
+    result.observed_operations = operations;
     result.virtualization_active = result.hooks_committed
-        && filesystem_complete && binder_identity_hooks;
+        && operations != 0 && binder_identity_hooks;
     uint32_t capability = 0;
     if (has_open) capability |= 1u << 0;
     if (has_stat) capability |= 1u << 1;
@@ -1040,64 +1802,120 @@ void MaybeInstallFuseHooks(const char* path, void* handle) {
 
 }  // namespace
 
-InstallResult Install(zygisk::Api* api, JNIEnv* env, const Rule* rules,
-                      uint32_t rule_count) {
-    if (api == nullptr || env == nullptr || rules == nullptr
-        || rule_count == 0 || rule_count > kMaxRules) {
+InstallResult Install(zygisk::Api* api, JNIEnv* env,
+                      const PolicyConfig& config) {
+    if (api == nullptr || env == nullptr || config.policy_data == nullptr
+        || config.policy_size == 0 || config.scopes == nullptr
+        || config.scope_count == 0 || config.scope_count > kMaxScopes
+        || (config.domain != AdmissionDomain::kAppPath
+            && config.domain != AdmissionDomain::kProvider)) {
         return {};
     }
+    policy_v6_view::PolicyV6View policy;
+    if (!policy.Initialize(config.policy_data, config.policy_size)) return {};
     if (!InitializeThreadStateKey()) {
         LOGE("provider virtual thread state initialization failed");
+        return {};
+    }
+    if (!InitializePolicySnapshotAtFork()) {
+        LOGE("policy snapshot atfork registration failed");
+        return {};
+    }
+    if (!InitializeTransactionAtFork()) {
+        LOGE("provenance transaction atfork registration failed");
         return {};
     }
     __atomic_store_n(&g_hooks_enabled, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_fuse_install_state, 0, __ATOMIC_RELEASE);
     g_api = api;
-    g_rule_count = 0;
-    for (uint32_t index = 0; index < rule_count; ++index) {
-        const Rule& input = rules[index];
-        if (input.caller_uid < 10000
-            || !ValidLogicalRulePath(input.visible_path)
-            || !ValidLogicalRulePath(input.backing_path)) return {};
-        for (uint32_t existing = 0; existing < g_rule_count; ++existing) {
-            const PathRule& current = g_rules[existing];
-            const bool same_scope = current.caller_uid == input.caller_uid
-                && current.user_id == input.user_id;
-            if (same_scope && strcmp(current.visible_path, input.visible_path) == 0
-                && strcmp(current.backing_path, input.backing_path) != 0) {
-                LOGE("provider virtual ambiguous rule: uid=%d user=%u visible=%s",
-                     input.caller_uid, input.user_id, input.visible_path);
-                return {};
-            }
+    auto* runtime = static_cast<RuntimePolicySnapshot*>(
+        calloc(1, sizeof(RuntimePolicySnapshot)));
+    if (runtime == nullptr) return {};
+    runtime->bytes = static_cast<uint8_t*>(malloc(config.policy_size));
+    if (runtime->bytes == nullptr) { free(runtime); return {}; }
+    memcpy(runtime->bytes, config.policy_data, config.policy_size);
+    runtime->size = config.policy_size;
+    if (!runtime->policy.Initialize(runtime->bytes, runtime->size)) {
+        ReleaseRuntimePolicy(runtime);
+        return {};
+    }
+    runtime->scope_count = config.scope_count;
+    runtime->domain = config.domain;
+    g_domain = config.domain;
+    g_identity_mode = config.identity_mode;
+    for (uint32_t index = 0; index < config.scope_count; ++index) {
+        const auto& scope = config.scopes[index];
+        policy_v6_view::PackageRef package;
+        if (scope.caller_uid < 10000
+            || !policy.PackageAt(scope.package_index, &package)) {
+            ReleaseRuntimePolicy(runtime);
+            return {};
         }
-        PathRule& output = g_rules[g_rule_count++];
-        output.caller_uid = input.caller_uid;
-        output.user_id = input.user_id;
-        strcpy(output.visible_path, input.visible_path);
-        strcpy(output.backing_path, input.backing_path);
+        runtime->scopes[index] = scope;
     }
     bool binder_identity_attempted = false;
-    const bool binder_identity_hooks = InstallBinderIdentityHooks(
+    const bool needs_binder = config.identity_mode == IdentityMode::kBinderCallerUid;
+    const bool identity_hooks = !needs_binder || InstallBinderIdentityHooks(
         api, env, &binder_identity_attempted);
-    if (!binder_identity_hooks) {
+    if (!identity_hooks) {
         LOGE("provider virtual Binder JNI identity hooks unavailable");
         InstallResult result;
         result.identity_hook_attempted = binder_identity_attempted;
         return result;
     }
-    const InstallResult result = RegisterHooks(api, binder_identity_hooks);
+    InstallResult result = RegisterHooks(api, identity_hooks);
+    result.identity_hook_attempted = needs_binder && binder_identity_attempted;
+    result.identity_hooks = identity_hooks;
+    if (config.domain == AdmissionDomain::kAppPath) {
+        result.observed_capabilities |= kCapabilityAppPathAdapter;
+    } else if (identity_hooks) {
+        ProviderCompositeProbe probe;
+        probe.caller_uid = true;
+        probe.path_io = result.hooks_committed;
+        probe.path_operations = result.observed_operations;
+        // A libc path hook cannot prove cursor/document-id/MediaStore view
+        // consistency. Bit 17 stays clear until a real Provider ABI adapter
+        // probes query, insert, FD, rename/delete and reverse mapping.
+        const ProviderCompositeObservation observed =
+            ObserveProviderComposite(probe);
+        result.observed_capabilities |= observed.capabilities;
+        result.observed_operations |= observed.operations;
+    }
+    g_capabilities = {};
+    g_capabilities.capability_generation = 1;
+    g_capabilities.observed_capabilities = result.observed_capabilities;
+    auto& domain = g_capabilities.domains[static_cast<uint8_t>(config.domain)];
+    domain.state = result.virtualization_active
+        ? AdapterState::kActive : AdapterState::kInactive;
+    domain.observed_operations = result.observed_operations;
+    runtime->capabilities = g_capabilities;
+    const bool published = config.domain == AdmissionDomain::kProvider
+        ? g_provider_policy_domain.Publish(
+            runtime, sizeof(*runtime) + config.policy_size)
+        : g_app_policy_domain.Publish(
+            runtime, sizeof(*runtime) + config.policy_size);
+    if (!published) {
+        ReleaseRuntimePolicy(runtime);
+        result.virtualization_active = false;
+    } else {
+        g_policy_domain = config.domain == AdmissionDomain::kProvider
+            ? static_cast<PolicySnapshotDomainBase<RuntimePolicySnapshot>*>(
+                &g_provider_policy_domain)
+            : static_cast<PolicySnapshotDomainBase<RuntimePolicySnapshot>*>(
+                &g_app_policy_domain);
+    }
     if (ShouldEnableHooks(result)) {
         __atomic_store_n(&g_hooks_enabled, 1, __ATOMIC_RELEASE);
     }
-    LOGI("provider virtual installed: rules=%u caller_scope=request_uid "
+    LOGI("path policy installed: scopes=%u domain=%u caller_scope=%s "
          "binder_jni=%d late_loader=%d attempted=%d committed=%d active=%d",
-         g_rule_count,
+         config.scope_count, static_cast<unsigned>(config.domain),
+         needs_binder ? "binder_uid" : "process_uid",
          result.identity_hooks ? 1 : 0,
          g_android_dlopen_ext != nullptr || g_dlopen != nullptr ? 1 : 0,
          result.hook_registration_attempted ? 1 : 0,
          result.hooks_committed ? 1 : 0,
          result.virtualization_active ? 1 : 0);
-    if (!result.virtualization_active) g_rule_count = 0;
     return result;
 }
 

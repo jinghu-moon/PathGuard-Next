@@ -129,6 +129,13 @@ Zygote fork 会增加回收停滞与生命周期复杂度。
 - writer 和线程首次注册路径更复杂，但复杂性集中在一个组件，不泄漏到 matcher/action。
 - 读路径固定为少量原子操作；性能基线必须在 P0/P1 建立。
 
+## 实施记录
+
+`feature/pattern-redirect-v6` 的 Zygisk `APP_STL=none` 路径使用专用固定容量实现，但必须与本 ADR
+共享完全相同的不变量。`pathguard_policy_snapshot_domain_test` 直接编译该生产头，覆盖 slot 耗尽、
+retire 保护、oversize 拒绝以及 fork 后先发布再读取时的 stale TLS binding 重注册；不得仅以 Host
+`snapshot_publisher.h` 的测试替代生产实现证据。
+
 ## 依据
 
 - [Pattern redirect design §5.5](../08-pattern-redirect-design.md)

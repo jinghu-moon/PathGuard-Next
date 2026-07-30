@@ -6,6 +6,20 @@ int main() {
     using pathguard::provider_redirect::InstallResult;
     using pathguard::provider_redirect::MustRetainModule;
     using pathguard::provider_redirect::ShouldEnableHooks;
+    using pathguard::provider_redirect::HookLifecycle;
+    using pathguard::provider_redirect::HookState;
+
+    HookLifecycle lifecycle;
+    assert(lifecycle.unloadable());
+    assert(lifecycle.Register());
+    assert(!lifecycle.unloadable());
+    assert(lifecycle.Commit(false));
+    assert(lifecycle.state() == HookState::kCommittedPassthrough);
+    assert(lifecycle.SetActive(true));
+    assert(lifecycle.state() == HookState::kCommittedActive);
+    assert(lifecycle.SetActive(false));
+    assert(!lifecycle.unloadable());
+    assert(!lifecycle.Register());
 
     InstallResult untouched;
     assert(!MustRetainModule(untouched));

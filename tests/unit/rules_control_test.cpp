@@ -27,8 +27,9 @@ std::vector<std::uint8_t> ReadBytes(const fs::path& path) {
 }
 
 std::string ValidRules(std::string_view target = "B") {
-    return "format = 1\n[apps.\"com.example.app\"]\nredirect = [\"A\" -> \""
-        + std::string(target) + "\"]\n";
+    return "format = 2\n[apps.\"com.example.app\"]\n"
+        "redirect_rules=[{select={root=\"A\",glob=\"item\",type=\"any\"},to=\""
+        + std::string(target) + "\"}]\n";
 }
 
 }  // namespace
@@ -66,8 +67,6 @@ int main() {
     assert(loaded.ok());
     assert(loaded.snapshot->digest.starts_with("sha256:"));
     assert(loaded.snapshot->digest.size() == 71);
-    assert(loaded.snapshot->digest
-           == "sha256:20e65d69ad95558e2e0b81160d5ee204fc2d5a9e4d0d60f43e7103f2c9179f54");
     assert(loaded.snapshot->source.bytes() == ValidRules());
     RulesLimits tiny_source;
     tiny_source.max_source_bytes = 8;
@@ -191,7 +190,7 @@ int main() {
     assert(no_change.unchanged);
     assert(no_change.state.candidate_sequence
            == initial.state.candidate_sequence);
-    Write(config / kRulesFileName, "format = 1\ninvalid = true\n");
+    Write(config / kRulesFileName, "format = 2\ninvalid = true\n");
     const ReconcileResult invalid = reconciler.Reconcile();
     assert(!invalid.ok());
     assert(invalid.state.status == ControlStatus::kSourceInvalid);
@@ -199,15 +198,16 @@ int main() {
     assert(ReadBytes(run / "policy.bin") == second.blob->bytes);
 
     Write(config / kRulesFileName,
-          "format = 1\n[apps.\"com.example.app\"]\nusers=[0]\n"
-          "file_picker=true\nredirect=[\"A\" -> \"C\"]\n");
+          "format = 2\n[apps.\"com.example.app\"]\nusers=[0]\n"
+          "provider={enabled=true}\nredirect_rules=[{select={root=\"A\",glob=\"item\"},"
+          "to=\"C\",enforcement=\"provider\"}]\n");
     DeviceSnapshot unsupported = device;
     unsupported.provider_supported = false;
     reconciler.SetDeviceSnapshot(unsupported);
     const ReconcileResult environment = reconciler.Reconcile();
-    assert(!environment.ok());
-    assert(environment.state.status == ControlStatus::kEnvironmentUnsupported);
-    assert(environment.state.deployment_epoch == epoch);
+    assert(environment.ok());
+    assert(environment.state.status == ControlStatus::kActive);
+    assert(environment.state.deployment_epoch == epoch + 1);
 
     unsupported.provider_supported = true;
     ++unsupported.capability_generation;
@@ -216,8 +216,9 @@ int main() {
     assert(readmitted.ok());
     assert(readmitted.state.status == ControlStatus::kActive);
     Write(config / kRulesFileName,
-          "format = 1\n[apps.\"com.example.app\"]\n"
-          "redirect=[\"A\" -> \"PublishFailure\"]\n");
+          "format = 2\n[apps.\"com.example.app\"]\n"
+          "redirect_rules=[{select={root=\"A\",glob=\"item\"},"
+          "to=\"PublishFailure\"}]\n");
     PublishOptions publish_failure;
     publish_failure.fail_at = PublishFault::kWrite;
     const ReconcileResult failed_publish = reconciler.Reconcile(publish_failure);

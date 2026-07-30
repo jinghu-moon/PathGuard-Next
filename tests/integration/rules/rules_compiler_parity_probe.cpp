@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "pathguard/policy_format.h"
+#include "pathguard/policy_v6.h"
 #include "pathguard/rules/semantic.h"
 #include "pathguard/rules/source.h"
 
@@ -33,14 +35,22 @@ void PrintHex(const std::vector<std::uint8_t>& bytes) {
 int main() {
     using namespace pathguard::rules;
     const RulesBuildResult valid = Compile(
-        "format = 1\n"
+        "format = 2\n"
+        "[compatibility]\n"
+        "allow_legacy_mount = true\n"
         "[apps.\"org.localsend.localsend_app\"]\n"
         "users = [0]\n"
-        "file_picker = true\n"
-        "redirect = [\"Download/localsend-source\" -> "
-        "\"Download/localsend-redirect\"]\n");
-    if (!valid.ok() || valid.blob->bytes.size() != 207
-        || valid.blob->content_generation != UINT64_C(11078014328063549684)) {
+        "provider = { enabled = true }\n"
+        "redirect_rules = [{ select = { root = \"Download\", "
+        "glob = \"localsend-source\", type = \"directory\" }, "
+        "to = \"Download/localsend-redirect\" }]\n");
+    pathguard::PolicyV6 decoded;
+    const auto decoded_result = valid.blob
+        ? pathguard::DecodePolicyV6(valid.blob->bytes, &decoded)
+        : pathguard::PolicyV6DecodeResult{};
+    if (!valid.ok() || !decoded_result.ok
+        || decoded_result.content_generation != valid.blob->content_generation
+        || valid.blob->bytes.size() < pathguard::binary_format::kHeaderSize) {
         return 1;
     }
     std::cout << "valid|" << valid.blob->content_generation << '|'
@@ -50,12 +60,15 @@ int main() {
     std::cout << '\n';
 
     const RulesBuildResult mixed = Compile(
-        "format = 1\n"
+        "format = 2\n"
         "[apps.\"org.localsend.localsend_app\"]\n"
         "users = [0]\n"
-        "deny = [\"Pictures/Nagram\", \"DCIM/Screenshots\"]\n"
-        "redirect = [\"Download/localsend-source\" -> "
-        "\"Download/localsend-redirect\"]\n");
+        "deny_rules = ["
+        "{ select = { root = \"Pictures\", glob = \"Nagram\", type = \"directory\" } },"
+        "{ select = { root = \"DCIM\", glob = \"Screenshots\", type = \"directory\" } }]\n"
+        "redirect_rules = [{ select = { root = \"Download\", "
+        "glob = \"localsend-source\", type = \"directory\" }, "
+        "to = \"Download/localsend-redirect\" }]\n");
     if (!mixed.ok()
         || mixed.requirements.mount_actions
             != (pathguard::kMountActionRedirect
@@ -68,8 +81,9 @@ int main() {
     std::cout << '\n';
 
     const RulesBuildResult invalid = Compile(
-        "format = 1\n[apps.\"com.example.app\"]\n"
-        "redirect = [\"A\" ->]\n");
+        "format = 2\n[apps.\"com.example.app\"]\n"
+        "redirect_rules = [{ select = { root = \"Pictures\", "
+        "glob = \"*.jpg\" } }]\n");
     if (invalid.ok() || invalid.diagnostics.empty()) return 2;
     const Diagnostic& diagnostic = invalid.diagnostics.front();
     std::cout << "invalid|" << diagnostic.code << '|'

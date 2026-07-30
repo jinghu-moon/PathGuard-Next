@@ -1,6 +1,43 @@
 #pragma once
 
+#include <stdint.h>
+
 namespace pathguard::provider_redirect {
+
+enum class HookState : uint8_t {
+    kUnregistered,
+    kRegistered,
+    kCommittedPassthrough,
+    kCommittedActive,
+};
+
+class HookLifecycle final {
+public:
+    bool Register() noexcept {
+        if (state_ != HookState::kUnregistered) return false;
+        state_ = HookState::kRegistered;
+        return true;
+    }
+    bool Commit(bool active) noexcept {
+        if (state_ != HookState::kRegistered) return false;
+        state_ = active ? HookState::kCommittedActive
+            : HookState::kCommittedPassthrough;
+        return true;
+    }
+    bool SetActive(bool active) noexcept {
+        if (state_ != HookState::kCommittedActive
+            && state_ != HookState::kCommittedPassthrough) return false;
+        state_ = active ? HookState::kCommittedActive
+            : HookState::kCommittedPassthrough;
+        return true;
+    }
+    HookState state() const noexcept { return state_; }
+    bool unloadable() const noexcept {
+        return state_ == HookState::kUnregistered;
+    }
+private:
+    HookState state_ = HookState::kUnregistered;
+};
 
 struct InstallResult {
     bool hook_registration_attempted = false;
@@ -8,6 +45,8 @@ struct InstallResult {
     bool virtualization_active = false;
     bool identity_hook_attempted = false;
     bool identity_hooks = false;
+    uint64_t observed_capabilities = 0;
+    uint64_t observed_operations = 0;
 };
 
 // JNI replacements and a failed PLT commit can leave callbacks installed.

@@ -46,8 +46,8 @@ int main() {
     fs::create_directories(run);
     const fs::path rules = config / kRulesFileName;
     Write(rules,
-          "format = 1\n[apps.\"com.example.app\"]\n"
-          "users=[0]\nredirect=[\"A\" -> \"B\"]\n");
+          "format = 2\n[apps.\"com.example.app\"]\n"
+          "users=[0]\nredirect_rules=[{select={root=\"A\",glob=\"item\"},to=\"B\"}]\n");
     Reconciler reconciler(config, run, RulesLimits{}, Device());
     const ReconcileResult initial = reconciler.Reconcile();
     assert(initial.ok() && initial.published);
@@ -58,14 +58,14 @@ int main() {
     std::string previous_digest = initial.state.source_digest;
 
     const std::vector<std::string> equivalents{
-        "# comment\nformat=1\n[apps.\"com.example.app\"]\n"
-        "users=[0]\nredirect=[\"A\" -> \"B\"]\n",
-        "format = 1\napps.\"com.example.app\".redirect = [ 'A'->'B' ]\n"
-        "apps.\"com.example.app\".users = [ 0 ]\n",
-        "format = 1\n[apps.\"com.example.app\"]\n"
-        "redirect = [\n  \"A\"       ->       \"B\",\n]\nusers = [0]\n",
-        "format = 1\r\n[apps.\"com.example.app\"]\r\n"
-        "users=[0]\r\nredirect=[\"A\" -> \"B\"]\r\n",
+        "# comment\nformat=2\n[apps.\"com.example.app\"]\nusers=[0]\n"
+        "redirect_rules=[{select={root=\"A\",glob=\"item\"},to=\"B\"}]\n",
+        "format=2\napps.\"com.example.app\".users=[0]\n"
+        "apps.\"com.example.app\".redirect_rules=[{to='B',select={glob='item',root='A'}}]\n",
+        "format = 2\n[apps.\"com.example.app\"]\nusers = [0]\n"
+        "redirect_rules = [\n { to = \"B\", select = { type=\"file\", glob=\"item\", root=\"A\" } },\n]\n",
+        "format = 2\r\n[apps.\"com.example.app\"]\r\nusers=[0]\r\n"
+        "redirect_rules=[{select={root=\"A\",glob=\"item\"},to=\"B\"}]\r\n",
     };
     for (const std::string& variant : equivalents) {
         Write(rules, variant);

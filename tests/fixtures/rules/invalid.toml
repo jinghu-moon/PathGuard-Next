@@ -1,4 +1,6 @@
-format = 1
+format = 2
 
 [apps."com.example.app"]
-redirect = ["A" ->]
+redirect_rules = [
+    { select = { root = "A", glob = "[" }, to = "B" },
+]

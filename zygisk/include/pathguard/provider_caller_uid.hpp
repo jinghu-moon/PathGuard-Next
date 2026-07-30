@@ -10,6 +10,9 @@ struct CallerUidContext {
     uint32_t binder_clear_depth = 0;
     int32_t fuse_uid = -1;
     const void* fuse_request = nullptr;
+    void* policy_hazard = nullptr;
+    void* policy_domain = nullptr;
+    uint32_t policy_hazard_slot = UINT32_MAX;
 };
 
 constexpr bool IsApplicationCaller(int32_t uid, int32_t process_uid) noexcept {

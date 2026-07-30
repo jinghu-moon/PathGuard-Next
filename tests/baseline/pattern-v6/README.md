@@ -25,6 +25,16 @@
 | `p6-pattern-harness-20260730` | I-02 | complete | `p6-bootstrap-20260729/I-02-pattern-harness-green.md` |
 | `p6-pattern-harness-20260730` | R-02 | complete | `p6-bootstrap-20260729/R-02-pattern-harness-refactor.md` |
 | `p6-pattern-harness-20260730` | 第一部分最终验证 | complete | `p6-bootstrap-20260729/first-part-final-verification.md` |
+| `p6-core-20260730` | V-12 | complete | `p6-core-20260730/V-12-rules-schema-before.md` |
+| `p6-core-20260730` | T-03～T-07 | complete | `p6-core-20260730/T-03-T-07-pattern-core-red.md` |
+| `p6-core-20260730` | I-03～R-07 | complete | `p6-core-20260730/I-03-R-07-pattern-core-green.md` |
+| `p6-core-20260730` | V-13 | complete | `p6-core-20260730/V-13-rules-schema-after.md` |
+| `p6-core-20260730` | T-08～T-11 | complete | `p6-core-20260730/T-08-T-11-runtime-red.md` |
+| `p6-core-20260730` | I-08～R-11 | complete | `p6-core-20260730/I-08-R-11-runtime-green.md` |
+| `p6-core-20260730` | V-14 | complete | `p6-core-20260730/V-14-policy-v5-before.md` |
+| `p6-core-20260730` | T-12～R-16 / V-15～V-23 | complete | `p6-core-20260730/V-15-V-23-policy-runtime-after.md` |
+| `p6-core-20260730` | T-17～R-20 / V-24～V-31 | complete + device not_observed | `p6-core-20260730/V-24-V-31-path-provider-after.md` |
+| `p6-core-20260730` | T-21～R-24 / V-32～V-39 | complete + device not_observed | `p6-core-20260730/V-32-V-39-provenance-security-after.md` |
 
 状态只能使用 `pending`、`in_progress`、`complete`、`blocked` 或 `not_observed`。
 `complete` 要求对应任务的验收标准和证据均已满足。

@@ -14,9 +14,9 @@ $stdout = Join-Path $root 'stdout.log'
 $stderr = Join-Path $root 'stderr.log'
 
 $initial = @"
-format = 1
+format = 2
 [apps."org.localsend.localsend_app"]
-redirect = ["Pictures/Nagram" -> "PathGuard/Nagram"]
+redirect_rules = [{ select = { root = "Pictures", glob = "Nagram" }, to = "PathGuard/Nagram" }]
 "@
 $comment_only = $initial + "`n# comment-only-change`n"
 $updated = $comment_only.Replace('PathGuard/Nagram', 'PathGuard/Updated')

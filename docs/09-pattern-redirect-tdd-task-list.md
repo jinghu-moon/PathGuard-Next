@@ -1,6 +1,6 @@
 # PathGuard Next Pattern Redirect TDD 执行清单
 
-> 状态：执行中；第一部分已完成（V-01～V-11、T-01/I-01/R-01、T-02/I-02/R-02）
+> 状态：执行中；第一、二部分的自动化工作已完成；第二部分真机观察项按授权标记为 `not_observed`
 >
 > 基准设计：`docs/08-pattern-redirect-design.md` v0.8
 >
@@ -166,6 +166,23 @@ tests/fuzz/seeds/pattern-v1/
 ## 第二部分：核心功能开发
 
 本部分直接交付 C1～C6。每个带 before/after 的主题都是独立合入门；不得在 after 失败时继续下一主题。
+
+> 执行结果（2026-07-30）：T-03～T-24、I-03～I-24、R-03～R-24 的可自动化实现与
+> 验证完成；Host Release CTest `75/75`、Android NDK arm64-v8a/armeabi-v7a、Zygisk
+> `APP_STL=none` 构建通过，`git diff --check` 通过。V-12～V-39 的 Host/契约证据已归档。
+> LocalSend 实际接收、Provider 50 次冷启动、真实 strong identity 与多 ROM/kernel
+> 兼容矩阵需要人工/设备协助，按用户授权记录为 `not_observed`，不伪报通过。自动化范围内
+> unexpected regression 为 0。Provider query/insert/reverse 生产 ABI adapter 尚未准入，bit 17
+> 明确保持 `unsupported`；C3 的前向 path-I/O 最低闭环完成，不宣称复合视图已在设备 active。
+
+| 已完成任务 | 状态 | 主要证据 |
+| --- | --- | --- |
+| V-12～V-14、T-03～R-11 | complete | format 2、Glob v1、brace、selector/index/evaluator/OperationPlan |
+| V-15～V-23、T-12～R-16 | complete | format 6、admission、hazard snapshot、MountPlan adapter |
+| T-17～R-20 | complete（bit 17 runtime unsupported） | app-path/Provider path-I/O、operation mask、composite admission、Hook lifecycle；无伪 active |
+| V-24～V-31 | complete + device not_observed | Host 契约通过；query/insert/reverse unsupported；LocalSend/Provider soak 未观察 |
+| T-21～R-24 | complete | provenance create/rename/delete、WAL/CRC、resolver probe、failure policy |
+| V-32～V-39 | complete + device not_observed | Host 故障矩阵通过；真实设备恢复/TOCTOU 未观察 |
 
 ### V-12 [验证] 记录 rules schema 与 canonical policy 改造前基线
 

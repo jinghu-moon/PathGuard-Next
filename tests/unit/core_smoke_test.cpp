@@ -10,5 +10,13 @@ int main() {
     static_assert(pathguard::kCapabilityFanotifyRenameTarget == (UINT64_C(1) << 11));
     static_assert((pathguard::kCapabilityFanotifyDfidName
         & pathguard::kCapabilityFanotifyPidfd) == 0);
+    static_assert(pathguard::kCapabilityProviderCallerUid
+                  == (UINT64_C(1) << 16));
+    static_assert(pathguard::kCapabilityProviderQueryInsertMapping
+                  == (UINT64_C(1) << 17));
+    static_assert(pathguard::kCapabilityFuseCompletePath
+                  == (UINT64_C(1) << 18));
+    static_assert(pathguard::kCapabilityAppPathAdapter
+                  == (UINT64_C(1) << 19));
     return 0;
 }

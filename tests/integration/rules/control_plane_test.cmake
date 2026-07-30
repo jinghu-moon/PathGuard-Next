@@ -76,8 +76,8 @@ execute_process(
   RESULT_VARIABLE invalid_text_result
   ERROR_VARIABLE invalid_text_error
 )
-if(invalid_text_result EQUAL 0 OR NOT invalid_text_error MATCHES "PG-ARROW-OPERAND"
-   OR NOT invalid_error MATCHES "PG-ARROW-OPERAND")
+if(invalid_text_result EQUAL 0 OR NOT invalid_text_error MATCHES "PG-PATTERN-SYNTAX"
+   OR NOT invalid_error MATCHES "PG-PATTERN-SYNTAX")
   message(FATAL_ERROR "CLI text/JSON diagnostic codes diverged")
 endif()
 execute_process(

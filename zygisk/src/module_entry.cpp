@@ -16,6 +16,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
@@ -27,11 +28,14 @@
 #include "pathguard/media_query_hook.hpp"
 #include "pathguard/mount_backend.h"
 #include "pathguard/mount_executor.h"
+#include "pathguard/mount_plan_adapter.h"
 #include "pathguard/mount_transaction.h"
 #include "pathguard/mutation_journal.h"
 #include "pathguard/perf_clock.hpp"
 #include "pathguard/policy_format.h"
-#include "pathguard/policy_index.h"
+#include "pathguard/policy_pattern_runtime.h"
+#include "pathguard/policy_v6_view.h"
+#include "pathguard/provenance_protocol.h"
 #include "pathguard/runtime_status.h"
 #include "zygisk.hpp"
 
@@ -42,9 +46,6 @@ constexpr char kPolicyPath[] = "run/policy.bin";
 constexpr uint32_t kPolicyMagic = pathguard::binary_format::kMagic;
 constexpr uint16_t kPolicyFormatVersion = pathguard::binary_format::kFormatVersion;
 constexpr size_t kPolicyHeaderSize = pathguard::binary_format::kHeaderSize;
-constexpr size_t kPackageEntrySize = pathguard::binary_format::kPackageSize;
-constexpr size_t kMountRuleEntrySize = pathguard::binary_format::kMountRuleSize;
-constexpr size_t kEventRuleEntrySize = pathguard::binary_format::kEventRuleSize;
 constexpr uint32_t kBootstrapMagic = 0x50474250;
 constexpr uint32_t kBootstrapVersion = 5;
 constexpr uint32_t kCompanionResultMagic = 0x52534750;
@@ -62,6 +63,10 @@ constexpr int kChildTerminateGraceMs = 1000;
 constexpr int kApplyingOwnerDeathTimeoutMs = 10000;
 constexpr uint8_t kDenyAction = 0;
 constexpr uint8_t kRedirectAction = 1;
+constexpr uint8_t kLiteralMatch = 0;
+constexpr uint8_t kMountDomain = 0;
+constexpr uint8_t kAppPathDomain = 1;
+constexpr uint8_t kProviderDomain = 2;
 constexpr char kDenyAnchorRelativePath[] = "run/deny-anchor";
 constexpr char kDiagnosticPackage[] = "org.localsend.localsend_app";
 constexpr char kExternalStorageProviderProcess[] = "com.android.externalstorage";
@@ -414,86 +419,6 @@ bool BuildMountSourcePath(const ProcessPlan& plan,
                               output, capacity);
 }
 
-bool ValidPackageIndex(const uint8_t* data, size_t size, uint32_t package_count,
-                       uint32_t package_offset, uint32_t string_offset) {
-    uint32_t previous_hash = 0;
-    const char* previous_name = nullptr;
-    for (uint32_t index = 0; index < package_count; ++index) {
-        const auto* entry = data + package_offset + index * kPackageEntrySize;
-        const uint32_t hash = ReadLe32(
-            entry + pathguard::binary_format::kPackageHashOffset);
-        const char* name = ReadPolicyString(
-            data, size, string_offset,
-            ReadLe32(entry + pathguard::binary_format::kPackageNameOffset));
-        if (name == nullptr
-            || pathguard::binary_format::PackageNameHash(name, strlen(name)) != hash
-            || (index > 0 && (hash < previous_hash
-                || (hash == previous_hash && strcmp(name, previous_name) <= 0)))) {
-            return false;
-        }
-        previous_hash = hash;
-        previous_name = name;
-    }
-    return true;
-}
-
-bool ValidPolicyTables(const uint8_t* data, size_t size, uint32_t package_count,
-                       uint32_t mount_count, uint32_t event_count,
-                       uint32_t package_offset, uint32_t mount_offset,
-                       uint32_t event_offset, uint32_t string_offset) {
-    uint32_t expected_first_mount = 0;
-    uint32_t expected_first_event = 0;
-    for (uint32_t index = 0; index < package_count; ++index) {
-        const auto* entry = data + package_offset + index * kPackageEntrySize;
-        const uint32_t first_mount = ReadLe32(
-            entry + pathguard::binary_format::kPackageFirstMountOffset);
-        const uint32_t package_mount_count = ReadLe32(
-            entry + pathguard::binary_format::kPackageMountCountOffset);
-        const uint32_t first_event = ReadLe32(
-            entry + pathguard::binary_format::kPackageFirstEventOffset);
-        const uint32_t package_event_count = ReadLe32(
-            entry + pathguard::binary_format::kPackageEventCountOffset);
-        if (first_mount != expected_first_mount
-            || package_mount_count > mount_count - first_mount
-            || first_event != expected_first_event
-            || package_event_count > event_count - first_event
-            || entry[pathguard::binary_format::kPackageFailureModeOffset] > 1
-            || entry[pathguard::binary_format::kPackageMediaCompatOffset] > 1
-            || entry[pathguard::binary_format::kPackageProviderCompatOffset] > 1
-            || entry[43] != 0 || ReadLe32(entry + 44) != 0) {
-            return false;
-        }
-        expected_first_mount += package_mount_count;
-        expected_first_event += package_event_count;
-    }
-    if (expected_first_mount != mount_count || expected_first_event != event_count) {
-        return false;
-    }
-    for (uint32_t index = 0; index < mount_count; ++index) {
-        const auto* rule = data + mount_offset + index * kMountRuleEntrySize;
-        if (rule[pathguard::binary_format::kMountActionOffset] > 3
-            || rule[1] != 0 || ReadLe16(rule + 6) != 0
-            || ReadPolicyString(data, size, string_offset,
-                ReadLe32(rule + pathguard::binary_format::kMountVisiblePathOffset)) == nullptr
-            || ReadPolicyString(data, size, string_offset,
-                ReadLe32(rule + pathguard::binary_format::kMountBackingPathOffset)) == nullptr) {
-            return false;
-        }
-    }
-    for (uint32_t index = 0; index < event_count; ++index) {
-        const auto* rule = data + event_offset + index * kEventRuleEntrySize;
-        if (rule[pathguard::binary_format::kEventActionOffset] > 1
-            || rule[1] != 0 || ReadLe16(rule + 2) != 0
-            || ReadPolicyString(data, size, string_offset,
-                ReadLe32(rule + pathguard::binary_format::kEventSourcePathOffset)) == nullptr
-            || ReadPolicyString(data, size, string_offset,
-                ReadLe32(rule + pathguard::binary_format::kEventTargetPathOffset)) == nullptr) {
-            return false;
-        }
-    }
-    return true;
-}
-
 bool LoadProcessPlan(int module_dir, const char* process_name, jint uid,
                      ProcessPlan* plan, PolicyLoadPerf* perf) {
     if (plan == nullptr || process_name == nullptr
@@ -538,162 +463,66 @@ bool LoadProcessPlan(int module_dir, const char* process_name, jint uid,
     };
 
     const auto* data = static_cast<const uint8_t*>(mapping);
-    const uint32_t file_size = ReadLe32(
-        data + pathguard::binary_format::kFileSizeOffset);
-    const uint32_t payload_checksum = ReadLe32(
-        data + pathguard::binary_format::kPayloadChecksumOffset);
-    const uint32_t package_count = ReadLe32(
-        data + pathguard::binary_format::kPackageCountOffset);
-    const uint32_t mount_count = ReadLe32(
-        data + pathguard::binary_format::kMountRuleCountOffset);
-    const uint32_t event_count = ReadLe32(
-        data + pathguard::binary_format::kEventRuleCountOffset);
-    const uint32_t package_offset = ReadLe32(
-        data + pathguard::binary_format::kPackageTableOffset);
-    const uint32_t mount_offset = ReadLe32(
-        data + pathguard::binary_format::kMountRuleTableOffset);
-    const uint32_t event_offset = ReadLe32(
-        data + pathguard::binary_format::kEventRuleTableOffset);
-    const uint32_t string_offset = ReadLe32(
-        data + pathguard::binary_format::kStringTableOffset);
-    const uint32_t policy_flags = ReadLe32(
-        data + pathguard::binary_format::kHeaderFlagsOffset);
-    const uint64_t expected_mount_offset = kPolicyHeaderSize
-        + static_cast<uint64_t>(package_count) * kPackageEntrySize;
-    const uint64_t expected_event_offset = expected_mount_offset
-        + static_cast<uint64_t>(mount_count) * kMountRuleEntrySize;
-    const uint64_t expected_string_offset = expected_event_offset
-        + static_cast<uint64_t>(event_count) * kEventRuleEntrySize;
-    const bool valid_header = ReadLe32(data) == kPolicyMagic
-        && ReadLe16(data + 4) == kPolicyFormatVersion
-        && ReadLe16(data + 6) == pathguard::binary_format::kSchemaVersion
-        && file_size == size
-        && package_count > 0
-        && package_offset == kPolicyHeaderSize
-        && mount_offset == expected_mount_offset
-        && event_offset == expected_event_offset
-        && string_offset == expected_string_offset
-        && string_offset < size
-        && (policy_flags
-            & ~pathguard::binary_format::kPolicyFlagAllowLegacyStringBind) == 0
-        && pathguard::binary_format::Crc32(data + kPolicyHeaderSize,
-                                          size - kPolicyHeaderSize)
-            == payload_checksum
-        && ValidPackageIndex(data, size, package_count, package_offset,
-                             string_offset)
-        && ValidPolicyTables(data, size, package_count, mount_count, event_count,
-                             package_offset, mount_offset, event_offset,
-                             string_offset);
-    if (!valid_header) {
-        if (diagnostic) {
-            LOGE("policy_header_invalid size=%zu packages=%u mounts=%u events=%u flags=%u",
-                 size, package_count, mount_count, event_count, policy_flags);
-        }
+    pathguard::policy_v6_view::PolicyV6View policy;
+    pathguard::policy_v6_view::Error policy_error{};
+    if (!policy.Initialize(data, size, &policy_error)) {
+        if (diagnostic) LOGE("policy_v6_decode_failed size=%zu", size);
         return finish(false);
     }
-
-    char user_id[16];
-    snprintf(user_id, sizeof(user_id), "%d", uid / 100000);
     const char* process_separator = strchr(process_name, ':');
     const size_t package_length = process_separator == nullptr
         ? strlen(process_name)
         : static_cast<size_t>(process_separator - process_name);
     if (package_length == 0) return finish(false);
-    const pathguard::binary_format::PolicyIndexView index{
-        data, size, package_count, package_offset, mount_offset, string_offset,
-    };
-    const auto* entry = pathguard::binary_format::FindPackageEntry(
-        index, process_name, package_length);
-    if (entry == nullptr) {
+    pathguard::policy_v6_view::PackageRef package;
+    if (!policy.FindPackage(process_name, package_length, &package)) {
         if (diagnostic) LOGE("policy_package_miss uid=%d", uid);
         return finish(false);
     }
-    const char* package_name = ReadPolicyString(
-        data, size, string_offset,
-        ReadLe32(entry + pathguard::binary_format::kPackageNameOffset));
-    const char* users = ReadPolicyString(
-        data, size, string_offset,
-        ReadLe32(entry + pathguard::binary_format::kPackageUsersOffset));
-    const char* processes = ReadPolicyString(
-        data, size, string_offset,
-        ReadLe32(entry + pathguard::binary_format::kPackageProcessesOffset));
-    const uint32_t first_rule = ReadLe32(
-        entry + pathguard::binary_format::kPackageFirstMountOffset);
-    const uint32_t rule_count = ReadLe32(
-        entry + pathguard::binary_format::kPackageMountCountOffset);
-    const uint32_t first_event = ReadLe32(
-        entry + pathguard::binary_format::kPackageFirstEventOffset);
-    const uint32_t app_event_count = ReadLe32(
-        entry + pathguard::binary_format::kPackageEventCountOffset);
-    const uint8_t failure_mode = entry[
-        pathguard::binary_format::kPackageFailureModeOffset];
-    const uint8_t media_compat = entry[
-        pathguard::binary_format::kPackageMediaCompatOffset];
-    const uint8_t provider_compat = entry[
-        pathguard::binary_format::kPackageProviderCompatOffset];
-    if (failure_mode != 0 || media_compat > 1 || provider_compat > 1
-        || first_event > event_count
-        || app_event_count > event_count - first_event || app_event_count != 0
-        || entry[43] != 0 || ReadLe32(entry + 44) != 0) {
-        if (diagnostic) LOGE("policy_package_entry_invalid");
+    const uint32_t user_id = static_cast<uint32_t>(uid) / 100000u;
+    if (!policy.PackageMatchesScope(package, process_name, strlen(process_name),
+                                    user_id)) {
+        if (diagnostic) LOGE("policy_scope_miss user=%u", user_id);
         return finish(false);
     }
-    plan->snapshot_generation = ReadLe64(
-        data + pathguard::binary_format::kContentGenerationOffset);
-    plan->policy_flags = policy_flags;
-    plan->plan_generation = ReadLe64(
-        entry + pathguard::binary_format::kPackagePlanGenerationOffset);
-    plan->media_compat = media_compat == 1;
-    plan->provider_compat = provider_compat == 1;
-    if (package_name == nullptr || users == nullptr || processes == nullptr
-        || !ProcessMatches(package_name, processes, process_name)
-        || !ListContains(users, user_id)) {
-        if (diagnostic) {
-            LOGE("policy_scope_miss user=%s users=%s processes=%s",
-                 user_id, users == nullptr ? "<null>" : users,
-                 processes == nullptr ? "<null>" : processes);
+    pathguard::LiteralMountPlan mount_plan;
+    if (!pathguard::BuildLiteralMountPlan(policy, package, &mount_plan)) {
+        if (diagnostic) LOGE("policy_mount_plan_empty_or_invalid");
+        return finish(false);
+    }
+    plan->snapshot_generation = mount_plan.content_generation;
+    plan->policy_flags = mount_plan.policy_flags;
+    plan->plan_generation = mount_plan.plan_generation;
+    plan->provider_compat =
+        (package.flags & pathguard::binary_format::kPackageFlagProviderEnabled) != 0;
+    for (uint32_t index = 0; index < mount_plan.count; ++index) {
+        const pathguard::LiteralMountPlanEntry& source = mount_plan.entries[index];
+        const char* visible = mount_plan.Path(source.visible_path);
+        const char* backing = mount_plan.Path(source.target_path);
+        if (visible == nullptr || backing == nullptr || plan->count >= kMaxMountRules) {
+            plan->count = 0;
+            return finish(false);
         }
-        return finish(false);
-    }
-    if (first_rule > mount_count || rule_count > mount_count - first_rule
-        || rule_count > kMaxMountRules) {
-        if (diagnostic) LOGE("policy_rule_range_invalid first=%u count=%u total=%u",
-                             first_rule, rule_count, mount_count);
-        return finish(false);
-    }
-    for (uint32_t rule_index = 0; rule_index < rule_count; ++rule_index) {
-        const auto* rule = data + mount_offset
-            + (first_rule + rule_index) * kMountRuleEntrySize;
-        const uint8_t action = rule[pathguard::binary_format::kMountActionOffset];
-        const char* visible = ReadPolicyString(
-            data, size, string_offset,
-            ReadLe32(rule + pathguard::binary_format::kMountVisiblePathOffset));
-        const char* backing = ReadPolicyString(
-            data, size, string_offset,
-            ReadLe32(rule + pathguard::binary_format::kMountBackingPathOffset));
+        const bool deny = source.action == pathguard::LiteralMountAction::kDeny;
+        const uint8_t mount_action = deny ? kDenyAction : kRedirectAction;
         char expanded_backing[PATH_MAX]{};
-        const bool deny = action == kDenyAction;
-        if (!IsExecutableMountAction(action)
-            || rule[1] != 0 || ReadLe16(rule + 6) != 0
-            || visible == nullptr || backing == nullptr
-            || !IsAllowedTarget(visible)
+        if (!IsAllowedTarget(visible)
             || (deny ? backing[0] != '\0'
                      : !ExpandRuntimePath(
-                           backing, static_cast<uint32_t>(uid) / 100000u,
+                           backing, user_id,
                            expanded_backing, sizeof(expanded_backing)))
             || strlen(visible) >= PATH_MAX) {
             plan->count = 0;
-            if (diagnostic) LOGE("policy_rule_invalid index=%u action=%u",
-                                 rule_index, action);
+            if (diagnostic) LOGE("policy_mount_action_invalid");
             return finish(false);
         }
         PlannedMount& mount = plan->mounts[plan->count++];
-        mount.action = action;
+        mount.action = mount_action;
         if (!StorePlanPath(plan, visible, &mount.visible_path)
             || !StorePlanPath(plan, deny ? "" : expanded_backing,
                               &mount.backing_path)) {
             plan->count = 0;
-            if (diagnostic) LOGE("policy_plan_path_overflow index=%u", rule_index);
+            if (diagnostic) LOGE("policy_plan_path_overflow");
             return finish(false);
         }
     }
@@ -731,7 +560,8 @@ bool SameProcessPlan(const ProcessPlan& expected, const ProcessPlan& actual) {
     return true;
 }
 
-bool LoadProviderRules(int module_dir,
+#if 0  // Removed with the v5 compatibility DTO in Phase P6.
+bool LoadProviderRulesV5(int module_dir,
                        pathguard::provider_redirect::Rule* rules,
                        uint32_t capacity, uint32_t* rule_count) {
     if (rules == nullptr || rule_count == nullptr) return false;
@@ -866,6 +696,125 @@ bool LoadProviderRules(int module_dir,
     }
     munmap(mapping, size);
     return *rule_count > 0;
+}
+#endif
+
+struct PathPolicyMapping {
+    void* mapping = nullptr;
+    size_t size = 0;
+    pathguard::storage_path_adapter::PolicyScope scopes[kMaxMountRules]{};
+    uint32_t scope_count = 0;
+};
+
+void ReleasePathPolicy(PathPolicyMapping* output) {
+    if (output == nullptr) return;
+    if (output->mapping != nullptr && output->mapping != MAP_FAILED) {
+        munmap(output->mapping, output->size);
+    }
+    *output = {};
+}
+
+bool MapPolicy(int module_dir, PathPolicyMapping* output,
+               pathguard::policy_v6_view::PolicyV6View* policy) {
+    if (output == nullptr || policy == nullptr) return false;
+    *output = {};
+    const int policy_fd = openat(module_dir, kPolicyPath, O_RDONLY | O_CLOEXEC);
+    if (policy_fd < 0) return false;
+    struct stat file_stat {};
+    if (fstat(policy_fd, &file_stat) != 0
+        || file_stat.st_size < static_cast<off_t>(kPolicyHeaderSize)) {
+        close(policy_fd);
+        return false;
+    }
+    const size_t size = static_cast<size_t>(file_stat.st_size);
+    void* mapping = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, policy_fd, 0);
+    close(policy_fd);
+    if (mapping == MAP_FAILED) return false;
+    if (!policy->Initialize(static_cast<const uint8_t*>(mapping), size)) {
+        munmap(mapping, size);
+        return false;
+    }
+    output->mapping = mapping;
+    output->size = size;
+    return true;
+}
+
+bool PackageHasDomainActions(
+        const pathguard::policy_v6_view::PolicyV6View& policy,
+        const pathguard::policy_v6_view::PackageRef& package,
+        uint8_t domain) {
+    for (uint32_t index = 0; index < package.action_count; ++index) {
+        pathguard::policy_v6_view::ActionRef action;
+        if (policy.ActionAt(package.first_action + index, &action)
+            && action.domain == domain && action.kind <= kRedirectAction) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool LoadProviderPolicy(int module_dir, PathPolicyMapping* output) {
+    pathguard::policy_v6_view::PolicyV6View policy;
+    if (!MapPolicy(module_dir, output, &policy)) return false;
+
+    for (uint32_t package_index = 0;
+         package_index < policy.package_count(); ++package_index) {
+        pathguard::policy_v6_view::PackageRef package;
+        pathguard::policy_v6_view::StringRef package_name_ref;
+        char package_name[PATH_MAX]{};
+        if (!policy.PackageAt(package_index, &package)
+            || (package.flags & pathguard::binary_format::kPackageFlagProviderEnabled) == 0
+            || (package.flags & pathguard::binary_format::kPackageFlagAllUsers) != 0
+            || !PackageHasDomainActions(policy, package, kProviderDomain)
+            || !policy.StringAt(package.name_id, &package_name_ref)
+            || !package_name_ref.CopyTo(package_name, sizeof(package_name))) {
+            continue;
+        }
+        for (uint32_t user_index = 0; user_index < package.user_count; ++user_index) {
+            uint32_t user_id = 0;
+            if (!policy.PackageUserAt(package, user_index, &user_id)) continue;
+            char package_data_path[PATH_MAX]{};
+            struct stat package_stat {};
+            const int written = snprintf(
+                package_data_path, sizeof(package_data_path), "/data/user/%u/%s",
+                user_id, package_name);
+            if (written <= 0 || static_cast<size_t>(written) >= sizeof(package_data_path)
+                || stat(package_data_path, &package_stat) != 0
+                || package_stat.st_uid < 10000) {
+                LOGE("provider redirect package uid resolution failed: package=%s user=%u errno=%d",
+                     package_name, user_id, errno);
+                continue;
+            }
+            if (output->scope_count >= kMaxMountRules) return true;
+            output->scopes[output->scope_count++] = {
+                static_cast<int32_t>(package_stat.st_uid), user_id, package_index};
+        }
+    }
+    if (output->scope_count == 0) ReleasePathPolicy(output);
+    return output->scope_count > 0;
+}
+
+bool LoadAppPathPolicy(int module_dir, const char* process_name, jint uid,
+                       PathPolicyMapping* output) {
+    if (process_name == nullptr || uid < 10000) return false;
+    pathguard::policy_v6_view::PolicyV6View policy;
+    if (!MapPolicy(module_dir, output, &policy)) return false;
+    const char* separator = strchr(process_name, ':');
+    const size_t package_size = separator == nullptr
+        ? strlen(process_name) : static_cast<size_t>(separator - process_name);
+    pathguard::policy_v6_view::PackageRef package;
+    const uint32_t user_id = static_cast<uint32_t>(uid) / 100000u;
+    if (package_size == 0
+        || !policy.FindPackage(process_name, package_size, &package)
+        || !policy.PackageMatchesScope(package, process_name,
+                                       strlen(process_name), user_id)
+        || !PackageHasDomainActions(policy, package, kAppPathDomain)) {
+        ReleasePathPolicy(output);
+        return false;
+    }
+    output->scopes[0] = {uid, user_id, package.index};
+    output->scope_count = 1;
+    return true;
 }
 
 bool HasSafePathComponents(const char* path) {
@@ -2241,30 +2190,44 @@ public:
         const bool media_provider =
             strcmp(process_name, kMainlineMediaProviderProcess) == 0;
         if (external_storage_provider || media_provider) {
-            pathguard::provider_redirect::Rule provider_rules[kMaxMountRules]{};
-            uint32_t provider_rule_count = 0;
+            PathPolicyMapping provider_policy;
             const bool loaded = module_dir >= 0
-                && LoadProviderRules(module_dir, provider_rules, kMaxMountRules,
-                                     &provider_rule_count);
+                && LoadProviderPolicy(module_dir, &provider_policy);
             if (module_dir >= 0) close(module_dir);
             env_->ReleaseStringUTFChars(args->nice_name, process_name);
             provider_redirect_required_ = loaded;
+            provider_process_ = true;
             if (!loaded) {
                 LOGI("provider redirect has no active rules");
                 Unload();
                 return;
             }
+            const pathguard::provider_redirect::PolicyConfig config{
+                static_cast<const uint8_t*>(provider_policy.mapping),
+                provider_policy.size,
+                provider_policy.scopes,
+                provider_policy.scope_count,
+                pathguard::AdmissionDomain::kProvider,
+                pathguard::provider_redirect::IdentityMode::kBinderCallerUid,
+            };
             const pathguard::provider_redirect::InstallResult install_result =
-                pathguard::provider_redirect::Install(
-                api_, env_, provider_rules, provider_rule_count);
+                pathguard::provider_redirect::Install(api_, env_, config);
             provider_redirect_installed_ = install_result.virtualization_active;
             provider_redirect_module_retained_ =
                 pathguard::provider_redirect::MustRetainModule(install_result);
-            LOGI("provider redirect specialize: process=%s rules=%u caller_scope=binder_uid attempted=%d committed=%d installed=%d",
-                 media_provider ? "media" : "external_storage", provider_rule_count,
+            if (provider_redirect_module_retained_) {
+                path_policy_ = provider_policy;
+            } else {
+                ReleasePathPolicy(&provider_policy);
+            }
+            LOGI("provider redirect specialize: process=%s scopes=%u caller_scope=binder_uid attempted=%d committed=%d installed=%d capabilities=%llx operations=%llx",
+                 media_provider ? "media" : "external_storage",
+                 config.scope_count,
                  install_result.hook_registration_attempted ? 1 : 0,
                  install_result.hooks_committed ? 1 : 0,
-                 provider_redirect_installed_ ? 1 : 0);
+                 provider_redirect_installed_ ? 1 : 0,
+                 static_cast<unsigned long long>(install_result.observed_capabilities),
+                 static_cast<unsigned long long>(install_result.observed_operations));
             if (!provider_redirect_installed_
                 && !provider_redirect_module_retained_) Unload();
             return;
@@ -2272,14 +2235,52 @@ public:
         const bool diagnostic = strcmp(process_name, kDiagnosticPackage) == 0;
         if (diagnostic) LOGI("pre_specialize_enter pid=%d uid=%d module_fd=%d",
                              getpid(), args->uid, module_dir);
+        PathPolicyMapping app_path_policy;
+        const bool app_path_loaded = module_dir >= 0
+            && LoadAppPathPolicy(module_dir, process_name, args->uid,
+                                 &app_path_policy);
         const bool matched = module_dir >= 0
             && LoadProcessPlan(module_dir, process_name, args->uid, &plan, &policy_perf);
         env_->ReleaseStringUTFChars(args->nice_name, process_name);
-        if (!matched) {
+        if (!matched && !app_path_loaded) {
             if (module_dir >= 0) close(module_dir);
             if (diagnostic) LOGE("pre_specialize_no_plan pid=%d uid=%d",
                                  getpid(), args->uid);
             Unload();
+            return;
+        }
+
+        if (app_path_loaded) {
+            const pathguard::provider_redirect::PolicyConfig config{
+                static_cast<const uint8_t*>(app_path_policy.mapping),
+                app_path_policy.size,
+                app_path_policy.scopes,
+                app_path_policy.scope_count,
+                pathguard::AdmissionDomain::kAppPath,
+                pathguard::provider_redirect::IdentityMode::kProcessUid,
+            };
+            const auto install_result = pathguard::provider_redirect::Install(
+                api_, env_, config);
+            provider_redirect_required_ = true;
+            provider_redirect_installed_ = install_result.virtualization_active;
+            provider_redirect_module_retained_ =
+                pathguard::provider_redirect::MustRetainModule(install_result);
+            if (provider_redirect_module_retained_) {
+                path_policy_ = app_path_policy;
+            } else {
+                ReleasePathPolicy(&app_path_policy);
+            }
+            LOGI("app path specialize: uid=%d attempted=%d committed=%d active=%d capabilities=%llx operations=%llx",
+                 args->uid,
+                 install_result.hook_registration_attempted ? 1 : 0,
+                 install_result.hooks_committed ? 1 : 0,
+                 install_result.virtualization_active ? 1 : 0,
+                 static_cast<unsigned long long>(install_result.observed_capabilities),
+                 static_cast<unsigned long long>(install_result.observed_operations));
+        }
+        if (!matched) {
+            if (module_dir >= 0) close(module_dir);
+            if (!provider_redirect_module_retained_) Unload();
             return;
         }
 
@@ -2348,7 +2349,7 @@ public:
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs*) override {
-        if (provider_redirect_required_) {
+        if (provider_process_) {
             if (!provider_redirect_installed_
                 && !provider_redirect_module_retained_) Unload();
             return;
@@ -2431,7 +2432,8 @@ public:
                      getpid());
             }
         }
-        if (!media_query_hook_installed_) Unload();
+        if (!media_query_hook_installed_
+            && !provider_redirect_module_retained_) Unload();
     }
 
     void preServerSpecialize(zygisk::ServerSpecializeArgs*) override { Unload(); }
@@ -2442,6 +2444,7 @@ private:
     zygisk::Api* api_ = nullptr;
     JNIEnv* env_ = nullptr;
     bool provider_redirect_required_ = false;
+    bool provider_process_ = false;
     bool provider_redirect_installed_ = false;
     bool provider_redirect_module_retained_ = false;
     bool media_query_hook_installed_ = false;
@@ -2450,12 +2453,53 @@ private:
     SharedMountState* mount_shared_state_ = nullptr;
     ProcessPlan media_plan_;
     jint media_uid_ = 0;
+    PathPolicyMapping path_policy_;
 };
+
+bool ForwardProvenanceRequest(int client) {
+    pathguard::provenance_protocol::Request request;
+    if (recv(client, &request, sizeof(request), MSG_WAITALL)
+        != static_cast<ssize_t>(sizeof(request))
+        || request.magic != pathguard::provenance_protocol::kMagic
+        || request.version != pathguard::provenance_protocol::kVersion) {
+        return false;
+    }
+    const int broker = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (broker < 0) return false;
+    SetSocketTimeout(broker, kCompanionIoTimeoutMs);
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    constexpr const char* socket_path =
+        pathguard::provenance_protocol::kAndroidSocketPath;
+    static_assert(sizeof(address.sun_path) > sizeof(
+        pathguard::provenance_protocol::kAndroidSocketPath));
+    memcpy(address.sun_path, socket_path, sizeof(
+        pathguard::provenance_protocol::kAndroidSocketPath));
+    pathguard::provenance_protocol::Response response;
+    const bool handled = connect(
+            broker, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0
+        && send(broker, &request, sizeof(request), MSG_NOSIGNAL)
+            == static_cast<ssize_t>(sizeof(request))
+        && recv(broker, &response, sizeof(response), MSG_WAITALL)
+            == static_cast<ssize_t>(sizeof(response))
+        && response.magic == pathguard::provenance_protocol::kMagic
+        && response.version == pathguard::provenance_protocol::kVersion;
+    close(broker);
+    return handled && send(client, &response, sizeof(response), MSG_NOSIGNAL)
+        == static_cast<ssize_t>(sizeof(response));
+}
 
 void CompanionHandler(int client) {
     LOGI("companion_enter pid=%d", getpid());
     const uint64_t handler_started = pathguard::perf::NowNs();
     SetSocketTimeout(client, kCompanionIoTimeoutMs);
+    uint32_t request_magic = 0;
+    if (recv(client, &request_magic, sizeof(request_magic), MSG_PEEK)
+            == static_cast<ssize_t>(sizeof(request_magic))
+        && request_magic == pathguard::provenance_protocol::kMagic) {
+        ForwardProvenanceRequest(client);
+        return;
+    }
     BootstrapHeader header{};
     int shared_fd = -1;
     int module_dir_fd = -1;

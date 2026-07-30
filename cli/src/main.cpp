@@ -112,7 +112,7 @@ static int ValidateOrCompile(const std::string& command, int argc, char** argv) 
         return 1;
     }
     if (command == "validate") {
-        std::cout << "valid: " << result.canonical->apps.size()
+        std::cout << "valid: " << result.canonical_v2->apps.size()
                   << " package(s), content_generation="
                   << result.blob->content_generation << '\n';
         return 0;

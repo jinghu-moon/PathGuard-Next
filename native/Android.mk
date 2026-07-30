@@ -2,7 +2,13 @@ LOCAL_PATH := $(call my-dir)
 ROOT_PATH := $(LOCAL_PATH)/..
 CORE_SOURCES := \
     ../core/src/binary.cpp \
+    ../core/src/failure_policy.cpp \
     ../core/src/path.cpp \
+    ../core/src/pattern.cpp \
+    ../core/src/pattern_runtime.cpp \
+    ../core/src/policy_v6.cpp \
+    ../core/src/route_provenance.cpp \
+    ../core/src/provenance_broker.cpp \
     ../core/src/topology.cpp \
     ../core/src/validation.cpp \
     ../core/src/version.cpp
@@ -12,6 +18,8 @@ RULES_COMPILER_SOURCES := \
     ../rules/src/desugarer.cpp \
     ../rules/src/diagnostic.cpp \
     ../rules/src/format_probe.cpp \
+    ../rules/src/schema_v2.cpp \
+    ../rules/src/selector_builder.cpp \
     ../rules/src/semantic.cpp \
     ../rules/src/source.cpp \
     ../rules/src/tools.cpp
@@ -87,7 +95,7 @@ include $(BUILD_EXECUTABLE)
 include $(CLEAR_VARS)
 LOCAL_MODULE := pathguardd
 LOCAL_SRC_FILES := ../daemon/src/main.cpp $(CORE_SOURCES) \
-    ../daemon/src/rules_control.cpp \
+    ../daemon/src/rules_control.cpp ../daemon/src/provenance_server.cpp \
     $(DIRECTORY_RESOLVER_SOURCE) $(MOUNT_INFO_SNAPSHOT_SOURCE) \
     $(MOUNT_EXECUTOR_SOURCE)
 LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include $(ROOT_PATH)/daemon/include \
@@ -115,6 +123,7 @@ LOCAL_SRC_FILES := \
     ../zygisk/src/provider_redirect_hook.cpp \
     ../zygisk/src/provider_path_mapper.cpp \
     $(DIRECTORY_RESOLVER_SOURCE) \
+    secure_path_resolver.cpp \
     $(MOUNT_INFO_SNAPSHOT_SOURCE) \
     $(MOUNT_EXECUTOR_SOURCE)
 LOCAL_C_INCLUDES := $(ROOT_PATH)/zygisk/include $(ROOT_PATH)/core/include $(ROOT_PATH)/native/include

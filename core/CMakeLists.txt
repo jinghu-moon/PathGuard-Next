@@ -1,6 +1,12 @@
 add_library(pathguard_core STATIC
   src/binary.cpp
+  src/failure_policy.cpp
   src/path.cpp
+  src/pattern.cpp
+  src/pattern_runtime.cpp
+  src/policy_v6.cpp
+  src/route_provenance.cpp
+  src/provenance_broker.cpp
   src/topology.cpp
   src/validation.cpp
   src/version.cpp

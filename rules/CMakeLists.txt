@@ -4,6 +4,8 @@ add_library(pathguard_rules_compiler STATIC
   src/desugarer.cpp
   src/diagnostic.cpp
   src/format_probe.cpp
+  src/schema_v2.cpp
+  src/selector_builder.cpp
   src/semantic.cpp
   src/source.cpp
   src/tools.cpp

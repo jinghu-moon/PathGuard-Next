@@ -84,7 +84,7 @@ mount 内部接口和 plan 表达允许随统一 IR 重构；
 | --- | --- | --- |
 | C1 | app-scoped literal deny | 目标 UID/user 对受限目录得到 `EACCES`，其他应用不受影响 |
 | C2 | app-scoped literal redirect | 目标应用访问 visible path 时实际落到 backing path，读写/rename/delete 一致 |
-| C3 | LocalSend/Provider 代写 | Binder caller UID 归因正确，接收文件落到规则目标，Provider 查询和实际 FD 一致 |
+| C3 | LocalSend/Provider 代写 | 最低闭环为 Binder caller UID 归因正确且接收文件落到规则目标；只有 bit 17 经复合 probe 置位时才额外承诺 Provider query/insert/reverse 与实际 FD 一致，否则该视图明确 unsupported |
 | C4 | 多源到同一目标 | 每个合法源都能前向写入；同名碰撞确定性 reject；反向歧义不伪装成唯一映射 |
 | C5 | 故障隔离 | 未命中 UID 透传；能力缺失 fail-open；active deny 和 collision 不被错误 fail-open |
 | C6 | 新增 glob 路由/deny | 按文件名、后缀和目录分量匹配，作用域、优先级和执行域符合本文语义 |
@@ -986,10 +986,17 @@ Provider 自身 UID。Provider 适配器还必须处理：
 query/create 映射已经一致。当前主分支只提供 literal prefix path virtualization 和 media query
 deny 的一部分基础，尚未满足上述 glob contract。
 
-只有同时具备 caller UID、文件系统操作和 query/insert 映射能力时，`provider.enabled = true`
-的 glob redirect 才标记为 active。provider-scope glob deny 还必须覆盖 Provider 的 read、
-write、query、insert、delete 和 rename 拒绝入口。Hook 安装失败、Binder identity 不可用或
-OEM Provider ABI 不明时，状态为 `unsupported`，不发布半成品 pattern 动作。
+截至 `feature/pattern-redirect-v6` 的 P2 实现，Provider 前向 path-I/O 已消费统一 v6
+Selector/Action 和 caller UID scope；生产环境尚无能证明 query/insert/document ID/reverse 复合视图
+一致的 ABI adapter，因此 bit 17 保持清零。这是受支持能力边界，不是用 libc Hook 结果推断出的
+临时 active 状态。
+
+Provider 准入按 operation 拆分：前向 path-I/O glob redirect 需要可信 caller UID 和本次
+create/open/write/rename/delete 对应的实际 Hook 覆盖；query/insert/reverse 虚拟视图才额外要求
+bit 17 及对应 operation。反向能力缺失时不得阻断已经安全可执行的前向保存，而应让 reverse/query
+明确 `AmbiguousReverse`/unsupported。provider-scope glob deny 则只能对实际覆盖的 read、write、
+query、insert、delete、rename 入口逐项宣称 active。Hook 安装失败、Binder identity 不可用或
+OEM Provider ABI 不明时，相应 operation 为 `unsupported`，不发布半成品保障。
 
 Provider PLT Hook 只允许提交到经审计、进程全程常驻且不会 `dlclose` 的 library 白名单。Hook
 事务一旦提交，模块必须驻留；后续 self-test 或 composite admission 失败时保持 Hook 已安装但

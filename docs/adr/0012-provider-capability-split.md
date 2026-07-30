@@ -52,7 +52,8 @@ Provider query/insert 路径映射和 FUSE 覆盖状态。三类能力由不同�
 
 | 动作范围 | 必需稳定能力 | 额外要求 |
 |---|---|---|
-| Provider/SAF glob redirect | `provider_caller_uid` + `provider_query_insert_mapping` | 对应 read/write/query/insert/create/rename/delete/reverse action mask 完整；`reverse_mode=provenance` 时 ADR-0017 store/coordinator 必须 healthy |
+| Provider/SAF glob redirect（前向 path-I/O） | `provider_caller_uid` | 当前 path operation mask 完整；不把反向视图缺失升级为保存失败 |
+| Provider query/insert/reverse 虚拟视图 | `provider_caller_uid` + `provider_query_insert_mapping` | query/insert/reverse action mask 完整；`reverse_mode=provenance` 时 ADR-0017 store/coordinator 必须 healthy |
 | `enforcement = "provider"` glob deny | `provider_caller_uid` + `provider_query_insert_mapping` | deny 操作矩阵完整；缺项时整个 deny rule inactive |
 | `enforcement = "complete"` glob deny/redirect | `fuse_complete_path` 或未来等价 VFS complete capability | FUSE/VFS action mask 覆盖规则所需全部操作 |
 | 仅 app path Hook 的 redirect | `app_path_adapter`（bit 19）+ `execution_domain = app_path` | 按 ADR-0013 同时校验进程级 adapter state 与 required/observed operation mask，不冒充 Provider 或 complete |
@@ -112,6 +113,13 @@ admission 决定，不能在一次操作中静默降级。
 - provider scope 能在没有 FUSE 的设备上独立工作；
 - complete enforcement 不会因部分 Provider/libc Hook 被错误标为 active；
 - capability 协议保持小而稳定，细粒度操作差异由 action mask/substatus 承担。
+
+## 实施记录
+
+`feature/pattern-redirect-v6` 已实现 bit 16 的 Binder caller UID 与 Provider path-I/O adapter。
+libc path Hook、符号存在和 PLT commit 都不能证明 cursor/document ID/MediaStore/FD 视图一致，故当前
+生产 probe 不设置 bit 17。bit 17 的准入接口与 conformance contract 已存在，但在引入并通过真实
+Provider ABI adapter 前，query/insert/reverse 动作保持 unsupported。
 
 ## 依据
 

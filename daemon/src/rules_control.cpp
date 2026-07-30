@@ -655,7 +655,7 @@ ReconcileResult Reconciler::Reconcile(PublishOptions options) {
         return output;
     }
     const rules::AdmissionResult admission = rules::AdmitPolicy(
-        *built.canonical, built.requirements, snapshot_);
+        *built.policy_v6, built.requirements, snapshot_);
     state_.capability_generation = snapshot_.capability_generation;
     state_.topology_generation = snapshot_.topology_generation;
     if (!admission.admitted) {
@@ -729,7 +729,7 @@ ManagerSaveResult Reconciler::SaveRules(
                           built.diagnostics.front(), *candidate));
     }
     const rules::AdmissionResult admission = rules::AdmitPolicy(
-        *built.canonical, built.requirements, snapshot_);
+        *built.policy_v6, built.requirements, snapshot_);
     if (!admission.admitted) {
         return reject("PG-ADMISSION-UNSUPPORTED",
                       "device capabilities or topology do not satisfy policy requirements");

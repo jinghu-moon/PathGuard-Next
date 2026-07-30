@@ -5,19 +5,28 @@
 #include <limits.h>
 #include <sys/types.h>
 
+#include "pathguard/action_admission.h"
 #include "pathguard/provider_redirect_lifecycle.hpp"
+#include "pathguard/storage_path_adapter.h"
 #include "zygisk.hpp"
 
 namespace pathguard::provider_redirect {
 
-struct Rule {
-    int32_t caller_uid;
-    uint32_t user_id;
-    char visible_path[PATH_MAX];
-    char backing_path[PATH_MAX];
+enum class IdentityMode : uint8_t {
+    kProcessUid,
+    kBinderCallerUid,
 };
 
-InstallResult Install(zygisk::Api* api, JNIEnv* env, const Rule* rules,
-                      uint32_t rule_count);
+struct PolicyConfig {
+    const uint8_t* policy_data = nullptr;
+    size_t policy_size = 0;
+    const storage_path_adapter::PolicyScope* scopes = nullptr;
+    uint32_t scope_count = 0;
+    AdmissionDomain domain = AdmissionDomain::kAppPath;
+    IdentityMode identity_mode = IdentityMode::kProcessUid;
+};
+
+InstallResult Install(zygisk::Api* api, JNIEnv* env,
+                      const PolicyConfig& config);
 
 }  // namespace pathguard::provider_redirect

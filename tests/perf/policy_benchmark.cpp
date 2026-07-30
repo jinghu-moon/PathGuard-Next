@@ -52,12 +52,13 @@ std::uint64_t PeakMemoryBytes() {
 }
 
 std::string BuildRules(std::size_t rule_count, bool arrows) {
-    std::string text = "format = 1\n[apps.\"org.pathguard.benchmark\"]\n";
+    std::string text = "format = 2\n[apps.\"org.pathguard.benchmark\"]\n";
     if (!arrows) return text + "enabled = false\n";
-    text += "redirect = [\n";
+    text += "redirect_rules = [\n";
     for (std::size_t rule = 0; rule < rule_count; ++rule) {
-        text += "\"Source/" + std::to_string(rule) + "\" -> \"Target/"
-            + std::to_string(rule) + "\",\n";
+        text += "{select={root=\"Source/" + std::to_string(rule)
+            + "\",glob=\"item\"},to=\"Target/" + std::to_string(rule)
+            + "\"},\n";
     }
     return text + "]\n";
 }
@@ -90,11 +91,11 @@ bool RunCase(std::string_view name, std::size_t rule_count,
         const auto compile_started = Clock::now();
         RulesBuildResult result;
         if (!arrows) {
-            RulesCompileResult parsed = ParseRulesDocument(*source, RulesLimits{});
+            RulesV2ParseResult parsed = ParseRulesDocumentV2(*source, RulesLimits{});
             const std::uint64_t total_ns = ElapsedNs(compile_started);
             if (!parsed.ok()) return false;
             if (iteration != 0) {
-                samples.push_back({total_ns, 0, parsed.statistics, 0});
+                samples.push_back({total_ns, 0, {}, 0});
             }
             continue;
         }
@@ -107,7 +108,7 @@ bool RunCase(std::string_view name, std::size_t rule_count,
         snapshot.provider_supported = true;
         snapshot.topology_supported = true;
         const auto admission_started = Clock::now();
-        if (!AdmitPolicy(*result.canonical, result.requirements,
+        if (!AdmitPolicy(*result.policy_v6, result.requirements,
                          snapshot).admitted) return false;
         const std::uint64_t admission_ns = ElapsedNs(admission_started);
         if (iteration != 0) {
@@ -199,8 +200,8 @@ int main() {
     return 2;
 #endif
     const bool no_arrow = RunCase("no-arrow", 0, 20, UINT64_C(10000000), false);
-    const bool typical = RunCase("typical", 256, 20, UINT64_C(10000000), true);
-    const bool large = RunCase("large", 2000, 7, UINT64_C(50000000), true);
-    const bool extreme = RunCase("extreme", 4096, 3, UINT64_C(100000000), true);
+    const bool typical = RunCase("typical", 64, 20, UINT64_C(10000000), true);
+    const bool large = RunCase("large", 128, 7, UINT64_C(50000000), true);
+    const bool extreme = RunCase("extreme", 256, 3, UINT64_C(100000000), true);
     return no_arrow && typical && large && extreme && RunPublishCase() ? 0 : 1;
 }

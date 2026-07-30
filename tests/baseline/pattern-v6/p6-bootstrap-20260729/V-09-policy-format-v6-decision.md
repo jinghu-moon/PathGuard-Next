@@ -51,7 +51,9 @@ ADR-0016 同时 supersede ADR-0002 的 v5 格式与 ADR-0006 的 `provider_compa
    统一计算，持久格式只保存可精确复算的 depth 和 bucket hints；
 4. 精确定义 first literal component、fixed extension 和 degenerate flag，reader 必须复算；
 5. 修正 G6-GlobExcept 的 except patterns，使每项都与 base 存在有效交集；
-6. 冻结 Provider golden requirements：capability mask `0x0000000000030000`，operation mask
+6. 历史评审曾把所有 Provider action 固定为 capability mask `0x0000000000030000`；
+   生产接入审计后按 ADR-0012 的正交能力模型修正为“前向 path-I/O 仅要求 bit 16，
+   query/insert/reverse/provenance 才要求 bit 17”。原始 operation mask
    `0x00000000000ffeff`；
 7. 修正 ADR-0015 中违反 TOML 1.0 的多行 inline table，示例现在可由目标 parser 直接消费。
 
@@ -65,7 +67,8 @@ header_end=128
 table_count=9
 Package/ScopeRef/Selector/Action/Pattern/PatternToken/
 CharacterClass/SelectorExceptRef/StringIndex row size 均为 8-byte aligned
-provider_caps_mask=0x0000000000030000
+provider_caps_mask_before=0x0000000000030000
+provider_forward_caps_mask_after=0x0000000000010000
 provider_ops_mask=0x00000000000ffeff
 ```
 

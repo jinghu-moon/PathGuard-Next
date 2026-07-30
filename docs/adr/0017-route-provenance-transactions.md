@@ -283,18 +283,19 @@ unlink/rmdir 失败则 abort 并保留 committed owner。文件系统删除成�
 
 daemon 启动时先验证 snapshot，再严格 replay WAL；恢复完成前 provenance action 不准入。
 
-| Pending 状态 | 文件系统事实 | 恢复结果 |
-| --- | --- | --- |
-| create prepared，target 不存在 | 无 mutation | abort |
-| create prepared，target 存在但无 materialized identity | 无法证明 owner | 保留文件为 unowned/ambiguous，abort reservation |
-| create materialized，identity 匹配 | mutation 已完成 | commit record |
-| create materialized，target 缺失 | mutation 未保留 | abort |
-| rename prepared，old identity 仍在 old、new 不存在 | rename 未发生 | abort，保留 old owner |
-| rename prepared，old 缺失、expected old identity 只在 new | rename 已发生 | commit new owner |
-| rename materialized，identity 只在 new | rename 已发生 | commit new owner |
-| delete prepared，old identity 仍存在 | delete 未发生 | abort，保留 owner |
-| delete prepared，path 缺失 | delete 已发生 | commit tombstone |
-| 任一状态出现两边实体、identity mismatch 或无法安全解析 | 事实不唯一 | quarantine + `AmbiguousReverse` |
+首版采用保守恢复，不由 metadata store 在重启时自行遍历 Android storage 或猜测 mount namespace：
+
+| Pending 状态 | 首版恢复结果 |
+| --- | --- |
+| 任一 create/rename/delete PREPARE 或 MATERIALIZED | replay 完成后追加并同步 ABORT，释放全局 reservation；不生成 committed owner |
+| 可能已经出现的 target/new 实体 | 保留为 unowned；不自动删除、不按路径存在性补写 owner |
+| 可能已经消失的 old 实体 | 原 committed record 继续受 path + strong identity 校验约束；校验失败不得返回唯一 source |
+
+因此崩溃中间态最多损失虚拟 owner，不会伪造 owner 或删除用户文件。对于 provenance candidate
+target，缺少 committed record 必须由 reverse adapter 解释为 ambiguous/真实 target 视图，不能当作
+静态唯一。未来若要按文件系统事实自动完成 transaction，必须新增受 secure backing dirfd 约束的
+recovery resolver，并逐项实现 path/identity 证明；这属于单独 ADR 修订，不能在 store 内部用裸路径
+扫描补上。
 
 committed record 在每次反向使用前验证 scope、identity epoch、RuleId rebind、target path 和 object
 identity。任一不匹配都不能返回 source。恢复不会用“文件存在”替代 object identity，也不会因
@@ -333,13 +334,16 @@ Provider query/document ID/open、MediaStore insert/scan 和 complete-VFS d_path
 `DecisionReason::AmbiguousReverse` 诊断；不能选择一个 source。document ID 是 Provider opaque ID，
 只作为 adapter 输入/输出，不作为 provenance 主键。
 
-ADR-0012 bit 17 只有在 query/insert/path I/O 和本动作要求的 provenance prepare/commit/recovery
-全部通过时才能置位相应 reverse operation substatus。app-path 的纯前向动作可以使用
-`reverse_mode=none`，不因 store 不可用冒充 Provider 完整语义。
+ADR-0012 bit 17 只有在 query/insert/reverse adapter 和本动作要求的 provenance
+prepare/commit/recovery 全部通过时才能置位相应 reverse operation substatus。bit 17 不作为
+前向 path-I/O create/write 的必要条件：store 不可用时，前向 route 仍按 selector、collision 和
+UID scope 执行，reverse/query 返回 `AmbiguousReverse`/unsupported，不能回退到 canonical source。
+这一区分避免将“反向视图不完整”错误升级为“文件无法保存”。
 
-policy 中所有 `reverse_mode=provenance` action 的 required operation mask 必须包含 ADR-0016
-operation bit 19=`reverse mapping`。runtime 只有在 store recovery 完成、strong identity probe 与
-coordinator self-test 通过时才把该 bit 放入对应 domain 的 observed operations。
+policy 中 `reverse_mode=provenance` 描述反向查询契约；执行 reverse/query 时，运行时要求
+ADR-0016 operation bit 19=`reverse mapping`。前向 path-I/O operation 不继承该要求。runtime
+只有在 store recovery 完成、strong identity probe 与 coordinator self-test 通过时才把该 bit放入
+对应 domain 的 observed operations。
 
 ## 故障与诊断
 

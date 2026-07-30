@@ -1,0 +1,33 @@
+if(NOT DEFINED SOURCE_DIR)
+  message(FATAL_ERROR "SOURCE_DIR is required")
+endif()
+
+function(require_text file pattern label)
+  file(READ "${file}" text)
+  if(NOT text MATCHES "${pattern}")
+    message(FATAL_ERROR "policy v6 guard missing ${label} in ${file}")
+  endif()
+endfunction()
+
+set(format "${SOURCE_DIR}/core/include/pathguard/policy_format.h")
+set(reader "${SOURCE_DIR}/core/include/pathguard/policy_v6.h")
+set(view "${SOURCE_DIR}/core/include/pathguard/policy_v6_view.h")
+
+require_text("${format}" "kFormatVersion = 6" "format 6")
+require_text("${format}" "kSchemaVersion = 3" "schema 3")
+require_text("${format}" "kHeaderSize = 128" "128-byte header")
+foreach(table IN ITEMS ScopeRef Selector Action Pattern PatternToken
+                       CharacterClass SelectorExceptRef StringIndex)
+  require_text("${format}" "k${table}Size" "${table} row size")
+endforeach()
+require_text("${format}" "kMaxPolicyFileSize" "reader file ceiling")
+require_text("${format}" "kMaxSelectorsPerPackage" "per-package selector ceiling")
+require_text("${reader}" "DecodePolicyV6" "validated v6 reader")
+require_text("${reader}" "PolicyV6" "owned semantic policy")
+require_text("${view}" "class PolicyV6View" "no-allocation runtime view")
+require_text("${view}" "Crc32" "runtime checksum validation")
+
+file(READ "${SOURCE_DIR}/core/src/binary.cpp" binary)
+if(binary MATCHES "PGPL5|PGIR5")
+  message(FATAL_ERROR "policy v6 guard found v5 canonical generation in production")
+endif()

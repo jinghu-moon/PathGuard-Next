@@ -21,6 +21,7 @@
 
 #include "pathguard/binary.h"
 #include "pathguard/path.h"
+#include "pathguard/provenance_server.h"
 #include "pathguard/policy.h"
 #include "pathguard/rules_control.h"
 #include "pathguard/topology.h"
@@ -378,6 +379,7 @@ int main(int argc, char** argv) {
 #endif
     const fs::path config_directory = module_dir / "config";
     const fs::path run_directory = module_dir / "run";
+    fs::create_directories(run_directory);
 #if defined(PATHGUARD_ANDROID)
     bool topology_supported = ProbeStorageTopology();
 #else
@@ -395,6 +397,14 @@ int main(int argc, char** argv) {
     }
     const pathguard::control::ReconcileResult initial = reconciler.Reconcile();
     LogReconcile("initial", initial);
+    pathguard::daemon::ProvenanceServer provenance_server(
+        (run_directory / "provenance.sock").string(),
+        (run_directory / "provenance.wal").string());
+#if defined(PATHGUARD_ANDROID)
+    if (!provenance_server.Start()) {
+        std::cerr << "provenance server unavailable\n" << std::flush;
+    }
+#endif
     std::cout << "pathguardd ready; module-dir=" << module_dir.string() << '\n'
               << std::flush;
 #if PATHGUARD_HAS_INOTIFY

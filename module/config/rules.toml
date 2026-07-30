@@ -1,17 +1,17 @@
-# PathGuard rules format 1.
-format = 1
+# PathGuard rules format 2.
+format = 2
 
 [compatibility]
 allow_legacy_mount = true
 
 [apps."org.localsend.localsend_app"]
 users = [0]
-file_picker = true
-deny = [
-    "Pictures/Nagram",
-    "DCIM/Screenshots",
+provider = { enabled = true }
+deny_rules = [
+    { select = { root = "Pictures", glob = "Nagram", type = "directory" } },
+    { select = { root = "DCIM", glob = "Screenshots", type = "directory" } },
 ]
-redirect = [
-    "Download/localsend-source" -> "Download/localsend-redirect",
-    "Pictures" -> "Download/localsend-redirect",
+redirect_rules = [
+    { select = { root = "Download", glob = "localsend-source", type = "directory" }, to = "Download/localsend-redirect" },
+    { select = { root = "Pictures", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider" },
 ]
