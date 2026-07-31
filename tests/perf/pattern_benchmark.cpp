@@ -1,14 +1,19 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "pathguard/pattern_limits.h"
+#include "pathguard/pattern_runtime.h"
 #include "pattern_corpus.h"
-#include "pattern_harness_common.h"
 
 namespace {
 
@@ -19,12 +24,29 @@ constexpr std::string_view kSchemaVersion =
 struct Scenario {
     std::string_view name;
     std::size_t candidate_count;
+    std::uint64_t budget_per_iteration_ns;
 };
 
-constexpr std::array<Scenario, 3> kScenarios{{
-    {"zero_candidate", 0},
-    {"one_candidate", 1},
-    {"multi_candidate", 8},
+struct Measurement {
+    std::uint64_t total_ns = 0;
+    std::uint64_t average_ns = 0;
+    std::uint64_t p50_ns = 0;
+    std::uint64_t p95_ns = 0;
+    std::uint64_t p99_ns = 0;
+    std::uint64_t max_ns = 0;
+    std::uint64_t matcher_calls = 0;
+};
+
+struct Fixture {
+    pathguard::pattern::PatternPlan plan;
+    std::optional<pathguard::pattern::CandidateIndex> index;
+};
+
+constexpr std::array<Scenario, 4> kScenarios{{
+    {"zero_candidate", 0, 10000},
+    {"one_candidate", 1, 200000},
+    {"multi_candidate", 8, 1000000},
+    {"max_bucket", 64, 5000000},
 }};
 
 constexpr std::string_view CompilerName() {
@@ -49,23 +71,82 @@ constexpr std::string_view ArchitectureName() {
 #endif
 }
 
-std::uint64_t RunScenario(const Scenario& scenario, std::size_t iterations) {
-    const std::array<std::uint8_t, 8> input{'P', 'i', 'c', 't', '/', '*', '.', 'j'};
-    std::uint64_t digest = 0;
-    const auto started = Clock::now();
-    for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
-        digest ^= pathguard::pattern::test::ConsumeMatcherInput(input);
-        digest += scenario.candidate_count;
+Fixture BuildFixture(std::size_t candidate_count) {
+    using namespace pathguard::pattern;
+    Fixture fixture;
+    fixture.plan.packages.push_back({0, "com.example.benchmark"});
+    fixture.plan.scopes.push_back({{10001, 0}, 0, true});
+    for (SelectorId id = 0; id < candidate_count; ++id) {
+        const PatternCompileResult compiled = CompilePattern("**/*.jpg");
+        if (!compiled.ok()) throw std::runtime_error("benchmark pattern compile failed");
+        PlanSelector selector;
+        selector.id = id;
+        selector.root = "Pictures";
+        selector.base = *compiled.program;
+        selector.object_type = ObjectType::kFile;
+        selector.specificity = selector.base.specificity;
+        selector.fixed_extension = "jpg";
+        fixture.plan.selectors.push_back(std::move(selector));
+        PlanAction action;
+        action.id = id;
+        action.rule_id = id + 1;
+        action.package_id = 0;
+        action.selector_id = id;
+        action.kind = RuntimeActionKind::kRedirect;
+        action.domain = ExecutionDomain::kAppPath;
+        action.target = "Download/benchmark";
+        fixture.plan.actions.push_back(std::move(action));
     }
-    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        Clock::now() - started).count();
+    std::string error;
+    fixture.index = CandidateIndex::Build(fixture.plan, &error);
+    if (!fixture.index.has_value()) {
+        throw std::runtime_error("benchmark index build failed: " + error);
+    }
+    return fixture;
+}
+
+std::uint64_t Percentile(const std::vector<std::uint64_t>& sorted,
+                         std::size_t numerator) {
+    const std::size_t index = ((sorted.size() - 1) * numerator + 99) / 100;
+    return sorted[index];
+}
+
+Measurement RunScenario(const Scenario& scenario, std::size_t iterations) {
+    using namespace pathguard::pattern;
+    Fixture fixture = BuildFixture(scenario.candidate_count);
+    PatternEngine engine(fixture.plan, *fixture.index);
+    RuntimeMatchScratch scratch;
+    const PathOperand operand{ObjectType::kFile, "Pictures", "Trip/image.jpg"};
+    const OperationContext context{{10001, 0}, 0,
+        AttributionKind::kVerifiedPackage, PathOperation::kOpen,
+        std::span<const PathOperand>(&operand, 1)};
+    std::vector<std::uint64_t> samples;
+    samples.reserve(iterations);
+    std::uint64_t digest = 0;
+    for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+        const auto started = Clock::now();
+        const MatchSet matches = engine.MatchOperand(context, 0, &scratch);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now() - started).count();
+        samples.push_back(static_cast<std::uint64_t>(elapsed));
+        digest ^= matches.matches.size() + iteration;
+    }
+    std::sort(samples.begin(), samples.end());
+    Measurement result;
+    for (const std::uint64_t sample : samples) result.total_ns += sample;
+    result.average_ns = result.total_ns / iterations;
+    result.p50_ns = Percentile(samples, 50);
+    result.p95_ns = Percentile(samples, 95);
+    result.p99_ns = Percentile(samples, 99);
+    result.max_ns = samples.back();
+    result.matcher_calls = engine.matcher_invocations();
     if (digest == UINT64_C(0xffffffffffffffff)) std::cerr << digest;
-    return static_cast<std::uint64_t>(elapsed);
+    return result;
 }
 
 void WriteJsonl(std::size_t iterations, std::uint64_t random_seed) {
     for (const Scenario& scenario : kScenarios) {
-        const auto elapsed = RunScenario(scenario, iterations);
+        const Measurement measured = RunScenario(scenario, iterations);
         std::cout << "{\"schema_version\":\"" << kSchemaVersion
                   << "\",\"environment\":{\"build\":\"release\",\"compiler\":\""
                   << CompilerName() << "\",\"architecture\":\""
@@ -75,23 +156,51 @@ void WriteJsonl(std::size_t iterations, std::uint64_t random_seed) {
                   << iterations << ",\"random_seed\":" << random_seed
                   << ",\"transition_budget\":"
                   << pathguard::pattern::kPatternLimitsProfileV1.matcher_transition_budget
-                  << ",\"total_ns\":" << elapsed << "}\n";
+                  << ",\"total_ns\":" << measured.total_ns
+                  << ",\"average_ns\":" << measured.average_ns
+                  << ",\"p50_ns\":" << measured.p50_ns
+                  << ",\"p95_ns\":" << measured.p95_ns
+                  << ",\"p99_ns\":" << measured.p99_ns
+                  << ",\"max_ns\":" << measured.max_ns
+                  << ",\"matcher_calls\":" << measured.matcher_calls
+                  << ",\"budget_ns\":" << scenario.budget_per_iteration_ns
+                  << "}\n";
     }
 }
 
 void WriteTsv(std::size_t iterations, std::uint64_t random_seed) {
     std::cout << "schema_version\tbuild\tcompiler\tarchitecture\tscenario\t"
                  "candidate_count\titerations\trandom_seed\ttransition_budget\t"
-                 "total_ns\n";
+                 "total_ns\taverage_ns\tp50_ns\tp95_ns\tp99_ns\tmax_ns\t"
+                 "matcher_calls\tbudget_ns\n";
     for (const Scenario& scenario : kScenarios) {
-        const auto elapsed = RunScenario(scenario, iterations);
+        const Measurement measured = RunScenario(scenario, iterations);
         std::cout << kSchemaVersion << "\trelease\t" << CompilerName() << '\t'
                   << ArchitectureName() << '\t' << scenario.name << '\t'
                   << scenario.candidate_count << '\t' << iterations << '\t'
                   << random_seed << '\t'
                   << pathguard::pattern::kPatternLimitsProfileV1.matcher_transition_budget
-                  << '\t' << elapsed << '\n';
+                  << '\t' << measured.total_ns << '\t' << measured.average_ns
+                  << '\t' << measured.p50_ns << '\t' << measured.p95_ns
+                  << '\t' << measured.p99_ns << '\t' << measured.max_ns
+                  << '\t' << measured.matcher_calls << '\t'
+                  << scenario.budget_per_iteration_ns << '\n';
     }
+}
+
+bool WithinBudgets(std::size_t iterations) {
+    for (const Scenario& scenario : kScenarios) {
+        const Measurement measured = RunScenario(scenario, iterations);
+        const std::uint64_t expected_calls = iterations * scenario.candidate_count;
+        if (measured.p99_ns > scenario.budget_per_iteration_ns
+            || measured.matcher_calls != expected_calls) {
+            std::cerr << "performance budget exceeded: " << scenario.name
+                      << " p99_ns=" << measured.p99_ns
+                      << " budget_ns=" << scenario.budget_per_iteration_ns << '\n';
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace
@@ -107,11 +216,11 @@ int main(int argc, char** argv) {
     const std::string_view format = argc > 1 ? argv[1] : "--format=jsonl";
     if (format == "--format=jsonl") {
         WriteJsonl(kIterations, corpus.random_seed);
-        return 0;
+        return WithinBudgets(kIterations) ? 0 : 1;
     }
     if (format == "--format=tsv") {
         WriteTsv(kIterations, corpus.random_seed);
-        return 0;
+        return WithinBudgets(kIterations) ? 0 : 1;
     }
     std::cerr << "usage: pathguard_pattern_benchmark "
                  "[--format=jsonl|--format=tsv]\n";

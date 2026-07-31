@@ -13,6 +13,7 @@ enum class MountTransactionState : uint32_t {
     kFailed = 5,
     kRollbackComplete = 6,
     kNamespaceTainted = 7,
+    kPreflighting = 8,
 };
 
 constexpr bool IsMountTransactionTerminal(MountTransactionState state) {
@@ -34,8 +35,12 @@ constexpr bool IsMountTransitionAllowed(MountTransactionState from,
                                         MountTransactionState to) {
     switch (from) {
         case MountTransactionState::kPending:
-            return to == MountTransactionState::kApplying
+            return to == MountTransactionState::kPreflighting
                 || to == MountTransactionState::kComplete
+                || to == MountTransactionState::kCancelRequested
+                || to == MountTransactionState::kFailed;
+        case MountTransactionState::kPreflighting:
+            return to == MountTransactionState::kApplying
                 || to == MountTransactionState::kCancelRequested
                 || to == MountTransactionState::kFailed;
         case MountTransactionState::kApplying:

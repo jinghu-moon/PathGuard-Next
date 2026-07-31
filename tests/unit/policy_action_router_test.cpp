@@ -15,7 +15,10 @@ int main() {
 users = [0]
 provider = { enabled = true }
 deny_rules = [{ select = { root = "Pictures", glob = "**/private/**", type = "file" }, enforcement = "provider", priority = 100 }]
-redirect_rules = [{ select = { root = "Pictures", glob = "**/*.{jpg,png}", except = ["**/thumbnail-*/**"], type = "file" }, to = "Download/Images", enforcement = "provider" }]
+redirect_rules = [
+  { select = { root = "Pictures", glob = "**/*.{jpg,png}", except = ["**/thumbnail-*/**"], type = "file" }, to = "Download/Images", enforcement = "provider" },
+  { select = { root = "Download/localsend-source", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider" },
+]
 )", RulesLimits{}, &error);
     assert(source.has_value());
     const RulesBuildResult built = CompileRules(*source, RulesLimits{});
@@ -121,6 +124,15 @@ redirect_rules = [{ select = { root = "Pictures", glob = "**/*.{jpg,png}", excep
            == storage_path_adapter::RewriteDisposition::kRedirect);
     assert(std::string_view(rewritten)
            == "/storage/emulated/0/Download/Images/Trips/IMG_003.jpg");
+    absolute = storage_path_adapter::Rewrite(
+        policy, &scope, 1, 10001,
+        "/storage/emulated/0/Download/localsend-source/test.txt",
+        AdmissionDomain::kProvider, kOperationOpenWrite, 1,
+        capabilities, &scratch, rewritten, sizeof(rewritten));
+    assert(absolute.disposition
+           == storage_path_adapter::RewriteDisposition::kRedirect);
+    assert(std::string_view(rewritten)
+           == "/storage/emulated/0/Download/localsend-redirect/test.txt");
     absolute = storage_path_adapter::Rewrite(
         policy, &scope, 1, 10002,
         "/storage/emulated/0/Pictures/Trips/IMG_003.jpg",

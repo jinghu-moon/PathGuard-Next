@@ -31,6 +31,28 @@ int main() {
     redirect.reverse_mode = 2;
     assert(PlanCanonicalPath(redirect)
            == CanonicalPathDisposition::kProvenanceLookup);
+    assert(!ShouldCoordinateProvenanceMutation(
+        redirect, kOperationCreate | kOperationOpenWrite));
+    assert(ShouldCoordinateProvenanceMutation(
+        redirect, kOperationCreate | kOperationOpenWrite
+            | kOperationReverseMapping));
+    const int provider_create_flags = O_RDWR | O_CREAT;
+    const RedirectOpenPlan forward_create = PlanRedirectOpen(
+        redirect, kOperationCreate | kOperationOpenWrite,
+        provider_create_flags);
+    const RedirectOpenPlan fuse_reopen = PlanRedirectOpen(
+        redirect, kOperationCreate | kOperationOpenWrite,
+        provider_create_flags);
+    assert(!forward_create.coordinate_provenance);
+    assert(!fuse_reopen.coordinate_provenance);
+    assert(forward_create.effective_flags == provider_create_flags);
+    assert(fuse_reopen.effective_flags == provider_create_flags);
+    assert((forward_create.effective_flags & O_EXCL) == 0);
+    const RedirectOpenPlan admitted_create = PlanRedirectOpen(
+        redirect,
+        kOperationCreate | kOperationOpenWrite | kOperationReverseMapping,
+        provider_create_flags);
+    assert(admitted_create.coordinate_provenance);
     redirect.reverse_mode = 0;
     assert(PlanCanonicalPath(redirect)
            == CanonicalPathDisposition::kAmbiguousReverse);

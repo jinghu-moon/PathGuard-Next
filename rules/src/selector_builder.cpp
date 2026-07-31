@@ -69,18 +69,26 @@ std::string FixedExtension(const PatternProgram& program) {
     return last.literal.substr(dot + 1);
 }
 
-ExecutionDomain SelectDomain(const CanonicalAppPolicyV2& app,
-                             const CanonicalActionV2& action) {
+ExecutionDomain SelectDomain(const CanonicalActionV2& action) {
+    if (action.action == RuleActionKind::kObserve
+        || action.action == RuleActionKind::kExport) {
+        return ExecutionDomain::kEvent;
+    }
     if (action.action == RuleActionKind::kDeny) {
         return action.enforcement == RuleEnforcement::kComplete
             ? ExecutionDomain::kCompleteVfs : ExecutionDomain::kProvider;
+    }
+    if (action.enforcement == RuleEnforcement::kProvider) {
+        return ExecutionDomain::kProvider;
+    }
+    if (action.enforcement == RuleEnforcement::kComplete) {
+        return ExecutionDomain::kCompleteVfs;
     }
     if (action.selector.source_kind == SelectorSourceKind::kLiteral
         && action.selector.object_type == SelectorObjectType::kAny) {
         return ExecutionDomain::kMount;
     }
-    return app.provider.enabled ? ExecutionDomain::kProvider
-                                : ExecutionDomain::kAppPath;
+    return ExecutionDomain::kAppPath;
 }
 
 void SetRequirements(PlanAction* action) {
@@ -102,6 +110,7 @@ void SetRequirements(PlanAction* action) {
             action->required_operations = kCompleteVfsOperationsV1;
             break;
         case ExecutionDomain::kEvent:
+            action->required_operations = kOperationCloseWriteEvent;
             break;
     }
 }
@@ -167,11 +176,25 @@ PatternPlanBuildResult BuildPatternPlan(
             PlanAction action;
             action.package_id = package_found->second;
             action.selector_id = selector_found->second;
-            action.kind = source.action == RuleActionKind::kDeny
-                ? RuntimeActionKind::kDeny : RuntimeActionKind::kRedirect;
-            action.domain = SelectDomain(app, source);
+            switch (source.action) {
+                case RuleActionKind::kDeny:
+                    action.kind = RuntimeActionKind::kDeny;
+                    break;
+                case RuleActionKind::kRedirect:
+                    action.kind = RuntimeActionKind::kRedirect;
+                    break;
+                case RuleActionKind::kObserve:
+                    action.kind = RuntimeActionKind::kObserve;
+                    break;
+                case RuleActionKind::kExport:
+                    action.kind = RuntimeActionKind::kExport;
+                    break;
+            }
+            action.domain = SelectDomain(source);
             action.target = source.target;
             action.priority = source.priority;
+            action.options = static_cast<std::uint32_t>(source.export_mode)
+                | (source.media_scan ? UINT32_C(1) << 2 : 0);
             SetRequirements(&action);
             std::uint64_t rule_hash = UINT64_C(14695981039346656037);
             rule_hash = HashBytes(rule_hash, app.package);

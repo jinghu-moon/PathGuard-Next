@@ -44,6 +44,7 @@ struct Result {
     uint32_t matcher_invocations = 0;
     uint8_t collision_mode = 0;
     uint8_t reverse_mode = 0;
+    size_t relative_offset = 0;
 };
 
 inline bool SameBytes(const policy_v6_view::StringRef& value,
@@ -51,19 +52,47 @@ inline bool SameBytes(const policy_v6_view::StringRef& value,
     return value.Equals(bytes, size);
 }
 
-inline bool LiteralSelectorMatches(const policy_v6_view::StringRef& selector,
-                                   const Request& request) {
+inline bool SelectorRelativePath(const policy_v6_view::StringRef& selector,
+                                 const Request& request,
+                                 const char** relative_path,
+                                 size_t* relative_size,
+                                 size_t* relative_offset) {
+    if (relative_path == nullptr || relative_size == nullptr
+        || relative_offset == nullptr) return false;
     if (selector.size < request.root_size
         || memcmp(selector.data, request.root, request.root_size) != 0
         || (selector.size != request.root_size
             && selector.data[request.root_size] != '/')) return false;
-    if (selector.size == request.root_size) return true;
+    if (selector.size == request.root_size) {
+        *relative_path = request.relative_path;
+        *relative_size = request.relative_size;
+        *relative_offset = 0;
+        return true;
+    }
     const size_t suffix_size = selector.size - request.root_size - 1;
     if (suffix_size > request.relative_size
         || memcmp(selector.data + request.root_size + 1,
                   request.relative_path, suffix_size) != 0) return false;
-    return suffix_size == request.relative_size
-        || request.relative_path[suffix_size] == '/';
+    if (suffix_size == request.relative_size) {
+        *relative_path = request.relative_path + suffix_size;
+        *relative_size = 0;
+        *relative_offset = suffix_size;
+        return true;
+    }
+    if (request.relative_path[suffix_size] != '/') return false;
+    *relative_path = request.relative_path + suffix_size + 1;
+    *relative_size = request.relative_size - suffix_size - 1;
+    *relative_offset = suffix_size + 1;
+    return true;
+}
+
+inline bool LiteralSelectorMatches(const policy_v6_view::StringRef& selector,
+                                   const Request& request) {
+    const char* relative_path = nullptr;
+    size_t relative_size = 0;
+    size_t relative_offset = 0;
+    return SelectorRelativePath(selector, request, &relative_path,
+                                &relative_size, &relative_offset);
 }
 
 inline bool CandidateCacheMatches(
@@ -132,19 +161,31 @@ inline Result Route(const policy_v6_view::PolicyV6View& policy,
         if (selector.object_type != 0 && selector.object_type != request.object_type) {
             continue;
         }
+        const char* selector_relative_path = nullptr;
+        size_t selector_relative_size = 0;
+        size_t selector_relative_offset = 0;
+        if (!SelectorRelativePath(selector_root, request,
+                                  &selector_relative_path,
+                                  &selector_relative_size,
+                                  &selector_relative_offset)) continue;
+        Request selector_request = request;
+        selector_request.relative_path = selector_relative_path;
+        selector_request.relative_size = selector_relative_size;
         bool selector_matches = false;
         uint16_t specificity = 0;
         if (selector.match_kind == 0) {
-            selector_matches = LiteralSelectorMatches(selector_root, request);
+            selector_matches = true;
             specificity = static_cast<uint16_t>(selector_root.size > UINT16_MAX
                 ? UINT16_MAX : selector_root.size);
         } else {
-            if (!SameBytes(selector_root, request.root, request.root_size)
-                || !CandidateCacheMatches(policy, selector, request)) continue;
+            if (selector_relative_size == 0
+                || !CandidateCacheMatches(policy, selector, selector_request)) {
+                continue;
+            }
             ++output.matcher_invocations;
             const auto base = policy_pattern_runtime::MatchPattern(
-                policy, selector.base_pattern_id, request.relative_path,
-                request.relative_size, scratch);
+                policy, selector.base_pattern_id, selector_relative_path,
+                selector_relative_size, scratch);
             if (base != policy_pattern_runtime::MatchResult::kMatch) {
                 if (base != policy_pattern_runtime::MatchResult::kNoMatch) {
                     output.reason = MapMatchError(base);
@@ -163,8 +204,8 @@ inline Result Route(const policy_v6_view::PolicyV6View& policy,
                 }
                 ++output.matcher_invocations;
                 const auto excluded = policy_pattern_runtime::MatchPattern(
-                    policy, except_pattern, request.relative_path,
-                    request.relative_size, scratch);
+                    policy, except_pattern, selector_relative_path,
+                    selector_relative_size, scratch);
                 if (excluded == policy_pattern_runtime::MatchResult::kMatch) {
                     selector_matches = false;
                     break;
@@ -219,6 +260,7 @@ inline Result Route(const policy_v6_view::PolicyV6View& policy,
                 output.admission = admission;
                 output.collision_mode = action.collision;
                 output.reverse_mode = action.reverse;
+                output.relative_offset = selector_relative_offset;
                 if (action.kind == 1 && !policy.StringAt(action.target_id, &output.target)) {
                     output = {};
                     output.reason = Reason::kRuntimeUnavailable;

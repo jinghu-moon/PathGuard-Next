@@ -348,7 +348,8 @@ private:
     bool DecodeAction(const toml::table& table, RuleActionKind kind,
                       const std::string& path, ActionRuleInputV2* action) {
         bool valid = CheckFields(table,
-            {"select", "to", "priority", "preserve", "collision", "enforcement"},
+            {"select", "to", "priority", "preserve", "collision", "enforcement",
+             "mode", "media_scan"},
             path);
         action->action = kind;
         const toml::node* select = table.get("select");
@@ -371,18 +372,21 @@ private:
                 action->priority = static_cast<std::int32_t>(*value);
             }
         }
-        if (kind == RuleActionKind::kRedirect) {
+        if (kind == RuleActionKind::kRedirect || kind == RuleActionKind::kExport) {
             const toml::node* to = table.get("to");
             const auto value = to ? to->value<std::string>() : std::nullopt;
             if (!value) {
-                Add(kTypeMismatch, "rules.redirect_target_required",
+                Add(kTypeMismatch, kind == RuleActionKind::kRedirect
+                        ? "rules.redirect_target_required"
+                        : "rules.export_target_required",
                     to ? SourceSpan(source_, to->source()) : SourceSpan(source_, table.source()),
                     path + "/to");
                 valid = false;
             } else {
                 action->target = *value;
             }
-            if (const toml::node* preserve = table.get("preserve")) {
+            if (const toml::node* preserve = table.get("preserve");
+                kind == RuleActionKind::kRedirect && preserve != nullptr) {
                 const auto mode = preserve->value<std::string>();
                 if (!mode || *mode != "relative") {
                     Add(kInvalidValue, "rules.preserve_invalid",
@@ -390,7 +394,8 @@ private:
                     valid = false;
                 }
             }
-            if (const toml::node* collision = table.get("collision")) {
+            if (const toml::node* collision = table.get("collision");
+                kind == RuleActionKind::kRedirect && collision != nullptr) {
                 const auto policy = collision->value<std::string>();
                 if (!policy || *policy != "reject") {
                     Add(kInvalidValue, "rules.collision_invalid",
@@ -398,7 +403,8 @@ private:
                     valid = false;
                 }
             }
-            if (const toml::node* enforcement = table.get("enforcement")) {
+            if (const toml::node* enforcement = table.get("enforcement");
+                kind == RuleActionKind::kRedirect && enforcement != nullptr) {
                 const auto value = enforcement->value<std::string>();
                 if (!value || (*value != "provider" && *value != "complete")) {
                     Add(kInvalidValue, "rules.enforcement_invalid",
@@ -409,16 +415,51 @@ private:
                     action->enforcement = *value == "provider"
                         ? RuleEnforcement::kProvider
                         : RuleEnforcement::kComplete;
+                }
+            }
+            if (kind == RuleActionKind::kExport) {
+                if (table.contains("preserve") || table.contains("collision")
+                    || table.contains("enforcement")) {
+                    Add(kUnknownField, "rules.export_path_fields_forbidden",
+                        SourceSpan(source_, table.source()), path);
+                    valid = false;
+                }
+                if (const toml::node* mode = table.get("mode")) {
+                    const auto value = mode->value<std::string>();
+                    if (!value || (*value != "copy" && *value != "move"
+                                   && *value != "trash")) {
+                        Add(kInvalidValue, "rules.export_mode_invalid",
+                            SourceSpan(source_, mode->source()), path + "/mode");
+                        valid = false;
+                    } else {
+                        action->export_mode = *value == "move" ? ExportMode::kMove
+                            : *value == "trash" ? ExportMode::kTrash
+                                                 : ExportMode::kCopy;
+                    }
+                }
+                if (const toml::node* scan = table.get("media_scan")) {
+                    const auto value = scan->value<bool>();
+                    if (!value) {
+                        Add(kTypeMismatch, "rules.media_scan_bool_required",
+                            SourceSpan(source_, scan->source()), path + "/media_scan");
+                        valid = false;
+                    } else {
+                        action->media_scan = *value;
+                    }
                 }
             }
         } else {
             if (table.contains("to") || table.contains("preserve")
-                || table.contains("collision")) {
-                Add(kUnknownField, "rules.deny_target_fields_forbidden",
+                || table.contains("collision") || table.contains("mode")
+                || table.contains("media_scan")) {
+                Add(kUnknownField, kind == RuleActionKind::kDeny
+                        ? "rules.deny_target_fields_forbidden"
+                        : "rules.observe_target_fields_forbidden",
                     SourceSpan(source_, table.source()), path);
                 valid = false;
             }
-            if (const toml::node* enforcement = table.get("enforcement")) {
+            if (const toml::node* enforcement = table.get("enforcement");
+                kind == RuleActionKind::kDeny && enforcement != nullptr) {
                 const auto value = enforcement->value<std::string>();
                 if (!value || (*value != "provider" && *value != "complete")) {
                     Add(kInvalidValue, "rules.enforcement_invalid",
@@ -431,7 +472,13 @@ private:
                         : RuleEnforcement::kComplete;
                 }
             }
-            if (HasUnescapedMeta(action->select.glob)
+            if (kind == RuleActionKind::kObserve && table.contains("enforcement")) {
+                Add(kUnknownField, "rules.observe_enforcement_forbidden",
+                    SourceSpan(source_, table.source()), path + "/enforcement");
+                valid = false;
+            }
+            if (kind == RuleActionKind::kDeny
+                && HasUnescapedMeta(action->select.glob)
                 && action->enforcement == RuleEnforcement::kNone) {
                 Add(kInvalidValue, "rules.glob_deny_enforcement_required",
                     SourceSpan(source_, table.source()), path + "/enforcement");
@@ -473,7 +520,7 @@ private:
                    AppRulesV2* app) {
         bool valid = CheckFields(table,
             {"enabled", "users", "processes", "provider", "deny_rules",
-             "redirect_rules"}, path);
+             "redirect_rules", "observe_rules", "export_rules"}, path);
         valid = DecodeBool(table, "enabled", path + "/enabled", &app->enabled)
             && valid;
         if (const toml::node* users = table.get("users")) {
@@ -494,6 +541,14 @@ private:
         if (const toml::node* redirect = table.get("redirect_rules")) {
             valid = DecodeActions(*redirect, RuleActionKind::kRedirect,
                                   path + "/redirect_rules", app) && valid;
+        }
+        if (const toml::node* observe = table.get("observe_rules")) {
+            valid = DecodeActions(*observe, RuleActionKind::kObserve,
+                                  path + "/observe_rules", app) && valid;
+        }
+        if (const toml::node* export_rules = table.get("export_rules")) {
+            valid = DecodeActions(*export_rules, RuleActionKind::kExport,
+                                  path + "/export_rules", app) && valid;
         }
         if (app->actions.size() > limits_.max_rules_per_app) {
             Add(kResourceLimit, "rules.app_rule_limit",
@@ -551,7 +606,8 @@ RulesV2BuildResult BuildCanonicalPolicyV2(
         std::size_t except_total = 0;
         for (const ActionRuleInputV2& action : app.actions) {
             if (!ValidateStoragePath(action.select.root, limits)
-                || (action.action == RuleActionKind::kRedirect
+                || ((action.action == RuleActionKind::kRedirect
+                     || action.action == RuleActionKind::kExport)
                     && !ValidateStoragePath(action.target, limits))) {
                 AddBuildDiagnostic(&result, kPathInvalid,
                                    "rules.storage_path_invalid", action.id);
@@ -641,6 +697,8 @@ RulesV2BuildResult BuildCanonicalPolicyV2(
                 canonical_action.preserve = action.preserve;
                 canonical_action.collision = action.collision;
                 canonical_action.enforcement = action.enforcement;
+                canonical_action.export_mode = action.export_mode;
+                canonical_action.media_scan = action.media_scan;
                 canonical_action.selector.root = action.select.root;
                 canonical_action.selector.glob = base;
                 canonical_action.selector.object_type = action.select.object_type;

@@ -21,7 +21,11 @@ enum class SelectorObjectType : std::uint8_t {
 enum class RuleActionKind : std::uint8_t {
     kDeny,
     kRedirect,
+    kObserve,
+    kExport,
 };
+
+enum class ExportMode : std::uint8_t { kCopy, kMove, kTrash };
 
 enum class RuleEnforcement : std::uint8_t {
     kNone,
@@ -58,6 +62,8 @@ struct ActionRuleInputV2 {
     PreserveMode preserve = PreserveMode::kRelative;
     CollisionPolicy collision = CollisionPolicy::kReject;
     RuleEnforcement enforcement = RuleEnforcement::kNone;
+    ExportMode export_mode = ExportMode::kCopy;
+    bool media_scan = false;
 };
 
 struct ProviderIntentV2 {
@@ -98,6 +104,8 @@ struct CanonicalActionV2 {
     PreserveMode preserve = PreserveMode::kRelative;
     CollisionPolicy collision = CollisionPolicy::kReject;
     RuleEnforcement enforcement = RuleEnforcement::kNone;
+    ExportMode export_mode = ExportMode::kCopy;
+    bool media_scan = false;
 };
 
 struct CanonicalAppPolicyV2 {

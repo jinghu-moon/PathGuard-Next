@@ -21,12 +21,14 @@
 
 #include "pathguard/binary.h"
 #include "pathguard/path.h"
+#include "pathguard/provider_process_lifecycle.h"
 #include "pathguard/provenance_server.h"
 #include "pathguard/policy.h"
 #include "pathguard/rules_control.h"
 #include "pathguard/topology.h"
 
 #if defined(PATHGUARD_ANDROID)
+#include <signal.h>
 #include <sched.h>
 #include <sys/mount.h>
 #include <unistd.h>
@@ -36,6 +38,36 @@
 #endif
 
 namespace fs = std::filesystem;
+
+#if defined(PATHGUARD_ANDROID)
+constexpr int kProviderStartupReconcileAttempts = 30;
+
+static bool TerminateStaleProvider(int pid, void*) {
+    return kill(pid, SIGTERM) == 0 || errno == ESRCH;
+}
+
+static void ReconcileProviderStartup(const fs::path& run_directory) {
+    pathguard::daemon::ProviderProcessReconcileState state;
+    for (int attempt = 1; attempt <= kProviderStartupReconcileAttempts;
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const pathguard::daemon::ProviderProcessReconcileReport report =
+            pathguard::daemon::ReconcileProviderProcesses(
+                "/proc", run_directory / "policy.bin", TerminateStaleProvider,
+                nullptr, &state);
+        std::cout << "provider lifecycle reconcile: attempt=" << attempt
+                  << " policy_valid=" << (report.policy_valid ? 1 : 0)
+                  << " required=" << (report.provider_required ? 1 : 0)
+                  << " targets=" << report.target_processes
+                  << " ready=" << report.ready_processes
+                  << " stale=" << report.stale_processes
+                  << " pending=" << report.pending_processes
+                  << " terminated=" << report.terminated_processes
+                  << " failed=" << report.failed_processes << '\n' << std::flush;
+        if (report.policy_valid && !report.provider_required) return;
+    }
+}
+#endif
 
 static void LogReconcile(const char* phase,
                          const pathguard::control::ReconcileResult& result) {
@@ -404,6 +436,7 @@ int main(int argc, char** argv) {
     if (!provenance_server.Start()) {
         std::cerr << "provenance server unavailable\n" << std::flush;
     }
+    std::thread(ReconcileProviderStartup, run_directory).detach();
 #endif
     std::cout << "pathguardd ready; module-dir=" << module_dir.string() << '\n'
               << std::flush;

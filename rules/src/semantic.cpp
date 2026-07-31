@@ -571,10 +571,25 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
             }
             pathguard::PolicyActionV6 action;
             action.selector_index = selector_id;
-            action.kind = source_action.action == RuleActionKind::kDeny
-                ? pathguard::PolicyActionKind::kDeny
-                : pathguard::PolicyActionKind::kRedirect;
-            if (source_action.enforcement == RuleEnforcement::kProvider) {
+            switch (source_action.action) {
+                case RuleActionKind::kDeny:
+                    action.kind = pathguard::PolicyActionKind::kDeny;
+                    break;
+                case RuleActionKind::kRedirect:
+                    action.kind = pathguard::PolicyActionKind::kRedirect;
+                    break;
+                case RuleActionKind::kObserve:
+                    action.kind = pathguard::PolicyActionKind::kObserve;
+                    break;
+                case RuleActionKind::kExport:
+                    action.kind = pathguard::PolicyActionKind::kExport;
+                    break;
+            }
+            if (action.kind == pathguard::PolicyActionKind::kObserve
+                || action.kind == pathguard::PolicyActionKind::kExport) {
+                action.domain = pathguard::PolicyExecutionDomain::kEvent;
+                action.required_operations = kOperationCloseWriteEvent;
+            } else if (source_action.enforcement == RuleEnforcement::kProvider) {
                 action.domain = pathguard::PolicyExecutionDomain::kProvider;
                 // Forward Provider routing only needs a trustworthy Binder caller
                 // and the concrete path operations exercised by the adapter. Query/
@@ -605,6 +620,12 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
                 action.preserve = pathguard::PolicyPreserveMode::kRelative;
                 action.collision = pathguard::PolicyCollisionMode::kReject;
                 action.reverse = pathguard::PolicyReverseMode::kStaticUnique;
+            } else if (action.kind == pathguard::PolicyActionKind::kExport) {
+                action.target = source_action.target;
+                action.preserve = pathguard::PolicyPreserveMode::kRelative;
+                action.collision = pathguard::PolicyCollisionMode::kReject;
+                action.options = static_cast<std::uint32_t>(source_action.export_mode)
+                    | (source_action.media_scan ? UINT32_C(1) << 2 : 0);
             }
             package.actions.push_back(std::move(action));
         }

@@ -26,6 +26,15 @@ bool Transition(std::atomic<std::uint32_t>* state, MountTransactionState from,
 
 int main() {
     static_assert(pathguard::IsMountTransitionAllowed(
+        MountTransactionState::kPending,
+        MountTransactionState::kPreflighting));
+    static_assert(pathguard::IsMountTransitionAllowed(
+        MountTransactionState::kPreflighting,
+        MountTransactionState::kApplying));
+    static_assert(pathguard::IsMountTransitionAllowed(
+        MountTransactionState::kPreflighting,
+        MountTransactionState::kCancelRequested));
+    static_assert(!pathguard::IsMountTransitionAllowed(
         MountTransactionState::kPending, MountTransactionState::kApplying));
     static_assert(pathguard::IsMountTransitionAllowed(
         MountTransactionState::kApplying,
@@ -57,22 +66,44 @@ int main() {
 
     for (int iteration = 0; iteration < 10000; ++iteration) {
         std::atomic<std::uint32_t> state{Value(MountTransactionState::kPending)};
+        bool preflight_started = false;
+        bool pending_cancelled = false;
+        std::thread helper_start([&] {
+            preflight_started = Transition(
+                &state, MountTransactionState::kPending,
+                MountTransactionState::kPreflighting);
+        });
+        std::thread app_start([&] {
+            pending_cancelled = Transition(
+                &state, MountTransactionState::kPending,
+                MountTransactionState::kCancelRequested);
+        });
+        helper_start.join();
+        app_start.join();
+        assert(preflight_started != pending_cancelled);
+        if (pending_cancelled) {
+            assert(Transition(&state, MountTransactionState::kCancelRequested,
+                              MountTransactionState::kCancelled));
+            continue;
+        }
+
         bool lease_acquired = false;
         bool pre_mutation_cancelled = false;
         std::thread helper([&] {
-            lease_acquired = Transition(&state, MountTransactionState::kPending,
+            lease_acquired = Transition(
+                &state, MountTransactionState::kPreflighting,
                                         MountTransactionState::kApplying);
         });
         std::thread app([&] {
             pre_mutation_cancelled = Transition(
-                &state, MountTransactionState::kPending,
+                &state, MountTransactionState::kPreflighting,
                 MountTransactionState::kCancelRequested);
         });
         helper.join();
         app.join();
         assert(lease_acquired != pre_mutation_cancelled);
         if (pre_mutation_cancelled) {
-            assert(!Transition(&state, MountTransactionState::kPending,
+            assert(!Transition(&state, MountTransactionState::kPreflighting,
                                MountTransactionState::kApplying));
             assert(Transition(&state, MountTransactionState::kCancelRequested,
                               MountTransactionState::kCancelled));
@@ -88,6 +119,8 @@ int main() {
 
     std::atomic<std::uint32_t> success{Value(MountTransactionState::kPending)};
     assert(Transition(&success, MountTransactionState::kPending,
+                      MountTransactionState::kPreflighting));
+    assert(Transition(&success, MountTransactionState::kPreflighting,
                       MountTransactionState::kApplying));
     assert(Transition(&success, MountTransactionState::kApplying,
                       MountTransactionState::kComplete));
@@ -97,6 +130,9 @@ int main() {
     std::atomic<std::uint32_t> preflight_failure{
         Value(MountTransactionState::kPending)};
     assert(Transition(&preflight_failure, MountTransactionState::kPending,
+                      MountTransactionState::kPreflighting));
+    assert(Transition(&preflight_failure,
+                      MountTransactionState::kPreflighting,
                       MountTransactionState::kFailed));
     assert(pathguard::MountTransactionHasResult(
         static_cast<MountTransactionState>(preflight_failure.load())));

@@ -86,6 +86,7 @@ struct PlanAction {
     ExecutionDomain domain = ExecutionDomain::kAppPath;
     std::string target;
     std::int32_t priority = 0;
+    std::uint32_t options = 0;
     bool active = true;
     CapabilityBits required_capabilities = 0;
     OperationMask required_operations = 0;

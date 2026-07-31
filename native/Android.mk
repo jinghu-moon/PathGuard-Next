@@ -2,6 +2,7 @@ LOCAL_PATH := $(call my-dir)
 ROOT_PATH := $(LOCAL_PATH)/..
 CORE_SOURCES := \
     ../core/src/binary.cpp \
+    ../core/src/export_worker.cpp \
     ../core/src/failure_policy.cpp \
     ../core/src/path.cpp \
     ../core/src/pattern.cpp \
@@ -96,6 +97,7 @@ include $(CLEAR_VARS)
 LOCAL_MODULE := pathguardd
 LOCAL_SRC_FILES := ../daemon/src/main.cpp $(CORE_SOURCES) \
     ../daemon/src/rules_control.cpp ../daemon/src/provenance_server.cpp \
+    ../daemon/src/provider_process_lifecycle.cpp \
     $(DIRECTORY_RESOLVER_SOURCE) $(MOUNT_INFO_SNAPSHOT_SOURCE) \
     $(MOUNT_EXECUTOR_SOURCE)
 LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include $(ROOT_PATH)/daemon/include \

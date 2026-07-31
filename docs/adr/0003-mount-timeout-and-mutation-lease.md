@@ -1,6 +1,6 @@
 # ADR-0003：超时、fail-open 与 namespace mutation lease
 
-状态：Accepted / Propagation Taint Pending Device Validation
+状态：Accepted / 2026-07-30 Preflight Stage Amendment
 
 日期：2026-07-20
 
@@ -10,13 +10,19 @@
 
 ## 决策
 
-采用设计文档第 8 节的契约 2：保持 fail-open；300ms 仅作为取得 namespace mutation lease 之前的取消上限，不是 helper 进入 `applying` 后的绝对等待上限。
+采用设计文档第 8 节的契约 2：保持 fail-open。状态机显式区分尚未被 helper
+认领的 `pending`、正在读取并验证最终目标 namespace 的 `preflighting`，以及已经取得
+namespace mutation lease 的 `applying`。300ms 是 `pending` 的取消上限；已进入可观测、
+无 mutation 的 `preflighting` 后允许一次 500ms 有界完成宽限；它们都不是
+`applying` 的绝对等待上限。
 
 状态机至少包含：
 
 ```text
-pending -> applying -> complete
+pending -> preflighting -> applying -> complete
 pending -> cancel_requested -> cancelled
+preflighting -> cancel_requested -> cancelled
+preflighting -> failed
 applying -> cancel_requested -> rollback_complete
 applying -> cancel_requested -> namespace_tainted
 applying -> rollback_complete
@@ -25,12 +31,29 @@ applying -> namespace_tainted
 
 约束如下：
 
-1. helper 必须在第一项 namespace mutation 前以 CAS 将 `pending` 改为 `applying`，该 CAS 是 mutation lease 的唯一获取点。`MS_PRIVATE`、source anchor 和正向 bind 都属于 namespace mutation，不能放在 lease 之前。
-2. 应用在 300ms 到期时仅能把 `pending` CAS 为 `cancel_requested`。成功后可以立即 fail-open；helper 不得再进入 `applying`。
-3. 300ms 到期时若状态已是 `applying`，应用先给予 500ms 有界完成窗口；事务在窗口内可发布 `complete`。窗口到期后请求取消并等待 `rollback_complete` 或 `namespace_tainted`。只有 `complete` 或前者允许目标进程继续；后者必须终止 namespace 成员。该窗口不改变 `pending` 阶段的 300ms 取消上限。
-4. helper 每项 namespace mutation 前和提交前检查取消；所有可逆 mount 进入栈，失败或取消时逆序 `umount2(MNT_DETACH)`。
-5. `complete` 发布后不接受取消。持有 lease 后的失败不会发布中间 `failed` 终态；只有可逆 mount 已全部验证回滚且传播状态未发生不可恢复变化时，才发布 `rollback_complete`。`failed` 只表示尚未取得 lease 的预检失败。
-6. 内部 readiness 5 秒上限不计入 300ms 承诺；等待期间仍可由 `pending -> cancel_requested` 中止。
+1. helper 在目标进程 UID、SELinux context 和最终 mount namespace 已就绪后，以 CAS 将
+   `pending` 改为 `preflighting`。该阶段只允许读取 mountinfo、固定路径身份、复验策略和
+   选择后端，禁止任何 namespace mutation。
+2. helper 必须在第一项 namespace mutation 前以 CAS 将 `preflighting` 改为 `applying`，
+   该 CAS 是 mutation lease 的唯一获取点。`MS_PRIVATE`、source anchor 和正向 bind 都
+   属于 namespace mutation，不能放在 lease 之前。
+3. 应用在基础 300ms 到期时，若状态仍为 `pending`，只能将其 CAS 为
+   `cancel_requested` 并立即 fail-open；helper 不得再进入 `preflighting`。若状态已是
+   `preflighting`，应用给予一次 500ms 有界宽限。宽限到期仍未完成时，将
+   `preflighting` CAS 为 `cancel_requested` 并立即 fail-open；helper 完成阻塞读取后必须
+   观察取消并进入 `cancelled`，不得获取 mutation lease。
+4. 到期时若状态已是 `applying`，应用先给予 500ms 有界完成窗口；事务在窗口内可发布
+   `complete`。窗口到期后请求取消并等待 `rollback_complete` 或
+   `namespace_tainted`。只有 `complete` 或前者允许目标进程继续；后者必须终止
+   namespace 成员。
+5. helper 每项 namespace mutation 前和提交前检查取消；所有可逆 mount 进入栈，失败
+   或取消时逆序 `umount2(MNT_DETACH)`。
+6. `complete` 发布后不接受取消。持有 lease 后的失败不会发布中间 `failed` 终态；只有
+   可逆 mount 已全部验证回滚且传播状态未发生不可恢复变化时，才发布
+   `rollback_complete`。`failed` 只表示尚未取得 lease 的预检失败；预检取消必须发布
+   `cancelled`，不得伪装成发生过 mutation 的 `rollback_complete`。
+7. 内部 readiness 5 秒上限不计入基础 300ms 承诺；等待期间仍可由
+   `pending -> cancel_requested` 中止。
 
 ## 传播状态与 namespace taint
 
@@ -55,6 +78,20 @@ helper 在取得 mutation lease 前必须解析目标 namespace 的 mountinfo，
 - namespace taint count 与被终止的 namespace member 数量。
 
 不得再把 300ms 描述为所有命中应用启动的绝对硬上限。fail-open 仅在 namespace 从未变更，或可逆 mutation 已回滚且传播状态未被不可恢复地修改后成立。
+
+## 2026-07-30 最终 namespace 冷读修订依据
+
+Xiaomi `alioth`、Android 13、Linux 4.19 真机首次启动 LocalSend 时，最终目标 namespace
+的 `/proc/self/mountinfo` 读取耗时 `349.090ms`，companion 总耗时 `396.928ms`；旧状态机
+在 `300.111ms` 将仍为 `pending` 的请求取消，导致目录 redirect fail-open。相同设备第二次
+启动时 mountinfo 热读为 `100.096ms`，总等待 `108.566ms`，同一 ProcessPlan 的三条挂载
+全部提交。这证明失败来自正常但较慢的最终 namespace 预检，而不是规则、后端或 mount
+事务错误。
+
+不采用 `preAppSpecialize` 阶段捕获并传递 mountinfo：该时点的 app mount namespace 尚未
+最终化，快照与 worker `setns` 后的 namespace identity 不一致。运行时仍必须在 readiness
+之后进入目标最终 namespace 并捕获 fresh snapshot；本修订只让该正确性步骤拥有独立、
+有界且可取消的等待阶段，不放宽 mutation lease。
 
 ## 进入 R1 的门槛
 

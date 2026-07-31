@@ -73,6 +73,13 @@ target_include_directories(pathguard_provider_redirect_lifecycle_test PRIVATE
 add_test(NAME pathguard_provider_redirect_lifecycle_test
     COMMAND pathguard_provider_redirect_lifecycle_test)
 
+add_executable(pathguard_provider_process_lifecycle_test
+    unit/provider_process_lifecycle_test.cpp)
+target_link_libraries(pathguard_provider_process_lifecycle_test PRIVATE
+    pathguard_provider_process_lifecycle)
+add_test(NAME pathguard_provider_process_lifecycle_test
+    COMMAND pathguard_provider_process_lifecycle_test)
+
 add_executable(pathguard_policy_snapshot_domain_test
     unit/policy_snapshot_domain_test.cpp)
 target_include_directories(pathguard_policy_snapshot_domain_test PRIVATE
@@ -382,6 +389,26 @@ add_test(NAME pathguard_provider_route_context_test
   COMMAND pathguard_provider_route_context_test)
 pathguard_add_runtime_test(pathguard_operation_plan_test
   unit/operation_plan_test.cpp)
+add_executable(pathguard_auxiliary_adapters_test
+  unit/auxiliary_adapters_test.cpp)
+target_include_directories(pathguard_auxiliary_adapters_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pathguard_auxiliary_adapters_test PRIVATE pathguard_core)
+add_test(NAME pathguard_auxiliary_adapters_test
+  COMMAND pathguard_auxiliary_adapters_test)
+
+add_executable(pathguard_rules_effects_test unit/rules_effects_test.cpp)
+target_include_directories(pathguard_rules_effects_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pathguard_rules_effects_test PRIVATE
+  pathguard_rules_compiler pathguard_core)
+add_test(NAME pathguard_rules_effects_test COMMAND pathguard_rules_effects_test)
+
+add_test(NAME pathguard_cli_v6_integration
+  COMMAND ${CMAKE_COMMAND}
+    -DPATHGUARDCTL=$<TARGET_FILE:pathguardctl>
+    -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/integration/cli_v6_test.cmake)
 
 add_executable(pathguard_rules_conflict_test
   unit/rules_conflict_test.cpp

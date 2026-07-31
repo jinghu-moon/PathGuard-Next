@@ -32,6 +32,32 @@ inline CanonicalPathDisposition PlanCanonicalPath(
         : CanonicalPathDisposition::kAmbiguousReverse;
 }
 
+inline bool ShouldCoordinateProvenanceMutation(
+        const storage_path_adapter::RewriteResult& rewrite,
+        OperationMask observed_operations) noexcept {
+    return rewrite.reverse_mode == 2
+        && (observed_operations & kOperationReverseMapping) != 0;
+}
+
+struct RedirectOpenPlan {
+    bool coordinate_provenance = false;
+    int effective_flags = 0;
+};
+
+inline RedirectOpenPlan PlanRedirectOpen(
+        const storage_path_adapter::RewriteResult& rewrite,
+        OperationMask observed_operations, int flags) noexcept {
+    // MediaProvider may create and reopen the same routed object through
+    // different visible path aliases in one request. Collision ownership is
+    // only enforceable by the admitted provenance transaction.
+    return {
+        (flags & O_CREAT) != 0
+            && ShouldCoordinateProvenanceMutation(rewrite,
+                                                  observed_operations),
+        flags,
+    };
+}
+
 enum class Api : uint8_t {
     kLookupStat,
     kAccess,

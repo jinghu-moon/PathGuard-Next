@@ -28,21 +28,34 @@ int main() {
 redirect_rules=[{select={root="Pictures",glob="[^abc]*.jpg"},to="Download/a"}]
 [apps."com.example.beta"]
 redirect_rules=[{select={root="Pictures",glob="[!abc]*.jpg"},to="Download/b"}]
+[apps."com.example.localsend"]
+provider={enabled=true}
+redirect_rules=[{select={root="Download",glob="localsend-source/**",type="file"},to="Download/out"}]
 )");
     const std::vector<PackageIdentityBinding> bindings{
         {"com.example.alpha", 10001, 0, true},
         {"com.example.beta", 10002, 0, true},
+        {"com.example.localsend", 10003, 0, true},
     };
     const auto first = BuildPatternPlan(policy, bindings);
     const auto second = BuildPatternPlan(policy, bindings);
     assert(first.ok() && second.ok());
-    assert(first.plan->selectors.size() == 1);
-    assert(first.plan->actions.size() == 2);
-    assert(first.plan->packages.size() == 2);
+    assert(first.plan->selectors.size() == 2);
+    assert(first.plan->actions.size() == 3);
+    assert(first.plan->packages.size() == 3);
     assert(first.plan->plan_generation == second.plan->plan_generation);
-    assert(first.plan->selectors.front().fixed_extension == "jpg");
+    assert(first.plan->selectors.front().fixed_extension == "jpg"
+           || first.plan->selectors.back().fixed_extension == "jpg");
     assert(first.plan->actions[0].package_id
            != first.plan->actions[1].package_id);
+    bool app_path_seen = false;
+    for (const auto& action : first.plan->actions) {
+        if (action.package_id == 2) {
+            app_path_seen = action.domain
+                == pathguard::pattern::ExecutionDomain::kAppPath;
+        }
+    }
+    assert(app_path_seen);
 
     const auto literal = pathguard::pattern::CompilePattern("a");
     const auto character_class = pathguard::pattern::CompilePattern("[ab]");

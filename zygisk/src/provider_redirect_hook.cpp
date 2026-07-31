@@ -708,11 +708,14 @@ int WithOpenPath(const char* operation_name, int dirfd, const char* path,
         errno = ENAMETOOLONG;
         return -1;
     }
-    const bool transactional = (flags & O_CREAT) != 0
-        && rewrite.reverse_mode == 2;
-    if (!transactional) {
+    const auto& domain_capabilities = snapshot_guard->capabilities.domains[
+        static_cast<uint8_t>(snapshot_guard->domain)];
+    const auto open_plan = path_hook_contract::PlanRedirectOpen(
+        rewrite, domain_capabilities.observed_operations, flags);
+    if (!open_plan.coordinate_provenance) {
         errno = saved_errno;
-        const int value = function(AT_FDCWD, pinned_path, flags);
+        const int value = function(AT_FDCWD, pinned_path,
+                                   open_plan.effective_flags);
         const int call_errno = errno;
         CloseSecureResolvedPath(&pinned);
         errno = call_errno;

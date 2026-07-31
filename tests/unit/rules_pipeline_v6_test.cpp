@@ -81,6 +81,21 @@ redirect_rules = [
         *glob.policy_v6, glob.requirements, provider_unobserved);
     assert(deferred.admitted);  // Dynamic action admission is process-local.
 
+    const RulesBuildResult app_path = Compile(R"(format = 2
+[apps."org.localsend.localsend_app"]
+users = [0]
+provider = { enabled = true }
+redirect_rules = [
+  { select = { root = "Download", glob = "localsend-source/**", type = "file" }, to = "Download/localsend-redirect" },
+]
+)");
+    assert(app_path.ok());
+    const auto& app_path_action =
+        app_path.policy_v6->packages.front().actions.front();
+    assert(app_path_action.domain == PolicyExecutionDomain::kAppPath);
+    assert(app_path_action.required_capabilities == kCapabilityAppPathAdapter);
+    assert(app_path_action.required_operations == kAppPathOperationsV1);
+
     const RulesBuildResult reordered = Compile(R"(format=2
 [apps."org.localsend.localsend_app"]
 provider={enabled=true}

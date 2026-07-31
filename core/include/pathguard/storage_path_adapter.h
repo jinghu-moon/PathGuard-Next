@@ -115,8 +115,10 @@ inline bool ParseLogicalPath(const char* path, LogicalPath* output) {
 
 inline bool AppendTarget(const LogicalPath& logical,
                          const policy_v6_view::StringRef& target,
+                         size_t relative_offset,
                          char* output, size_t capacity) {
-    if (output == nullptr || capacity == 0 || target.empty()) return false;
+    if (output == nullptr || capacity == 0 || target.empty()
+        || relative_offset > logical.relative_size) return false;
     size_t used = 0;
     auto append = [&](const char* data, size_t size) {
         if (size >= capacity - used) return false;
@@ -137,7 +139,10 @@ inline bool AppendTarget(const LogicalPath& logical,
             ++i;
         }
     }
-    return append("/", 1) && append(logical.relative, logical.relative_size);
+    const size_t relative_size = logical.relative_size - relative_offset;
+    return relative_size == 0
+        || (append("/", 1)
+            && append(logical.relative + relative_offset, relative_size));
 }
 
 inline RewriteResult Rewrite(
@@ -187,7 +192,8 @@ inline RewriteResult Rewrite(
         result.disposition = RewriteDisposition::kDeny;
         result.error_number = EACCES;
     } else if (routed.disposition == policy_action_router::Disposition::kRedirect) {
-        if (!AppendTarget(logical, routed.target, output, capacity)) {
+        if (!AppendTarget(logical, routed.target, routed.relative_offset,
+                          output, capacity)) {
             result.reason = policy_action_router::Reason::kRuntimeUnavailable;
             return result;
         }

@@ -51,13 +51,14 @@ constexpr uint32_t kBootstrapVersion = 5;
 constexpr uint32_t kCompanionResultMagic = 0x52534750;
 constexpr uint32_t kCompanionResultVersion = 1;
 constexpr uint32_t kSharedStateMagic = 0x53534750;
-constexpr uint32_t kSharedStateVersion = 4;
+constexpr uint32_t kSharedStateVersion = 5;
 constexpr size_t kMaxMountRules = 64;
 constexpr size_t kMaxPlanPathBytes = 64 * 1024;
 constexpr size_t kMaxProcessNameBytes = 256;
 constexpr int kProcessReadyTimeoutMs = 5000;
 constexpr int kCompanionIoTimeoutMs = 5000;
 constexpr int kAppResultTimeoutMs = 300;
+constexpr int kPreflightCompletionGraceMs = 500;
 constexpr int kApplyingCompletionGraceMs = 500;
 constexpr int kChildTerminateGraceMs = 1000;
 constexpr int kApplyingOwnerDeathTimeoutMs = 10000;
@@ -1195,7 +1196,13 @@ bool MarkSharedCancelled(SharedMountState* state) {
         state, MountState::kCancelRequested, MountState::kCancelled);
 }
 
-bool PublishPendingFailure(SharedMountState* state, const CompanionResult& result) {
+bool PublishPreflightFailure(SharedMountState* state,
+                             const CompanionResult& result) {
+    if (PublishSharedResult(
+            state, result, MountState::kPreflighting,
+            MountState::kFailed)) {
+        return true;
+    }
     if (PublishSharedResult(
             state, result, MountState::kPending, MountState::kFailed)) {
         return true;
@@ -1206,9 +1213,20 @@ bool PublishPendingFailure(SharedMountState* state, const CompanionResult& resul
     return false;
 }
 
+bool BeginPreflight(SharedMountState* state) {
+    if (TransitionSharedState(
+            state, MountState::kPending, MountState::kPreflighting)) {
+        return true;
+    }
+    if (LoadSharedStatus(state) == MountState::kCancelRequested) {
+        MarkSharedCancelled(state);
+    }
+    return false;
+}
+
 bool AcquireMutationLease(SharedMountState* state) {
     if (TransitionSharedState(
-            state, MountState::kPending, MountState::kApplying)) {
+            state, MountState::kPreflighting, MountState::kApplying)) {
         return true;
     }
     if (LoadSharedStatus(state) == MountState::kCancelRequested) {
@@ -1471,6 +1489,9 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
             current_mounts)) {
         pathguard::DestroyMountInfoSnapshot(&current_mounts);
         DestroyMountTransactionWorkspace(workspace);
+        if (LoadSharedStatus(state) == MountState::kCancelRequested) {
+            MarkSharedCancelled(state);
+        }
         perf.result = snapshot_error != 0 ? snapshot_error : ESTALE;
         return perf;
     }
@@ -1488,6 +1509,10 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
         }
         pathguard::DestroyMountInfoSnapshot(&current_mounts);
         DestroyMountTransactionWorkspace(workspace);
+        if (error == ECANCELED
+            && LoadSharedStatus(state) == MountState::kCancelRequested) {
+            MarkSharedCancelled(state);
+        }
         perf.result = error;
         return perf;
     };
@@ -2026,6 +2051,7 @@ SharedMountState* MapSharedState(int shared_fd) {
 bool WaitForSharedResult(SharedMountState* state, int timeout_ms) {
     uint64_t deadline = pathguard::perf::NowNs()
         + static_cast<uint64_t>(timeout_ms) * 1000000u;
+    bool preflight_grace_used = false;
     bool applying_grace_used = false;
     while (true) {
         const MountState current = LoadSharedStatus(state);
@@ -2036,6 +2062,22 @@ bool WaitForSharedResult(SharedMountState* state, int timeout_ms) {
             if (current == MountState::kPending) {
                 if (TransitionSharedState(state, MountState::kPending,
                                           MountState::kCancelRequested)) {
+                    return false;
+                }
+                continue;
+            }
+            if (current == MountState::kPreflighting
+                && !preflight_grace_used) {
+                preflight_grace_used = true;
+                deadline = now
+                    + static_cast<uint64_t>(kPreflightCompletionGraceMs)
+                        * 1000000u;
+                continue;
+            }
+            if (current == MountState::kPreflighting) {
+                if (TransitionSharedState(
+                        state, MountState::kPreflighting,
+                        MountState::kCancelRequested)) {
                     return false;
                 }
                 continue;
@@ -2580,7 +2622,7 @@ void CompanionHandler(int client) {
         result.mount.result = ESTALE;
         result.mount.runtime_reason = static_cast<uint32_t>(
             pathguard::RuntimeReason::kPolicyChanged);
-        PublishPendingFailure(state, result);
+        PublishPreflightFailure(state, result);
         WriteRuntimeStatus(module_dir_fd, header.pid,
                            static_cast<uid_t>(header.uid), plan, result.mount,
                            LoadSharedStatus(state));
@@ -2602,7 +2644,7 @@ void CompanionHandler(int client) {
         const uint64_t send_started = pathguard::perf::NowNs();
         const bool sent = ready_result == ProcessReadyResult::kCancelled
             ? MarkSharedCancelled(state)
-            : PublishPendingFailure(state, result);
+            : PublishPreflightFailure(state, result);
         LOGI("perf companion pid=%d rules=%u ready_ok=0 ready_us=%llu "
              "mount_us=0 result_send_us=%llu total_us=%llu result=%d sent=%d",
              header.pid, plan.count,
@@ -2622,6 +2664,17 @@ void CompanionHandler(int client) {
         return;
     }
     state->result.ready_ns = ready_ns;
+
+    if (!BeginPreflight(state)) {
+        MountPerfResult mount;
+        mount.result = ECANCELED;
+        WriteRuntimeStatus(module_dir_fd, header.pid,
+                           static_cast<uid_t>(header.uid), plan, mount,
+                           LoadSharedStatus(state));
+        close(module_dir_fd);
+        munmap(state, sizeof(*state));
+        return;
+    }
 
     pathguard::MountInfoSnapshot candidate_mounts;
     const uint64_t candidate_topology_started = pathguard::perf::NowNs();
@@ -2646,7 +2699,7 @@ void CompanionHandler(int client) {
         result.mount.result = ENOTSUP;
         result.mount.runtime_reason = static_cast<uint32_t>(
             pathguard::RuntimeReason::kTopologyChanged);
-        PublishPendingFailure(state, result);
+        PublishPreflightFailure(state, result);
         LOGE("storage topology unsupported: pid=%d uid=%d", header.pid, header.uid);
         WriteRuntimeStatus(module_dir_fd, header.pid,
                            static_cast<uid_t>(header.uid), plan, result.mount,
@@ -2739,13 +2792,14 @@ void CompanionHandler(int client) {
     }
     const uint64_t mount_ns = pathguard::perf::ElapsedNs(mount_started);
     const MountState final_state = LoadSharedStatus(state);
-    if (final_state == MountState::kPending) {
+    if (final_state == MountState::kPending
+        || final_state == MountState::kPreflighting) {
         CompanionResult result = state->result;
         result.mount = mount_result;
         if (mount_result.result == 0) {
             result.mount.result = EPROTO;
         }
-        PublishPendingFailure(state, result);
+        PublishPreflightFailure(state, result);
     } else if (mount_result_received
                && final_state == MountState::kCancelRequested
                && mount_result.result != 0) {

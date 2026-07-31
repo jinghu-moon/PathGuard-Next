@@ -8,6 +8,7 @@
 
 #include "pathguard/binary.h"
 #include "pathguard/policy.h"
+#include "pathguard/policy_v6.h"
 #include "pathguard/rules/diagnostic.h"
 #include "pathguard/rules/semantic.h"
 #include "pathguard/rules/source.h"
@@ -266,14 +267,100 @@ static int ExplainRulesPath(const fs::path& rules_path,
     return 0;
 }
 
-static const char* MountActionName(pathguard::MountAction action) {
+static const char* ActionName(pathguard::PolicyActionKind action) {
     switch (action) {
-        case pathguard::MountAction::kDeny: return "deny";
-        case pathguard::MountAction::kRedirect: return "redirect";
-        case pathguard::MountAction::kRestore: return "allow";
-        case pathguard::MountAction::kIsolateRoot: return "isolate";
+        case pathguard::PolicyActionKind::kDeny: return "deny";
+        case pathguard::PolicyActionKind::kRedirect: return "redirect";
+        case pathguard::PolicyActionKind::kObserve: return "observe";
+        case pathguard::PolicyActionKind::kExport: return "export";
     }
     return "unknown";
+}
+
+static const char* DomainName(pathguard::PolicyExecutionDomain domain) {
+    switch (domain) {
+        case pathguard::PolicyExecutionDomain::kMount: return "mount";
+        case pathguard::PolicyExecutionDomain::kAppPath: return "app_path";
+        case pathguard::PolicyExecutionDomain::kProvider: return "provider";
+        case pathguard::PolicyExecutionDomain::kCompleteVfs: return "complete_vfs";
+        case pathguard::PolicyExecutionDomain::kEvent: return "event";
+    }
+    return "unknown";
+}
+
+static void AppendEscapedPatternLiteral(std::string_view value,
+                                        std::string* output) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    for (const unsigned char byte : value) {
+        if (byte < 0x20 || byte == 0x7f) {
+            output->append("\\x");
+            output->push_back(kHex[byte >> 4U]);
+            output->push_back(kHex[byte & 0x0fU]);
+        } else {
+            if (byte == '\\' || byte == '*' || byte == '?' || byte == '['
+                || byte == ']' || byte == '!') {
+                output->push_back('\\');
+            }
+            output->push_back(static_cast<char>(byte));
+        }
+    }
+}
+
+static std::string RenderPattern(
+        const pathguard::pattern::PatternProgram& program) {
+    std::string output;
+    for (std::size_t component_index = 0;
+         component_index < program.components.size(); ++component_index) {
+        if (component_index != 0) output.push_back('/');
+        const auto& component = program.components[component_index];
+        if (component.globstar) {
+            output.append("**");
+            continue;
+        }
+        for (const auto& token : component.tokens) {
+            switch (token.kind) {
+                case pathguard::pattern::PatternTokenKind::kLiteral:
+                    AppendEscapedPatternLiteral(token.literal, &output);
+                    break;
+                case pathguard::pattern::PatternTokenKind::kStarComponent:
+                    output.push_back('*');
+                    break;
+                case pathguard::pattern::PatternTokenKind::kOneComponentChar:
+                    output.push_back('?');
+                    break;
+                case pathguard::pattern::PatternTokenKind::kCharacterClass: {
+                    if (token.character_class >= program.character_classes.size()) {
+                        return "<invalid-character-class>";
+                    }
+                    const auto& character_class =
+                        program.character_classes[token.character_class];
+                    output.push_back('[');
+                    if (character_class.negated) output.push_back('!');
+                    for (unsigned value = 0; value < 128; ++value) {
+                        if ((character_class.bitmap[value / 64U]
+                             & (UINT64_C(1) << (value % 64U))) == 0) {
+                            continue;
+                        }
+                        const char byte = static_cast<char>(value);
+                        if (byte == '\\' || byte == ']' || byte == '-') {
+                            output.push_back('\\');
+                        }
+                        if (value < 0x20 || value == 0x7f) {
+                            static constexpr char kHex[] = "0123456789abcdef";
+                            output.append("\\x");
+                            output.push_back(kHex[value >> 4U]);
+                            output.push_back(kHex[value & 0x0fU]);
+                        } else {
+                            output.push_back(byte);
+                        }
+                    }
+                    output.push_back(']');
+                    break;
+                }
+            }
+        }
+    }
+    return output;
 }
 
 static int ExplainPolicy(const fs::path& policy, const std::string& package) {
@@ -283,29 +370,48 @@ static int ExplainPolicy(const fs::path& policy, const std::string& package) {
         return 1;
     }
     const std::vector<std::uint8_t> bytes(raw.begin(), raw.end());
-    pathguard::PolicyDocument document;
-    pathguard::ParseError error;
-    std::uint64_t generation = 0;
-    if (!pathguard::DecodePolicy(bytes, &document, &generation, &error)) {
-        std::cerr << "invalid policy.bin: " << error.message << '\n';
+    pathguard::PolicyV6 document;
+    const pathguard::PolicyV6DecodeResult decoded =
+        pathguard::DecodePolicyV6(bytes, &document);
+    if (!decoded.ok) {
+        std::cerr << "invalid policy.bin: " << decoded.error << '\n';
         return 1;
     }
-    for (const pathguard::AppPolicy& app : document.apps) {
+    for (const pathguard::PolicyPackageV6& app : document.packages) {
         if (app.package != package) continue;
+        std::uint64_t capability_union = 0;
+        std::uint64_t operation_union = 0;
+        for (const auto& action : app.actions) {
+            capability_union |= action.required_capabilities;
+            operation_union |= action.required_operations;
+        }
         std::cout << "package=" << app.package
-                  << "\nsnapshot_generation=" << generation
-                  << "\nplan_generation="
-                  << pathguard::ComputePlanGeneration(
-                         app, document.failure_mode,
-                         document.allow_legacy_string_bind)
-                  << "\nmedia=" << static_cast<unsigned>(app.media_compat)
-                  << "\nprovider=" << static_cast<unsigned>(app.provider_compat)
-                  << "\n";
-        for (const pathguard::LogicalMountRule& rule : app.mounts) {
-            std::cout << MountActionName(rule.action) << " visible="
-                      << rule.visible_path;
-            if (!rule.backing_path.empty()) std::cout << " backing=" << rule.backing_path;
-            std::cout << '\n';
+                  << "\ncontent_generation=" << decoded.content_generation
+                  << "\nplan_generation=" << app.plan_generation
+                  << "\nprovider_intent=" << (app.provider_enabled ? 1 : 0)
+                  << "\nrequired_capabilities_union="
+                  << capability_union
+                  << "\nrequired_operations_union="
+                  << operation_union << '\n';
+        for (const pathguard::PolicyActionV6& action : app.actions) {
+            if (action.selector_index >= app.selectors.size()) {
+                std::cerr << "invalid selector reference\n";
+                return 1;
+            }
+            const auto& selector = app.selectors[action.selector_index];
+            std::cout << "action=" << ActionName(action.kind)
+                      << " domain=" << DomainName(action.domain)
+                      << " rule_id=" << action.rule_id
+                      << " selector=" << action.selector_index
+                      << " root=" << selector.root;
+            if (selector.match_kind == pathguard::PolicyMatchKind::kGlob) {
+                std::cout << " glob=" << RenderPattern(selector.base_pattern);
+            }
+            if (!action.target.empty()) std::cout << " target=" << action.target;
+            std::cout << " priority=" << action.priority
+                      << " required_capabilities=" << action.required_capabilities
+                      << " required_operations=" << action.required_operations
+                      << " options=" << action.options << '\n';
         }
         return 0;
     }
