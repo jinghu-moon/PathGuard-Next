@@ -47,7 +47,20 @@ struct InstallResult {
     bool identity_hooks = false;
     uint64_t observed_capabilities = 0;
     uint64_t observed_operations = 0;
+    uint64_t snapshot_generation = 0;
+    uint64_t capability_generation = 0;
+    uint64_t hazard_slot_acquire_fail_total = 0;
+    uint32_t hazard_slots_in_use_high_watermark = 0;
+    uint64_t snapshot_reload_rejected_retire_limit_total = 0;
+    uint32_t retired_snapshot_count_high_watermark = 0;
+    uint64_t retired_snapshot_bytes_high_watermark = 0;
 };
+
+template <typename Function>
+constexpr bool IsResolvedJniHook(Function original,
+                                 Function replacement) noexcept {
+    return original != nullptr && original != replacement;
+}
 
 // JNI replacements and a failed PLT commit can leave callbacks installed.
 constexpr bool MustRetainModule(const InstallResult& result) noexcept {

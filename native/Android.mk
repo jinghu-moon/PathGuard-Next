@@ -1,7 +1,6 @@
 LOCAL_PATH := $(call my-dir)
 ROOT_PATH := $(LOCAL_PATH)/..
 CORE_SOURCES := \
-    ../core/src/binary.cpp \
     ../core/src/export_worker.cpp \
     ../core/src/failure_policy.cpp \
     ../core/src/path.cpp \
@@ -11,14 +10,9 @@ CORE_SOURCES := \
     ../core/src/route_provenance.cpp \
     ../core/src/provenance_broker.cpp \
     ../core/src/topology.cpp \
-    ../core/src/validation.cpp \
     ../core/src/version.cpp
 RULES_COMPILER_SOURCES := \
-    ../rules/src/arrow_scanner.cpp \
-    ../rules/src/compiler.cpp \
-    ../rules/src/desugarer.cpp \
     ../rules/src/diagnostic.cpp \
-    ../rules/src/format_probe.cpp \
     ../rules/src/schema_v2.cpp \
     ../rules/src/selector_builder.cpp \
     ../rules/src/semantic.cpp \
@@ -94,6 +88,14 @@ LOCAL_STATIC_LIBRARIES := pathguard_rules_compiler
 include $(BUILD_EXECUTABLE)
 
 include $(CLEAR_VARS)
+LOCAL_MODULE := pathguard_runtime_benchmark
+LOCAL_SRC_FILES := ../tests/perf/runtime_benchmark.cpp
+LOCAL_C_INCLUDES := $(ROOT_PATH)/rules/include $(ROOT_PATH)/core/include
+LOCAL_CPP_FEATURES := exceptions
+LOCAL_STATIC_LIBRARIES := pathguard_rules_compiler
+include $(BUILD_EXECUTABLE)
+
+include $(CLEAR_VARS)
 LOCAL_MODULE := pathguardd
 LOCAL_SRC_FILES := ../daemon/src/main.cpp $(CORE_SOURCES) \
     ../daemon/src/rules_control.cpp ../daemon/src/provenance_server.cpp \
@@ -123,7 +125,6 @@ LOCAL_SRC_FILES := \
     ../zygisk/src/media_query_filter.cpp \
     ../zygisk/src/media_query_hook.cpp \
     ../zygisk/src/provider_redirect_hook.cpp \
-    ../zygisk/src/provider_path_mapper.cpp \
     $(DIRECTORY_RESOLVER_SOURCE) \
     secure_path_resolver.cpp \
     $(MOUNT_INFO_SNAPSHOT_SOURCE) \

@@ -19,11 +19,9 @@
 #define PATHGUARD_HAS_INOTIFY 0
 #endif
 
-#include "pathguard/binary.h"
 #include "pathguard/path.h"
 #include "pathguard/provider_process_lifecycle.h"
 #include "pathguard/provenance_server.h"
-#include "pathguard/policy.h"
 #include "pathguard/rules_control.h"
 #include "pathguard/topology.h"
 

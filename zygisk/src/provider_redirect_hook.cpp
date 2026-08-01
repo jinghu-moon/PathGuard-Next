@@ -138,6 +138,7 @@ PolicySnapshotDomainBase<RuntimePolicySnapshot>* g_policy_domain = nullptr;
 AdmissionDomain g_domain = AdmissionDomain::kAppPath;
 IdentityMode g_identity_mode = IdentityMode::kProcessUid;
 CapabilitySnapshot g_capabilities{};
+uint64_t g_snapshot_generation = 0;
 ResolverProbeCache g_resolver_probe;
 OpenFn g_open = nullptr;
 OpenFn g_open64 = nullptr;
@@ -279,12 +280,14 @@ int32_t EffectiveCallingUid() {
 }
 
 int64_t HookedClearCallingIdentity() {
+    if (g_binder_clear_identity == nullptr) return 0;
     BeginBinderIdentityClear(GetThreadState(), RawCallingUid(),
                              static_cast<int32_t>(getuid()));
     return g_binder_clear_identity();
 }
 
 void HookedRestoreCallingIdentity(int64_t token) {
+    if (g_binder_restore_identity == nullptr) return;
     g_binder_restore_identity(token);
     EndBinderIdentityClear(GetThreadState());
 }
@@ -300,18 +303,23 @@ bool InstallBinderIdentityHooks(zygisk::Api* api, JNIEnv* env,
          reinterpret_cast<void*>(HookedRestoreCallingIdentity)},
     };
     api->hookJniNativeMethods(env, "android/os/Binder", methods, 3);
-    g_binder_get_calling_uid = reinterpret_cast<BinderGetCallingUidFn>(
-        methods[0].fnPtr);
-    g_binder_clear_identity = reinterpret_cast<BinderClearIdentityFn>(
-        methods[1].fnPtr);
-    g_binder_restore_identity = reinterpret_cast<BinderRestoreIdentityFn>(
-        methods[2].fnPtr);
-    *attempted = g_binder_get_calling_uid != nullptr
-        || g_binder_clear_identity != nullptr
-        || g_binder_restore_identity != nullptr;
-    return g_binder_get_calling_uid != nullptr
-        && g_binder_clear_identity != nullptr
-        && g_binder_restore_identity != nullptr;
+    const bool get_uid_ready = IsResolvedJniHook(
+        methods[0].fnPtr, reinterpret_cast<void*>(RawCallingUid));
+    const bool clear_ready = IsResolvedJniHook(
+        methods[1].fnPtr, reinterpret_cast<void*>(HookedClearCallingIdentity));
+    const bool restore_ready = IsResolvedJniHook(
+        methods[2].fnPtr, reinterpret_cast<void*>(HookedRestoreCallingIdentity));
+    g_binder_get_calling_uid = get_uid_ready
+        ? reinterpret_cast<BinderGetCallingUidFn>(methods[0].fnPtr) : nullptr;
+    g_binder_clear_identity = clear_ready
+        ? reinterpret_cast<BinderClearIdentityFn>(methods[1].fnPtr) : nullptr;
+    g_binder_restore_identity = restore_ready
+        ? reinterpret_cast<BinderRestoreIdentityFn>(methods[2].fnPtr) : nullptr;
+    *attempted = true;
+    LOGI("provider Binder JNI hooks: get_uid=%d clear=%d restore=%d",
+         get_uid_ready ? 1 : 0, clear_ready ? 1 : 0,
+         restore_ready ? 1 : 0);
+    return get_uid_ready && clear_ready && restore_ready;
 }
 
 bool ResolveAtPath(int dirfd, const char* path, char* output, size_t capacity) {
@@ -1828,6 +1836,10 @@ InstallResult Install(zygisk::Api* api, JNIEnv* env,
         LOGE("provenance transaction atfork registration failed");
         return {};
     }
+    // Android app and Provider seccomp policies may trap openat2 with SIGSYS
+    // instead of returning EPERM. The component FD walk provides the same
+    // no-symlink boundary without probing a process-fatal syscall.
+    g_resolver_probe.ObserveOpenAt2(EPERM, true);
     __atomic_store_n(&g_hooks_enabled, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_fuse_install_state, 0, __ATOMIC_RELEASE);
     g_api = api;
@@ -1901,12 +1913,28 @@ InstallResult Install(zygisk::Api* api, JNIEnv* env,
         ReleaseRuntimePolicy(runtime);
         result.virtualization_active = false;
     } else {
+        result.snapshot_generation = AtomicAddFetch(
+            &g_snapshot_generation, uint64_t{1});
+        result.capability_generation = g_capabilities.capability_generation;
         g_policy_domain = config.domain == AdmissionDomain::kProvider
             ? static_cast<PolicySnapshotDomainBase<RuntimePolicySnapshot>*>(
                 &g_provider_policy_domain)
             : static_cast<PolicySnapshotDomainBase<RuntimePolicySnapshot>*>(
                 &g_app_policy_domain);
     }
+    const PolicySnapshotMetrics snapshot_metrics = config.domain
+            == AdmissionDomain::kProvider
+        ? g_provider_policy_domain.metrics() : g_app_policy_domain.metrics();
+    result.hazard_slot_acquire_fail_total =
+        snapshot_metrics.hazard_slot_acquire_fail_total;
+    result.hazard_slots_in_use_high_watermark =
+        snapshot_metrics.hazard_slots_in_use_high_watermark;
+    result.snapshot_reload_rejected_retire_limit_total =
+        snapshot_metrics.snapshot_reload_rejected_retire_limit_total;
+    result.retired_snapshot_count_high_watermark =
+        snapshot_metrics.retired_snapshot_count_high_watermark;
+    result.retired_snapshot_bytes_high_watermark =
+        snapshot_metrics.retired_snapshot_bytes_high_watermark;
     if (ShouldEnableHooks(result)) {
         __atomic_store_n(&g_hooks_enabled, 1, __ATOMIC_RELEASE);
     }

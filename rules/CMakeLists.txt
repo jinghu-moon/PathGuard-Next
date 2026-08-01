@@ -1,9 +1,5 @@
 add_library(pathguard_rules_compiler STATIC
-  src/arrow_scanner.cpp
-  src/compiler.cpp
-  src/desugarer.cpp
   src/diagnostic.cpp
-  src/format_probe.cpp
   src/schema_v2.cpp
   src/selector_builder.cpp
   src/semantic.cpp

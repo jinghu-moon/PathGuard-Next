@@ -26,8 +26,13 @@ inline ApplyStatus Apply(const pattern::OperationPlan& plan,
                          OperationMask required,
                          Backend* backend) {
     if (!plan.accepted) return ApplyStatus::kInvalidPlan;
-    if (backend == nullptr
-        || (capabilities.observed_capabilities & kCapabilityFuseCompletePath) == 0
+    const ActionAdmission admission = AdmitAction({
+        AdmissionDomain::kCompleteVfs,
+        kCapabilityFuseCompletePath,
+        required,
+        true,
+    }, capabilities, plan.plan_generation);
+    if (!admission.active() || backend == nullptr
         || (backend->operations() & required) != required) {
         return ApplyStatus::kUnsupported;
     }

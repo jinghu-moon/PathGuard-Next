@@ -1,6 +1,6 @@
 id=pathguard_next
 name=PathGuard Next
-version=0.1.17-dev
-versionCode=18
+version=0.1.24-dev
+versionCode=25
 author=PathGuard contributors
 description=Per-app redirect with mount and full SAF provider path virtualization

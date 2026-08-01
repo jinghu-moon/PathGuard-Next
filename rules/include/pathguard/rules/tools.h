@@ -21,6 +21,8 @@ enum class PolicyChangeKind {
 enum class PolicyRuleKind {
     kDeny,
     kRedirect,
+    kObserve,
+    kExport,
 };
 
 struct PolicyChange {
@@ -32,8 +34,8 @@ struct PolicyChange {
     std::string after_target;
 };
 
-std::vector<PolicyChange> BuildPolicyPlan(const CanonicalPolicy& before,
-                                          const CanonicalPolicy& after);
+std::vector<PolicyChange> BuildPolicyPlan(const CanonicalPolicyV2& before,
+                                          const CanonicalPolicyV2& after);
 
 struct PathExplanation {
     std::string package;
@@ -44,7 +46,7 @@ struct PathExplanation {
     std::vector<std::string> shadowed_parents;
 };
 
-PathExplanation ExplainPath(const ResolvedPolicy& policy,
+PathExplanation ExplainPath(const CanonicalPolicyV2& policy,
                             std::string_view package,
                             std::string_view path,
                             const RulesLimits& limits);

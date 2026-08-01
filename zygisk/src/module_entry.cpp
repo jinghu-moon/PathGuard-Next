@@ -37,6 +37,7 @@
 #include "pathguard/policy_v6_view.h"
 #include "pathguard/provenance_protocol.h"
 #include "pathguard/runtime_status.h"
+#include "pathguard/runtime_status_builder.h"
 #include "zygisk.hpp"
 
 namespace {
@@ -47,7 +48,13 @@ constexpr uint32_t kPolicyMagic = pathguard::binary_format::kMagic;
 constexpr uint16_t kPolicyFormatVersion = pathguard::binary_format::kFormatVersion;
 constexpr size_t kPolicyHeaderSize = pathguard::binary_format::kHeaderSize;
 constexpr uint32_t kBootstrapMagic = 0x50474250;
-constexpr uint32_t kBootstrapVersion = 5;
+constexpr uint32_t kBootstrapVersion = 6;
+constexpr uint32_t kBootstrapFeatureProviderEnabled = 1u;
+constexpr uint32_t kStatusSubmissionMagic = 0x53544750;
+constexpr uint32_t kStatusSubmissionVersion = 1;
+constexpr uint32_t kSharedStatusMagic = 0x48534750;
+constexpr uint32_t kSharedStatusVersion = 1;
+constexpr size_t kMaxRuntimeStatusBytes = 32768;
 constexpr uint32_t kCompanionResultMagic = 0x52534750;
 constexpr uint32_t kCompanionResultVersion = 1;
 constexpr uint32_t kSharedStateMagic = 0x53534750;
@@ -57,6 +64,7 @@ constexpr size_t kMaxPlanPathBytes = 64 * 1024;
 constexpr size_t kMaxProcessNameBytes = 256;
 constexpr int kProcessReadyTimeoutMs = 5000;
 constexpr int kCompanionIoTimeoutMs = 5000;
+constexpr int kRuntimeStatusTimeoutMs = 5000;
 constexpr int kAppResultTimeoutMs = 300;
 constexpr int kPreflightCompletionGraceMs = 500;
 constexpr int kApplyingCompletionGraceMs = 500;
@@ -109,13 +117,35 @@ struct ProcessPlan {
     uint32_t policy_flags = 0;
     uint32_t count = 0;
     uint32_t path_bytes = 1;
-    bool media_compat = false;
-    bool provider_compat = false;
+    bool provider_enabled = false;
+    bool app_path_status_available = false;
+    pathguard::provider_redirect::InstallResult app_path_install;
     RuntimeStorageTopology topology;
     char process_name[kMaxProcessNameBytes]{};
     PlannedMount mounts[kMaxMountRules]{};
     char paths[kMaxPlanPathBytes]{};
 };
+
+struct PathInstallTelemetry {
+    uint64_t observed_capabilities = 0;
+    uint64_t observed_operations = 0;
+    uint64_t snapshot_generation = 0;
+    uint64_t capability_generation = 0;
+    uint64_t hazard_slot_acquire_fail_total = 0;
+    uint64_t snapshot_reload_rejected_retire_limit_total = 0;
+    uint64_t retired_snapshot_bytes_high_watermark = 0;
+    uint32_t hazard_slots_in_use_high_watermark = 0;
+    uint32_t retired_snapshot_count_high_watermark = 0;
+    uint32_t flags = 0;
+    uint32_t reserved = 0;
+};
+
+constexpr uint32_t kPathInstallAvailable = 1u << 0;
+constexpr uint32_t kPathInstallAttempted = 1u << 1;
+constexpr uint32_t kPathInstallCommitted = 1u << 2;
+constexpr uint32_t kPathInstallActive = 1u << 3;
+constexpr uint32_t kPathIdentityAttempted = 1u << 4;
+constexpr uint32_t kPathIdentityHooks = 1u << 5;
 
 struct BootstrapHeader {
     uint32_t magic;
@@ -127,7 +157,26 @@ struct BootstrapHeader {
     uint64_t snapshot_generation;
     uint64_t plan_generation;
     uint32_t process_name_length;
-    uint32_t compat_flags;
+    uint32_t feature_flags;
+    PathInstallTelemetry app_path_install;
+};
+
+struct StatusSubmissionHeader {
+    uint32_t magic = kStatusSubmissionMagic;
+    uint32_t version = kStatusSubmissionVersion;
+    int32_t pid = -1;
+    uint32_t uid = 0;
+    uint64_t process_start_time = 0;
+};
+
+struct SharedRuntimeStatus {
+    uint32_t magic = kSharedStatusMagic;
+    uint32_t version = kSharedStatusVersion;
+    alignas(4) uint32_t state = 0;
+    uint32_t process_name_length = 0;
+    uint32_t status_length = 0;
+    char process_name[kMaxProcessNameBytes]{};
+    char text[kMaxRuntimeStatusBytes]{};
 };
 
 struct PolicyLoadPerf {
@@ -234,6 +283,60 @@ bool WriteFully(int fd, const void* buffer, size_t size) {
         size -= static_cast<size_t>(written);
     }
     return true;
+}
+
+PathInstallTelemetry EncodePathInstallTelemetry(
+        const pathguard::provider_redirect::InstallResult& result,
+        bool available) {
+    PathInstallTelemetry telemetry;
+    telemetry.observed_capabilities = result.observed_capabilities;
+    telemetry.observed_operations = result.observed_operations;
+    telemetry.snapshot_generation = result.snapshot_generation;
+    telemetry.capability_generation = result.capability_generation;
+    telemetry.hazard_slot_acquire_fail_total =
+        result.hazard_slot_acquire_fail_total;
+    telemetry.snapshot_reload_rejected_retire_limit_total =
+        result.snapshot_reload_rejected_retire_limit_total;
+    telemetry.retired_snapshot_bytes_high_watermark =
+        result.retired_snapshot_bytes_high_watermark;
+    telemetry.hazard_slots_in_use_high_watermark =
+        result.hazard_slots_in_use_high_watermark;
+    telemetry.retired_snapshot_count_high_watermark =
+        result.retired_snapshot_count_high_watermark;
+    telemetry.flags = (available ? kPathInstallAvailable : 0u)
+        | (result.hook_registration_attempted ? kPathInstallAttempted : 0u)
+        | (result.hooks_committed ? kPathInstallCommitted : 0u)
+        | (result.virtualization_active ? kPathInstallActive : 0u)
+        | (result.identity_hook_attempted ? kPathIdentityAttempted : 0u)
+        | (result.identity_hooks ? kPathIdentityHooks : 0u);
+    return telemetry;
+}
+
+pathguard::provider_redirect::InstallResult DecodePathInstallTelemetry(
+        const PathInstallTelemetry& telemetry) {
+    pathguard::provider_redirect::InstallResult result;
+    result.hook_registration_attempted =
+        (telemetry.flags & kPathInstallAttempted) != 0;
+    result.hooks_committed = (telemetry.flags & kPathInstallCommitted) != 0;
+    result.virtualization_active = (telemetry.flags & kPathInstallActive) != 0;
+    result.identity_hook_attempted =
+        (telemetry.flags & kPathIdentityAttempted) != 0;
+    result.identity_hooks = (telemetry.flags & kPathIdentityHooks) != 0;
+    result.observed_capabilities = telemetry.observed_capabilities;
+    result.observed_operations = telemetry.observed_operations;
+    result.snapshot_generation = telemetry.snapshot_generation;
+    result.capability_generation = telemetry.capability_generation;
+    result.hazard_slot_acquire_fail_total =
+        telemetry.hazard_slot_acquire_fail_total;
+    result.snapshot_reload_rejected_retire_limit_total =
+        telemetry.snapshot_reload_rejected_retire_limit_total;
+    result.retired_snapshot_bytes_high_watermark =
+        telemetry.retired_snapshot_bytes_high_watermark;
+    result.hazard_slots_in_use_high_watermark =
+        telemetry.hazard_slots_in_use_high_watermark;
+    result.retired_snapshot_count_high_watermark =
+        telemetry.retired_snapshot_count_high_watermark;
+    return result;
 }
 
 bool WriteRegularFileFully(int fd, const void* buffer, size_t size) {
@@ -494,7 +597,7 @@ bool LoadProcessPlan(int module_dir, const char* process_name, jint uid,
     plan->snapshot_generation = mount_plan.content_generation;
     plan->policy_flags = mount_plan.policy_flags;
     plan->plan_generation = mount_plan.plan_generation;
-    plan->provider_compat =
+    plan->provider_enabled =
         (package.flags & pathguard::binary_format::kPackageFlagProviderEnabled) != 0;
     for (uint32_t index = 0; index < mount_plan.count; ++index) {
         const pathguard::LiteralMountPlanEntry& source = mount_plan.entries[index];
@@ -539,8 +642,7 @@ bool SameProcessPlan(const ProcessPlan& expected, const ProcessPlan& actual) {
         || expected.plan_generation != actual.plan_generation
         || expected.policy_flags != actual.policy_flags
         || expected.count != actual.count
-        || expected.media_compat != actual.media_compat
-        || expected.provider_compat != actual.provider_compat
+        || expected.provider_enabled != actual.provider_enabled
         || strcmp(expected.process_name, actual.process_name) != 0) {
         return false;
     }
@@ -560,145 +662,6 @@ bool SameProcessPlan(const ProcessPlan& expected, const ProcessPlan& actual) {
     }
     return true;
 }
-
-#if 0  // Removed with the v5 compatibility DTO in Phase P6.
-bool LoadProviderRulesV5(int module_dir,
-                       pathguard::provider_redirect::Rule* rules,
-                       uint32_t capacity, uint32_t* rule_count) {
-    if (rules == nullptr || rule_count == nullptr) return false;
-    *rule_count = 0;
-    const int policy_fd = openat(module_dir, kPolicyPath, O_RDONLY | O_CLOEXEC);
-    if (policy_fd < 0) return false;
-    struct stat file_stat {};
-    if (fstat(policy_fd, &file_stat) != 0
-        || file_stat.st_size < static_cast<off_t>(kPolicyHeaderSize)) {
-        close(policy_fd);
-        return false;
-    }
-    const size_t size = static_cast<size_t>(file_stat.st_size);
-    void* mapping = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, policy_fd, 0);
-    close(policy_fd);
-    if (mapping == MAP_FAILED) return false;
-
-    const auto* data = static_cast<const uint8_t*>(mapping);
-    const uint32_t package_count = ReadLe32(
-        data + pathguard::binary_format::kPackageCountOffset);
-    const uint32_t mount_count = ReadLe32(
-        data + pathguard::binary_format::kMountRuleCountOffset);
-    const uint32_t event_count = ReadLe32(
-        data + pathguard::binary_format::kEventRuleCountOffset);
-    const uint32_t package_offset = ReadLe32(
-        data + pathguard::binary_format::kPackageTableOffset);
-    const uint32_t mount_offset = ReadLe32(
-        data + pathguard::binary_format::kMountRuleTableOffset);
-    const uint32_t event_offset = ReadLe32(
-        data + pathguard::binary_format::kEventRuleTableOffset);
-    const uint32_t string_offset = ReadLe32(
-        data + pathguard::binary_format::kStringTableOffset);
-    const uint32_t flags = ReadLe32(data + pathguard::binary_format::kHeaderFlagsOffset);
-    const bool valid = ReadLe32(data) == kPolicyMagic
-        && ReadLe16(data + 4) == kPolicyFormatVersion
-        && ReadLe16(data + 6) == pathguard::binary_format::kSchemaVersion
-        && ReadLe32(data + pathguard::binary_format::kFileSizeOffset) == size
-        && package_count > 0
-        && package_offset == kPolicyHeaderSize
-        && mount_offset == package_offset + package_count * kPackageEntrySize
-        && event_offset == mount_offset + mount_count * kMountRuleEntrySize
-        && string_offset == event_offset + event_count * kEventRuleEntrySize
-        && string_offset < size
-        && (flags & ~pathguard::binary_format::kPolicyFlagAllowLegacyStringBind) == 0
-        && pathguard::binary_format::Crc32(data + kPolicyHeaderSize,
-                                          size - kPolicyHeaderSize)
-            == ReadLe32(data + pathguard::binary_format::kPayloadChecksumOffset)
-        && ValidPackageIndex(data, size, package_count, package_offset, string_offset)
-        && ValidPolicyTables(data, size, package_count, mount_count, event_count,
-                             package_offset, mount_offset, event_offset, string_offset);
-    if (!valid) {
-        munmap(mapping, size);
-        return false;
-    }
-
-    for (uint32_t package_index = 0; package_index < package_count; ++package_index) {
-        const auto* entry = data + package_offset
-            + package_index * kPackageEntrySize;
-        if (entry[pathguard::binary_format::kPackageProviderCompatOffset] != 1) continue;
-        const char* package_name = ReadPolicyString(
-            data, size, string_offset,
-            ReadLe32(entry + pathguard::binary_format::kPackageNameOffset));
-        const char* users = ReadPolicyString(
-            data, size, string_offset,
-            ReadLe32(entry + pathguard::binary_format::kPackageUsersOffset));
-        const uint32_t first_mount = ReadLe32(
-            entry + pathguard::binary_format::kPackageFirstMountOffset);
-        const uint32_t app_mount_count = ReadLe32(
-            entry + pathguard::binary_format::kPackageMountCountOffset);
-        if (package_name == nullptr || users == nullptr || strchr(users, '*') != nullptr) {
-            LOGE("provider redirect requires explicit numeric users");
-            continue;
-        }
-        const char* user = users;
-        while (*user != '\0') {
-            char* end = nullptr;
-            const long user_id = strtol(user, &end, 10);
-            if (end == user || user_id < 0 || user_id > 99999
-                || (*end != '\0' && *end != ',')) {
-                break;
-            }
-            char package_data_path[PATH_MAX]{};
-            struct stat package_stat {};
-            const int package_path_written = snprintf(
-                package_data_path, sizeof(package_data_path), "/data/user/%ld/%s",
-                user_id, package_name);
-            if (package_path_written <= 0
-                || static_cast<size_t>(package_path_written) >= sizeof(package_data_path)
-                || stat(package_data_path, &package_stat) != 0
-                || package_stat.st_uid < 10000) {
-                LOGE("provider redirect package uid resolution failed: package=%s user=%ld errno=%d",
-                     package_name, user_id, errno);
-                if (*end == '\0') break;
-                user = end + 1;
-                continue;
-            }
-            const int32_t caller_uid = static_cast<int32_t>(package_stat.st_uid);
-            for (uint32_t mount_index = 0; mount_index < app_mount_count; ++mount_index) {
-                if (*rule_count >= capacity) break;
-                const auto* mount = data + mount_offset
-                    + (first_mount + mount_index) * kMountRuleEntrySize;
-                if (mount[pathguard::binary_format::kMountActionOffset]
-                    != kRedirectAction) {
-                    continue;
-                }
-                const char* visible = ReadPolicyString(
-                    data, size, string_offset,
-                    ReadLe32(mount + pathguard::binary_format::kMountVisiblePathOffset));
-                const char* backing = ReadPolicyString(
-                    data, size, string_offset,
-                    ReadLe32(mount + pathguard::binary_format::kMountBackingPathOffset));
-                char expanded_backing[PATH_MAX]{};
-                if (visible == nullptr || backing == nullptr
-                    || strlen(visible) >= PATH_MAX
-                    || !IsAllowedTarget(visible)
-                    || !ExpandRuntimePath(
-                        backing, static_cast<uint32_t>(user_id), expanded_backing,
-                        sizeof(expanded_backing))) {
-                    continue;
-                }
-                auto& output = rules[*rule_count];
-                output.caller_uid = caller_uid;
-                output.user_id = static_cast<uint32_t>(user_id);
-                snprintf(output.visible_path, sizeof(output.visible_path), "%s", visible);
-                snprintf(output.backing_path, sizeof(output.backing_path), "%s",
-                         expanded_backing);
-                ++*rule_count;
-            }
-            if (*end == '\0') break;
-            user = end + 1;
-        }
-    }
-    munmap(mapping, size);
-    return *rule_count > 0;
-}
-#endif
 
 struct PathPolicyMapping {
     void* mapping = nullptr;
@@ -795,6 +758,11 @@ bool LoadProviderPolicy(int module_dir, PathPolicyMapping* output) {
     return output->scope_count > 0;
 }
 
+bool ReadProcessStartTime(pid_t pid, uint64_t* output);
+void WriteRuntimeStatusRecord(
+    int module_dir_fd, const char* process_name,
+    const pathguard::RuntimeStatusRecord& status);
+
 bool LoadAppPathPolicy(int module_dir, const char* process_name, jint uid,
                        PathPolicyMapping* output) {
     if (process_name == nullptr || uid < 10000) return false;
@@ -816,6 +784,97 @@ bool LoadAppPathPolicy(int module_dir, const char* process_name, jint uid,
     output->scopes[0] = {uid, user_id, package.index};
     output->scope_count = 1;
     return true;
+}
+
+bool BuildPathRuntimeStatus(
+        pid_t pid, uid_t uid,
+        const PathPolicyMapping& mapping, pathguard::AdmissionDomain domain,
+        const pathguard::provider_redirect::InstallResult& installed,
+        pathguard::RuntimeStatusRecord* output) {
+    if (pid <= 0 || mapping.mapping == nullptr || output == nullptr) return false;
+    pathguard::policy_v6_view::PolicyV6View policy;
+    if (!policy.Initialize(static_cast<const uint8_t*>(mapping.mapping),
+                           mapping.size)) return false;
+    pathguard::RuntimeStatusRecord status;
+    status.pid = pid;
+    status.uid = uid;
+    ReadProcessStartTime(status.pid, &status.process_start_time);
+    status.content_generation = policy.content_generation();
+    status.snapshot_generation = installed.snapshot_generation;
+    status.capability_generation = installed.capability_generation;
+    status.observed_capabilities = installed.observed_capabilities;
+    status.counters.hazard_slot_acquire_fail_total =
+        installed.hazard_slot_acquire_fail_total;
+    status.counters.hazard_slots_in_use_high_watermark =
+        installed.hazard_slots_in_use_high_watermark;
+    status.counters.snapshot_reload_rejected_retire_limit_total =
+        installed.snapshot_reload_rejected_retire_limit_total;
+    status.counters.retired_snapshot_count_high_watermark =
+        installed.retired_snapshot_count_high_watermark;
+    status.counters.retired_snapshot_bytes_high_watermark =
+        installed.retired_snapshot_bytes_high_watermark;
+    pathguard::CapabilitySnapshot capabilities;
+    capabilities.capability_generation = installed.capability_generation;
+    capabilities.observed_capabilities = installed.observed_capabilities;
+    capabilities.domains[static_cast<uint8_t>(domain)] = {
+        installed.virtualization_active
+            ? pathguard::AdapterState::kActive
+            : pathguard::AdapterState::kInactive,
+        installed.observed_operations,
+        0,
+    };
+    uint64_t aggregate_plan_generation = 0;
+    bool have_plan_generation = false;
+    bool mixed_plan_generations = false;
+    for (uint32_t scope_index = 0; scope_index < mapping.scope_count; ++scope_index) {
+        const uint32_t package_index = mapping.scopes[scope_index].package_index;
+        bool duplicate = false;
+        for (uint32_t previous = 0; previous < scope_index; ++previous) {
+            duplicate = duplicate
+                || mapping.scopes[previous].package_index == package_index;
+        }
+        if (duplicate) continue;
+        pathguard::policy_v6_view::PackageRef package;
+        if (!policy.PackageAt(package_index, &package)
+            || !pathguard::AppendPackageRuntimeActions(
+                policy, package, domain, capabilities, &status)) continue;
+        if (!have_plan_generation) {
+            aggregate_plan_generation = package.plan_generation;
+            have_plan_generation = true;
+        } else if (aggregate_plan_generation != package.plan_generation) {
+            mixed_plan_generations = true;
+        }
+    }
+    status.plan_generation = mixed_plan_generations ? 0
+                                                    : aggregate_plan_generation;
+    bool any_active = false;
+    bool any_unsupported = false;
+    for (uint32_t index = 0; index < status.action_count; ++index) {
+        any_active = any_active || status.actions[index].admission.active();
+        any_unsupported = any_unsupported
+            || status.actions[index].admission.state
+                == pathguard::ActionAdmissionState::kUnsupported;
+    }
+    status.enforcement = any_active ? pathguard::EnforcementState::kActive
+                                    : pathguard::EnforcementState::kInactive;
+    if (!any_active && status.action_total != 0) {
+        status.reason = any_unsupported
+            ? pathguard::RuntimeReason::kCapabilityMissing
+            : pathguard::RuntimeReason::kUnsupportedAction;
+    }
+    *output = status;
+    return true;
+}
+
+void WritePathRuntimeStatus(
+        int module_dir, const char* process_name, uid_t uid,
+        const PathPolicyMapping& mapping, pathguard::AdmissionDomain domain,
+        const pathguard::provider_redirect::InstallResult& installed) {
+    if (module_dir < 0 || process_name == nullptr) return;
+    pathguard::RuntimeStatusRecord status;
+    if (!BuildPathRuntimeStatus(
+            getpid(), uid, mapping, domain, installed, &status)) return;
+    WriteRuntimeStatusRecord(module_dir, process_name, status);
 }
 
 bool HasSafePathComponents(const char* path) {
@@ -948,9 +1007,10 @@ bool CaptureStorageTopologyFromSnapshot(
     return topology->generation != 0;
 }
 
-bool SameStorageTopology(const RuntimeStorageTopology& expected,
-                         const RuntimeStorageTopology& actual) {
-    return expected.generation != 0 && actual.generation != 0
+bool SameStoragePlane(const RuntimeStorageTopology& expected,
+                      const RuntimeStorageTopology& actual) {
+    return expected.generation != 0
+        && actual.generation != 0
         && expected.user_id == actual.user_id
         && strcmp(expected.visible_root, actual.visible_root) == 0
         && strcmp(expected.source_root, actual.source_root) == 0
@@ -962,6 +1022,12 @@ bool SameStorageTopology(const RuntimeStorageTopology& expected,
                   actual.visible_identity.filesystem) == 0
         && strcmp(expected.source_identity.filesystem,
                   actual.source_identity.filesystem) == 0;
+}
+
+bool SameStorageTopology(const RuntimeStorageTopology& expected,
+                         const RuntimeStorageTopology& actual) {
+    return expected.generation == actual.generation
+        && SameStoragePlane(expected, actual);
 }
 
 bool ReadProcessUid(pid_t pid, uid_t expected_uid) {
@@ -1069,15 +1135,260 @@ const char* ReasonName(pathguard::RuntimeReason value) {
     return "preflight_failed";
 }
 
+const char* RuntimeActionKindName(pathguard::RuntimeActionKind value) {
+    switch (value) {
+        case pathguard::RuntimeActionKind::kUnknown: return "unknown";
+        case pathguard::RuntimeActionKind::kDeny: return "deny";
+        case pathguard::RuntimeActionKind::kRedirect: return "redirect";
+        case pathguard::RuntimeActionKind::kObserve: return "observe";
+        case pathguard::RuntimeActionKind::kExport: return "export";
+    }
+    return "unknown";
+}
+
+const char* AdmissionDomainName(pathguard::AdmissionDomain value) {
+    switch (value) {
+        case pathguard::AdmissionDomain::kMount: return "mount";
+        case pathguard::AdmissionDomain::kAppPath: return "app_path";
+        case pathguard::AdmissionDomain::kProvider: return "provider";
+        case pathguard::AdmissionDomain::kCompleteVfs: return "complete_vfs";
+        case pathguard::AdmissionDomain::kEvent: return "event";
+    }
+    return "unknown";
+}
+
+const char* AdmissionStateName(pathguard::ActionAdmissionState value) {
+    switch (value) {
+        case pathguard::ActionAdmissionState::kInactive: return "inactive";
+        case pathguard::ActionAdmissionState::kActive: return "active";
+        case pathguard::ActionAdmissionState::kUnsupported: return "unsupported";
+    }
+    return "inactive";
+}
+
+const char* AdmissionReasonName(pathguard::ActionAdmissionReason value) {
+    switch (value) {
+        case pathguard::ActionAdmissionReason::kNone: return "none";
+        case pathguard::ActionAdmissionReason::kIntentDisabled: return "intent_disabled";
+        case pathguard::ActionAdmissionReason::kGenerationStale: return "generation_stale";
+        case pathguard::ActionAdmissionReason::kAdapterInactive: return "adapter_inactive";
+        case pathguard::ActionAdmissionReason::kAdapterUnsupported: return "adapter_unsupported";
+        case pathguard::ActionAdmissionReason::kCapabilityMissing: return "capability_missing";
+        case pathguard::ActionAdmissionReason::kOperationMissing: return "operation_missing";
+    }
+    return "adapter_inactive";
+}
+
+bool FormatRuntimeStatusRecord(
+        const char* process_name, const pathguard::RuntimeStatusRecord& status,
+        char* text, size_t capacity, size_t* output_length) {
+    if (status.pid <= 0 || process_name == nullptr || text == nullptr
+        || capacity == 0 || output_length == nullptr) return false;
+    int length = snprintf(
+        text, capacity,
+        "schema=pathguard.runtime_status.v2\nversion=%u\npid=%d\nuid=%u\n"
+        "process_start_time=%llu\nprocess=%s\n"
+        "enforcement=%s\nbackend=%u\ntransaction=%s\nsecurity=%s\nreason=%s\n"
+        "error=%d\ncontent_generation=%llu\nsnapshot_generation=%llu\n"
+        "plan_generation=%llu\ncapability_generation=%llu\n"
+        "topology_generation=%llu\nobserved_capabilities=%llu\n"
+        "action_count=%u\naction_total=%u\nactions_truncated=%s\n"
+        "hazard_slot_acquire_fail_total=%llu\n"
+        "hazard_slots_in_use_high_watermark=%u\n"
+        "snapshot_reload_rejected_retire_limit_total=%llu\n"
+        "retired_snapshot_count_high_watermark=%u\n"
+        "retired_snapshot_bytes_high_watermark=%llu\n"
+        "event_overflow_total=%llu\ndiagnostic_drop_total=%llu\n",
+        status.version, status.pid, status.uid,
+        static_cast<unsigned long long>(status.process_start_time), process_name,
+        EnforcementName(status.enforcement), status.backend,
+        TransactionName(status.transaction), SecurityName(status.security),
+        ReasonName(status.reason), status.error,
+        static_cast<unsigned long long>(status.content_generation),
+        static_cast<unsigned long long>(status.snapshot_generation),
+        static_cast<unsigned long long>(status.plan_generation),
+        static_cast<unsigned long long>(status.capability_generation),
+        static_cast<unsigned long long>(status.topology_generation),
+        static_cast<unsigned long long>(status.observed_capabilities),
+        status.action_count, status.action_total,
+        status.actions_truncated ? "true" : "false",
+        static_cast<unsigned long long>(
+            status.counters.hazard_slot_acquire_fail_total),
+        status.counters.hazard_slots_in_use_high_watermark,
+        static_cast<unsigned long long>(
+            status.counters.snapshot_reload_rejected_retire_limit_total),
+        status.counters.retired_snapshot_count_high_watermark,
+        static_cast<unsigned long long>(
+            status.counters.retired_snapshot_bytes_high_watermark),
+        static_cast<unsigned long long>(status.counters.event_overflow_total),
+        static_cast<unsigned long long>(status.counters.diagnostic_drop_total));
+    bool formatted = length > 0 && static_cast<size_t>(length) < capacity;
+    size_t offset = formatted ? static_cast<size_t>(length) : 0;
+    for (uint32_t index = 0; formatted && index < status.action_count; ++index) {
+        const pathguard::RuntimeActionStatus& action = status.actions[index];
+        const pathguard::ActionAdmission& admission = action.admission;
+        length = snprintf(
+            text + offset, capacity - offset,
+            "action.%u.kind=%s\naction.%u.domain=%s\n"
+            "action.%u.intent=%s\naction.%u.action_mask=%llu\n"
+            "action.%u.rule_id=%llu\naction.%u.selector_id=%u\n"
+            "action.%u.conflict_id=%llu\naction.%u.admission=%s\n"
+            "action.%u.admission_reason=%s\n"
+            "action.%u.required_capabilities=%llu\n"
+            "action.%u.observed_capabilities=%llu\n"
+            "action.%u.missing_capabilities=%llu\n"
+            "action.%u.required_operations=%llu\n"
+            "action.%u.observed_operations=%llu\n"
+            "action.%u.missing_operations=%llu\n"
+            "action.%u.capability_generation=%llu\n"
+            "action.%u.plan_generation=%llu\naction.%u.probe_error=%d\n",
+            index, RuntimeActionKindName(action.kind),
+            index, AdmissionDomainName(action.domain),
+            index, action.intent_enabled ? "enabled" : "disabled",
+            index, static_cast<unsigned long long>(action.action_mask),
+            index, static_cast<unsigned long long>(action.rule_id),
+            index, action.selector_id,
+            index, static_cast<unsigned long long>(action.conflict_id),
+            index, AdmissionStateName(admission.state),
+            index, AdmissionReasonName(admission.reason),
+            index, static_cast<unsigned long long>(admission.required_capabilities),
+            index, static_cast<unsigned long long>(admission.observed_capabilities),
+            index, static_cast<unsigned long long>(admission.missing_capabilities),
+            index, static_cast<unsigned long long>(admission.required_operations),
+            index, static_cast<unsigned long long>(admission.observed_operations),
+            index, static_cast<unsigned long long>(admission.missing_operations),
+            index, static_cast<unsigned long long>(admission.capability_generation),
+            index, static_cast<unsigned long long>(admission.plan_generation),
+            index, admission.probe_error);
+        formatted = length > 0 && static_cast<size_t>(length) < capacity - offset;
+        if (formatted) offset += static_cast<size_t>(length);
+    }
+    if (formatted) *output_length = offset;
+    return formatted;
+}
+
+bool WriteRuntimeStatusText(int module_dir_fd, pid_t pid,
+                            const char* text, size_t length) {
+    if (module_dir_fd < 0 || pid <= 0 || text == nullptr || length == 0
+        || length > kMaxRuntimeStatusBytes) return false;
+    if (mkdirat(module_dir_fd, "run/status", 0755) != 0 && errno != EEXIST) {
+        return false;
+    }
+    char temporary[96]{};
+    char final_path[64]{};
+    snprintf(temporary, sizeof(temporary), "run/status/.%d.%d.tmp",
+             pid, getpid());
+    snprintf(final_path, sizeof(final_path), "run/status/%d.status", pid);
+    const int output = openat(module_dir_fd, temporary,
+                              O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (output < 0) return false;
+    const bool written = WriteRegularFileFully(output, text, length);
+    close(output);
+    const bool installed = written && renameat(
+        module_dir_fd, temporary, module_dir_fd, final_path) == 0;
+    if (!installed) {
+        unlinkat(module_dir_fd, temporary, 0);
+        return false;
+    }
+
+    const int status_dir = openat(module_dir_fd, "run/status",
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC
+                                      | O_NOFOLLOW);
+    if (status_dir < 0) return true;
+    DIR* directory = fdopendir(status_dir);
+    if (directory == nullptr) {
+        close(status_dir);
+        return true;
+    }
+    while (dirent* entry = readdir(directory)) {
+        if (entry->d_name[0] < '1' || entry->d_name[0] > '9') continue;
+        errno = 0;
+        char* suffix = nullptr;
+        const long candidate = strtol(entry->d_name, &suffix, 10);
+        if (errno != 0 || candidate <= 0 || candidate > INT_MAX
+            || suffix == entry->d_name || strcmp(suffix, ".status") != 0
+            || candidate == pid) {
+            continue;
+        }
+        uint64_t process_start_time = 0;
+        if (!ReadProcessStartTime(
+                static_cast<pid_t>(candidate), &process_start_time)) {
+            unlinkat(dirfd(directory), entry->d_name, 0);
+        }
+    }
+    closedir(directory);
+    return true;
+}
+
+void WriteRuntimeStatusRecord(int module_dir_fd, const char* process_name,
+                              const pathguard::RuntimeStatusRecord& status) {
+    char text[kMaxRuntimeStatusBytes]{};
+    size_t length = 0;
+    if (FormatRuntimeStatusRecord(
+            process_name, status, text, sizeof(text), &length)) {
+        WriteRuntimeStatusText(module_dir_fd, status.pid, text, length);
+    }
+}
+
+bool PublishRuntimeStatusRecord(SharedRuntimeStatus* shared,
+                                const char* process_name,
+                                const pathguard::RuntimeStatusRecord& status) {
+    if (shared == nullptr || process_name == nullptr
+        || shared->magic != kSharedStatusMagic
+        || shared->version != kSharedStatusVersion) return false;
+    const size_t process_name_length = strlen(process_name);
+    if (process_name_length == 0 || process_name_length >= kMaxProcessNameBytes) {
+        return false;
+    }
+    size_t status_length = 0;
+    if (!FormatRuntimeStatusRecord(
+            process_name, status, shared->text, sizeof(shared->text),
+            &status_length)) {
+        return false;
+    }
+    memcpy(shared->process_name, process_name, process_name_length);
+    shared->process_name[process_name_length] = '\0';
+    shared->process_name_length = static_cast<uint32_t>(process_name_length);
+    shared->status_length = static_cast<uint32_t>(status_length);
+    __atomic_store_n(&shared->state, 1u, __ATOMIC_RELEASE);
+    syscall(SYS_futex, &shared->state, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+    return true;
+}
+
+void CancelRuntimeStatus(SharedRuntimeStatus* shared) {
+    if (shared == nullptr) return;
+    __atomic_store_n(&shared->state, 2u, __ATOMIC_RELEASE);
+    syscall(SYS_futex, &shared->state, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+}
+
 void WriteRuntimeStatus(int module_dir_fd, pid_t pid, uid_t uid,
                         const ProcessPlan& plan, const MountPerfResult& mount,
                         MountState state) {
     if (module_dir_fd < 0 || pid <= 0) return;
     pathguard::RuntimeStatusRecord status;
+    bool app_path_policy_loaded = false;
+    bool app_path_status_built = false;
+    if (plan.app_path_status_available) {
+        PathPolicyMapping mapping;
+        app_path_policy_loaded = LoadAppPathPolicy(
+                module_dir_fd, plan.process_name, static_cast<jint>(uid),
+                &mapping);
+        if (app_path_policy_loaded) {
+            app_path_status_built = BuildPathRuntimeStatus(
+                pid, uid, mapping, pathguard::AdmissionDomain::kAppPath,
+                plan.app_path_install, &status);
+            ReleasePathPolicy(&mapping);
+        }
+    }
+    LOGI("runtime status merge: pid=%d app_path_available=%d policy_loaded=%d built=%d actions=%u/%u",
+         pid, plan.app_path_status_available ? 1 : 0,
+         app_path_policy_loaded ? 1 : 0, app_path_status_built ? 1 : 0,
+         status.action_count, status.action_total);
     status.pid = pid;
     status.uid = uid;
     ReadProcessStartTime(pid, &status.process_start_time);
     status.snapshot_generation = plan.snapshot_generation;
+    status.content_generation = plan.snapshot_generation;
     status.plan_generation = plan.plan_generation;
     status.topology_generation = plan.topology.generation;
     status.backend = static_cast<uint8_t>(mount.backend);
@@ -1125,36 +1436,7 @@ void WriteRuntimeStatus(int module_dir_fd, pid_t pid, uid_t uid,
         status.reason = pathguard::RuntimeReason::kPreflightFailed;
     }
     status.error = mount.result;
-
-    if (mkdirat(module_dir_fd, "run/status", 0755) != 0 && errno != EEXIST) return;
-    char temporary[96]{};
-    char final_path[64]{};
-    snprintf(temporary, sizeof(temporary), "run/status/.%d.%d.tmp", pid, getpid());
-    snprintf(final_path, sizeof(final_path), "run/status/%d.status", pid);
-    const int output = openat(module_dir_fd, temporary,
-                              O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (output < 0) return;
-    char text[1536]{};
-    const int length = snprintf(
-        text, sizeof(text),
-        "version=1\npid=%d\nuid=%u\nprocess_start_time=%llu\nprocess=%s\n"
-        "enforcement=%s\nbackend=%u\ntransaction=%s\nsecurity=%s\nreason=%s\n"
-        "error=%d\nsnapshot_generation=%llu\nplan_generation=%llu\n"
-        "topology_generation=%llu\n",
-        pid, uid, static_cast<unsigned long long>(status.process_start_time),
-        plan.process_name, EnforcementName(status.enforcement), status.backend,
-        TransactionName(status.transaction), SecurityName(status.security),
-        ReasonName(status.reason), status.error,
-        static_cast<unsigned long long>(status.snapshot_generation),
-        static_cast<unsigned long long>(status.plan_generation),
-        static_cast<unsigned long long>(status.topology_generation));
-    const bool written = length > 0 && static_cast<size_t>(length) < sizeof(text)
-        && WriteRegularFileFully(output, text, static_cast<size_t>(length));
-    close(output);
-    if (!written || renameat(module_dir_fd, temporary,
-                             module_dir_fd, final_path) != 0) {
-        unlinkat(module_dir_fd, temporary, 0);
-    }
+    WriteRuntimeStatusRecord(module_dir_fd, plan.process_name, status);
 }
 
 uint32_t StateValue(MountState state) {
@@ -1516,6 +1798,17 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
         perf.result = error;
         return perf;
     };
+    RuntimeStorageTopology transaction_topology;
+    const uint64_t initial_topology_started = pathguard::perf::NowNs();
+    const bool initial_topology_valid = CaptureStorageTopologyFromSnapshot(
+        uid, plan.topology.source_root, current_mounts, &transaction_topology)
+        && SameStoragePlane(plan.topology, transaction_topology);
+    perf.topology_ns = pathguard::perf::ElapsedNs(initial_topology_started);
+    if (!initial_topology_valid) {
+        perf.runtime_reason = static_cast<uint32_t>(
+            pathguard::RuntimeReason::kTopologyChanged);
+        return finish_preflight(ESTALE);
+    }
     const uint64_t src_pin_started = pathguard::perf::NowNs();
     for (size_t rule_index = 0; rule_index < plan.count; ++rule_index) {
         const char* visible_path = PlanPath(
@@ -1599,10 +1892,21 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
     bool lease_topology_valid = false;
     if (lease_policy_valid) {
         const uint64_t topology_started = pathguard::perf::NowNs();
-        lease_topology_valid = CaptureStorageTopologyFromSnapshot(
-            uid, plan.topology.source_root, current_mounts, &lease_topology)
-            && SameStorageTopology(plan.topology, lease_topology);
-        perf.topology_ns = pathguard::perf::ElapsedNs(topology_started);
+        pathguard::MountInfoSnapshot lease_mounts;
+        const int lease_snapshot_error = pathguard::CaptureMountInfoSnapshot(
+            &lease_mounts);
+        if (lease_snapshot_error == 0) {
+            ++perf.mountinfo_snapshot_count;
+            perf.mountinfo_read_ns += lease_mounts.read_ns;
+            perf.mountinfo_parse_ns += lease_mounts.parse_ns;
+        }
+        lease_topology_valid = lease_snapshot_error == 0
+            && pathguard::MountInfoSnapshotMatchesCurrentNamespace(lease_mounts)
+            && CaptureStorageTopologyFromSnapshot(
+                uid, plan.topology.source_root, lease_mounts, &lease_topology)
+            && SameStorageTopology(transaction_topology, lease_topology);
+        pathguard::DestroyMountInfoSnapshot(&lease_mounts);
+        perf.topology_ns += pathguard::perf::ElapsedNs(topology_started);
     }
     if (!lease_process_valid || !lease_policy_valid || !lease_topology_valid) {
         perf.result = ESTALE;
@@ -2048,6 +2352,69 @@ SharedMountState* MapSharedState(int shared_fd) {
     return state;
 }
 
+SharedRuntimeStatus* CreateSharedRuntimeStatus(int* shared_fd) {
+    if (shared_fd == nullptr) return nullptr;
+    *shared_fd = static_cast<int>(syscall(
+        SYS_memfd_create, "pathguard-status", MFD_CLOEXEC));
+    if (*shared_fd < 0
+        || ftruncate(*shared_fd, sizeof(SharedRuntimeStatus)) != 0) {
+        if (*shared_fd >= 0) close(*shared_fd);
+        *shared_fd = -1;
+        return nullptr;
+    }
+    void* mapping = mmap(nullptr, sizeof(SharedRuntimeStatus),
+                         PROT_READ | PROT_WRITE, MAP_SHARED, *shared_fd, 0);
+    if (mapping == MAP_FAILED) {
+        close(*shared_fd);
+        *shared_fd = -1;
+        return nullptr;
+    }
+    auto* state = static_cast<SharedRuntimeStatus*>(mapping);
+    memset(state, 0, sizeof(*state));
+    state->magic = kSharedStatusMagic;
+    state->version = kSharedStatusVersion;
+    return state;
+}
+
+SharedRuntimeStatus* MapSharedRuntimeStatus(int shared_fd) {
+    struct stat file_stat {};
+    if (shared_fd < 0 || fstat(shared_fd, &file_stat) != 0
+        || file_stat.st_size
+            != static_cast<off_t>(sizeof(SharedRuntimeStatus))) {
+        return nullptr;
+    }
+    void* mapping = mmap(nullptr, sizeof(SharedRuntimeStatus),
+                         PROT_READ | PROT_WRITE, MAP_SHARED, shared_fd, 0);
+    if (mapping == MAP_FAILED) return nullptr;
+    auto* state = static_cast<SharedRuntimeStatus*>(mapping);
+    if (state->magic != kSharedStatusMagic
+        || state->version != kSharedStatusVersion) {
+        munmap(state, sizeof(*state));
+        return nullptr;
+    }
+    return state;
+}
+
+bool WaitForRuntimeStatus(SharedRuntimeStatus* state, int timeout_ms) {
+    if (state == nullptr || timeout_ms <= 0) return false;
+    const uint64_t deadline = pathguard::perf::NowNs()
+        + static_cast<uint64_t>(timeout_ms) * 1000000u;
+    while (true) {
+        const uint32_t current = __atomic_load_n(&state->state, __ATOMIC_ACQUIRE);
+        if (current == 1u) return true;
+        if (current != 0u) return false;
+        const uint64_t now = pathguard::perf::NowNs();
+        if (now >= deadline) return false;
+        const uint64_t remaining = deadline - now;
+        const timespec timeout{
+            static_cast<time_t>(remaining / 1000000000u),
+            static_cast<long>(remaining % 1000000000u),
+        };
+        syscall(SYS_futex, &state->state, FUTEX_WAIT, 0u,
+                &timeout, nullptr, 0);
+    }
+}
+
 bool WaitForSharedResult(SharedMountState* state, int timeout_ms) {
     uint64_t deadline = pathguard::perf::NowNs()
         + static_cast<uint64_t>(timeout_ms) * 1000000u;
@@ -2141,8 +2508,10 @@ bool SendPlanWithSharedFd(int fd, jint uid, const ProcessPlan& plan,
     header.snapshot_generation = plan.snapshot_generation;
     header.plan_generation = plan.plan_generation;
     header.process_name_length = static_cast<uint32_t>(strlen(plan.process_name));
-    header.compat_flags = (plan.media_compat ? 1u : 0u)
-        | (plan.provider_compat ? 2u : 0u);
+    header.feature_flags = plan.provider_enabled
+        ? kBootstrapFeatureProviderEnabled : 0u;
+    header.app_path_install = EncodePathInstallTelemetry(
+        plan.app_path_install, plan.app_path_status_available);
     int descriptors[2] = {shared_fd, module_dir_fd};
     char control[CMSG_SPACE(sizeof(descriptors))]{};
     iovec header_iov{&header, sizeof(header)};
@@ -2177,6 +2546,32 @@ bool SendPlanWithSharedFd(int fd, jint uid, const ProcessPlan& plan,
     return true;
 }
 
+bool SendRuntimeStatusBootstrap(int fd, uid_t uid, int shared_fd,
+                                int module_dir_fd) {
+    if (fd < 0 || shared_fd < 0 || module_dir_fd < 0) return false;
+    StatusSubmissionHeader header;
+    header.pid = getpid();
+    header.uid = uid;
+    if (!ReadProcessStartTime(header.pid, &header.process_start_time)) {
+        return false;
+    }
+    int descriptors[2] = {shared_fd, module_dir_fd};
+    char control[CMSG_SPACE(sizeof(descriptors))]{};
+    iovec header_iov{&header, sizeof(header)};
+    msghdr message{};
+    message.msg_iov = &header_iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
+    cmsghdr* descriptor = CMSG_FIRSTHDR(&message);
+    descriptor->cmsg_level = SOL_SOCKET;
+    descriptor->cmsg_type = SCM_RIGHTS;
+    descriptor->cmsg_len = CMSG_LEN(sizeof(descriptors));
+    memcpy(CMSG_DATA(descriptor), descriptors, sizeof(descriptors));
+    return sendmsg(fd, &message, MSG_NOSIGNAL)
+        == static_cast<ssize_t>(sizeof(header));
+}
+
 bool ReceiveBootstrap(int fd, BootstrapHeader* header, int* shared_fd,
                       int* module_dir_fd) {
     if (header == nullptr || shared_fd == nullptr || module_dir_fd == nullptr) {
@@ -2194,6 +2589,38 @@ bool ReceiveBootstrap(int fd, BootstrapHeader* header, int* shared_fd,
     message.msg_controllen = sizeof(control);
     const ssize_t received = recvmsg(fd, &message, MSG_WAITALL);
     if (received != static_cast<ssize_t>(sizeof(*header))) return false;
+    for (cmsghdr* descriptor = CMSG_FIRSTHDR(&message); descriptor != nullptr;
+         descriptor = CMSG_NXTHDR(&message, descriptor)) {
+        if (descriptor->cmsg_level == SOL_SOCKET
+            && descriptor->cmsg_type == SCM_RIGHTS
+            && descriptor->cmsg_len >= CMSG_LEN(sizeof(descriptors))) {
+            memcpy(descriptors, CMSG_DATA(descriptor), sizeof(descriptors));
+            *shared_fd = descriptors[0];
+            *module_dir_fd = descriptors[1];
+            break;
+        }
+    }
+    return *shared_fd >= 0 && *module_dir_fd >= 0;
+}
+
+bool ReceiveRuntimeStatusBootstrap(
+        int fd, StatusSubmissionHeader* header,
+        int* shared_fd, int* module_dir_fd) {
+    if (header == nullptr || shared_fd == nullptr || module_dir_fd == nullptr) {
+        return false;
+    }
+    *shared_fd = -1;
+    *module_dir_fd = -1;
+    int descriptors[2] = {-1, -1};
+    char control[CMSG_SPACE(sizeof(descriptors))]{};
+    iovec header_iov{header, sizeof(*header)};
+    msghdr message{};
+    message.msg_iov = &header_iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
+    if (recvmsg(fd, &message, MSG_WAITALL)
+        != static_cast<ssize_t>(sizeof(*header))) return false;
     for (cmsghdr* descriptor = CMSG_FIRSTHDR(&message); descriptor != nullptr;
          descriptor = CMSG_NXTHDR(&message, descriptor)) {
         if (descriptor->cmsg_level == SOL_SOCKET
@@ -2235,43 +2662,23 @@ public:
             PathPolicyMapping provider_policy;
             const bool loaded = module_dir >= 0
                 && LoadProviderPolicy(module_dir, &provider_policy);
-            if (module_dir >= 0) close(module_dir);
             env_->ReleaseStringUTFChars(args->nice_name, process_name);
             provider_redirect_required_ = loaded;
             provider_process_ = true;
+            provider_media_process_ = media_provider;
+            provider_uid_ = static_cast<uid_t>(args->uid);
             if (!loaded) {
+                if (module_dir >= 0) close(module_dir);
                 LOGI("provider redirect has no active rules");
                 Unload();
                 return;
             }
-            const pathguard::provider_redirect::PolicyConfig config{
-                static_cast<const uint8_t*>(provider_policy.mapping),
-                provider_policy.size,
-                provider_policy.scopes,
-                provider_policy.scope_count,
-                pathguard::AdmissionDomain::kProvider,
-                pathguard::provider_redirect::IdentityMode::kBinderCallerUid,
-            };
-            const pathguard::provider_redirect::InstallResult install_result =
-                pathguard::provider_redirect::Install(api_, env_, config);
-            provider_redirect_installed_ = install_result.virtualization_active;
-            provider_redirect_module_retained_ =
-                pathguard::provider_redirect::MustRetainModule(install_result);
-            if (provider_redirect_module_retained_) {
-                path_policy_ = provider_policy;
-            } else {
-                ReleasePathPolicy(&provider_policy);
-            }
-            LOGI("provider redirect specialize: process=%s scopes=%u caller_scope=binder_uid attempted=%d committed=%d installed=%d capabilities=%llx operations=%llx",
+            path_policy_ = provider_policy;
+            PrepareProviderRuntimeStatus(module_dir, provider_uid_);
+            if (module_dir >= 0) close(module_dir);
+            LOGI("provider redirect prepared: process=%s scopes=%u caller_scope=binder_uid",
                  media_provider ? "media" : "external_storage",
-                 config.scope_count,
-                 install_result.hook_registration_attempted ? 1 : 0,
-                 install_result.hooks_committed ? 1 : 0,
-                 provider_redirect_installed_ ? 1 : 0,
-                 static_cast<unsigned long long>(install_result.observed_capabilities),
-                 static_cast<unsigned long long>(install_result.observed_operations));
-            if (!provider_redirect_installed_
-                && !provider_redirect_module_retained_) Unload();
+                 provider_policy.scope_count);
             return;
         }
         const bool diagnostic = strcmp(process_name, kDiagnosticPackage) == 0;
@@ -2283,6 +2690,8 @@ public:
                                  &app_path_policy);
         const bool matched = module_dir >= 0
             && LoadProcessPlan(module_dir, process_name, args->uid, &plan, &policy_perf);
+        char process_name_copy[PATH_MAX]{};
+        snprintf(process_name_copy, sizeof(process_name_copy), "%s", process_name);
         env_->ReleaseStringUTFChars(args->nice_name, process_name);
         if (!matched && !app_path_loaded) {
             if (module_dir >= 0) close(module_dir);
@@ -2307,6 +2716,15 @@ public:
             provider_redirect_installed_ = install_result.virtualization_active;
             provider_redirect_module_retained_ =
                 pathguard::provider_redirect::MustRetainModule(install_result);
+            if (matched) {
+                plan.app_path_status_available = true;
+                plan.app_path_install = install_result;
+            } else {
+                WritePathRuntimeStatus(
+                    module_dir, process_name_copy, static_cast<uid_t>(args->uid),
+                    app_path_policy, pathguard::AdmissionDomain::kAppPath,
+                    install_result);
+            }
             if (provider_redirect_module_retained_) {
                 path_policy_ = app_path_policy;
             } else {
@@ -2326,7 +2744,7 @@ public:
             return;
         }
 
-        media_query_hook_required_ = plan.provider_compat;
+        media_query_hook_required_ = plan.provider_enabled;
         if (media_query_hook_required_) {
             bool has_deny = false;
             for (uint32_t index = 0; index < plan.count; ++index) {
@@ -2352,7 +2770,7 @@ public:
             LOGE("cannot connect companion socket");
             LogZygiskPrePerf(getpid(), args->uid, plan.count, policy_perf,
                              hook_ns, connect_ns, 0, pathguard::perf::ElapsedNs(pre_started),
-                             plan.media_compat, false, false);
+                             false, false, false);
             Unload();
             return;
         }
@@ -2373,7 +2791,7 @@ public:
             LogZygiskPrePerf(getpid(), args->uid, plan.count, policy_perf,
                              hook_ns, connect_ns, pathguard::perf::ElapsedNs(send_started),
                              pathguard::perf::ElapsedNs(pre_started),
-                             plan.media_compat, false, false);
+                             false, false, false);
             munmap(shared_state, sizeof(*shared_state));
             close(shared_fd);
             Unload();
@@ -2384,7 +2802,7 @@ public:
             LogZygiskPrePerf(getpid(), args->uid, plan.count, policy_perf,
                              hook_ns, connect_ns, pathguard::perf::ElapsedNs(send_started),
                              pathguard::perf::ElapsedNs(pre_started),
-                             plan.media_compat, plan.media_compat, true);
+                             false, false, true);
         }
         close(module_dir);
         close(companion_fd);
@@ -2392,6 +2810,7 @@ public:
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs*) override {
         if (provider_process_) {
+            InstallPreparedProviderHooks();
             if (!provider_redirect_installed_
                 && !provider_redirect_module_retained_) Unload();
             return;
@@ -2481,18 +2900,95 @@ public:
     void preServerSpecialize(zygisk::ServerSpecializeArgs*) override { Unload(); }
 
 private:
+    void PrepareProviderRuntimeStatus(int module_dir, uid_t uid) {
+        if (module_dir < 0) return;
+        const int companion = api_->connectCompanion();
+        if (companion < 0) {
+            LOGE("provider runtime status companion connection failed");
+            return;
+        }
+        SetSocketTimeout(companion, kCompanionIoTimeoutMs);
+        int shared_fd = -1;
+        SharedRuntimeStatus* shared = CreateSharedRuntimeStatus(&shared_fd);
+        if (shared == nullptr) {
+            LOGE("provider runtime status shared state creation failed");
+            close(companion);
+            return;
+        }
+        if (!SendRuntimeStatusBootstrap(companion, uid, shared_fd, module_dir)) {
+            LOGE("provider runtime status bootstrap failed");
+            CancelRuntimeStatus(shared);
+            munmap(shared, sizeof(*shared));
+        } else {
+            provider_status_shared_ = shared;
+        }
+        close(shared_fd);
+        close(companion);
+    }
+
+    void InstallPreparedProviderHooks() {
+        if (!provider_redirect_required_ || path_policy_.mapping == nullptr) {
+            return;
+        }
+        const pathguard::provider_redirect::PolicyConfig config{
+            static_cast<const uint8_t*>(path_policy_.mapping),
+            path_policy_.size,
+            path_policy_.scopes,
+            path_policy_.scope_count,
+            pathguard::AdmissionDomain::kProvider,
+            pathguard::provider_redirect::IdentityMode::kBinderCallerUid,
+        };
+        const pathguard::provider_redirect::InstallResult install_result =
+            pathguard::provider_redirect::Install(api_, env_, config);
+        provider_redirect_installed_ = install_result.virtualization_active;
+        provider_redirect_module_retained_ =
+            pathguard::provider_redirect::MustRetainModule(install_result);
+        const char* process_name = provider_media_process_
+            ? kMainlineMediaProviderProcess : kExternalStorageProviderProcess;
+        pathguard::RuntimeStatusRecord status;
+        const bool status_built = BuildPathRuntimeStatus(
+            getpid(), provider_uid_, path_policy_,
+            pathguard::AdmissionDomain::kProvider, install_result, &status);
+        const bool status_published = status_built
+            && PublishRuntimeStatusRecord(
+                provider_status_shared_, process_name, status);
+        if (!status_published) {
+            CancelRuntimeStatus(provider_status_shared_);
+            LOGE("provider runtime status submission failed: process=%s",
+                 provider_media_process_ ? "media" : "external_storage");
+        }
+        if (provider_status_shared_ != nullptr) {
+            munmap(provider_status_shared_, sizeof(*provider_status_shared_));
+            provider_status_shared_ = nullptr;
+        }
+        if (!provider_redirect_module_retained_) {
+            ReleasePathPolicy(&path_policy_);
+        }
+        LOGI("provider redirect post-specialize: process=%s scopes=%u caller_scope=binder_uid attempted=%d committed=%d installed=%d capabilities=%llx operations=%llx",
+             provider_media_process_ ? "media" : "external_storage",
+             config.scope_count,
+             install_result.hook_registration_attempted ? 1 : 0,
+             install_result.hooks_committed ? 1 : 0,
+             provider_redirect_installed_ ? 1 : 0,
+             static_cast<unsigned long long>(install_result.observed_capabilities),
+             static_cast<unsigned long long>(install_result.observed_operations));
+    }
+
     void Unload() { api_->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY); }
 
     zygisk::Api* api_ = nullptr;
     JNIEnv* env_ = nullptr;
     bool provider_redirect_required_ = false;
     bool provider_process_ = false;
+    bool provider_media_process_ = false;
     bool provider_redirect_installed_ = false;
     bool provider_redirect_module_retained_ = false;
+    uid_t provider_uid_ = 0;
     bool media_query_hook_installed_ = false;
     bool media_query_hook_required_ = false;
     bool mount_request_sent_ = false;
     SharedMountState* mount_shared_state_ = nullptr;
+    SharedRuntimeStatus* provider_status_shared_ = nullptr;
     ProcessPlan media_plan_;
     jint media_uid_ = 0;
     PathPolicyMapping path_policy_;
@@ -2531,6 +3027,61 @@ bool ForwardProvenanceRequest(int client) {
         == static_cast<ssize_t>(sizeof(response));
 }
 
+void ReceiveRuntimeStatusSubmission(int client) {
+    StatusSubmissionHeader header;
+    int shared_fd = -1;
+    int module_dir = -1;
+    if (!ReceiveRuntimeStatusBootstrap(
+            client, &header, &shared_fd, &module_dir)) {
+        if (shared_fd >= 0) close(shared_fd);
+        if (module_dir >= 0) close(module_dir);
+        LOGE("provider runtime status bootstrap receive failed");
+        return;
+    }
+    struct stat module_identity {};
+    const bool header_valid = header.magic == kStatusSubmissionMagic
+        && header.version == kStatusSubmissionVersion
+        && header.pid > 0 && header.uid >= 10000
+        && header.process_start_time != 0;
+    const bool module_valid = header_valid
+        && fstat(module_dir, &module_identity) == 0
+        && S_ISDIR(module_identity.st_mode)
+        && module_identity.st_uid == 0;
+    SharedRuntimeStatus* shared = module_valid
+        ? MapSharedRuntimeStatus(shared_fd) : nullptr;
+    close(shared_fd);
+    if (shared == nullptr) {
+        close(module_dir);
+        LOGE("provider runtime status bootstrap validation failed: pid=%d uid=%u",
+             header.pid, header.uid);
+        return;
+    }
+    const bool ready = WaitForRuntimeStatus(shared, kRuntimeStatusTimeoutMs);
+    const uint32_t process_name_length = shared->process_name_length;
+    const uint32_t status_length = shared->status_length;
+    uint64_t current_start_time = 0;
+    const bool payload_valid = ready
+        && process_name_length > 0
+        && process_name_length < kMaxProcessNameBytes
+        && status_length > 0 && status_length <= kMaxRuntimeStatusBytes
+        && shared->process_name[process_name_length] == '\0';
+    const bool identity_valid = payload_valid
+        && ReadProcessUid(header.pid, static_cast<uid_t>(header.uid))
+        && ReadProcessStartTime(header.pid, &current_start_time)
+        && current_start_time == header.process_start_time;
+    const bool written = identity_valid && WriteRuntimeStatusText(
+        module_dir, header.pid, shared->text, status_length);
+    if (written) {
+        LOGI("provider runtime status stored: pid=%d uid=%u process=%s bytes=%u",
+             header.pid, header.uid, shared->process_name, status_length);
+    } else {
+        LOGE("provider runtime status rejected: pid=%d uid=%u ready=%d identity=%d",
+             header.pid, header.uid, ready ? 1 : 0, identity_valid ? 1 : 0);
+    }
+    munmap(shared, sizeof(*shared));
+    close(module_dir);
+}
+
 void CompanionHandler(int client) {
     LOGI("companion_enter pid=%d", getpid());
     const uint64_t handler_started = pathguard::perf::NowNs();
@@ -2540,6 +3091,10 @@ void CompanionHandler(int client) {
             == static_cast<ssize_t>(sizeof(request_magic))
         && request_magic == pathguard::provenance_protocol::kMagic) {
         ForwardProvenanceRequest(client);
+        return;
+    }
+    if (request_magic == kStatusSubmissionMagic) {
+        ReceiveRuntimeStatusSubmission(client);
         return;
     }
     BootstrapHeader header{};
@@ -2555,7 +3110,11 @@ void CompanionHandler(int client) {
         || header.rule_count > kMaxMountRules
         || header.process_name_length == 0
         || header.process_name_length >= kMaxProcessNameBytes
-        || (header.compat_flags & ~3u) != 0
+        || (header.feature_flags & ~kBootstrapFeatureProviderEnabled) != 0
+        || (header.app_path_install.flags
+            & ~(kPathInstallAvailable | kPathInstallAttempted
+                | kPathInstallCommitted | kPathInstallActive
+                | kPathIdentityAttempted | kPathIdentityHooks)) != 0
         || (header.policy_flags
             & ~pathguard::binary_format::kPolicyFlagAllowLegacyStringBind) != 0) {
         if (shared_fd >= 0) close(shared_fd);
@@ -2573,8 +3132,11 @@ void CompanionHandler(int client) {
     plan.path_bytes = 1;
     plan.snapshot_generation = header.snapshot_generation;
     plan.plan_generation = header.plan_generation;
-    plan.media_compat = (header.compat_flags & 1u) != 0;
-    plan.provider_compat = (header.compat_flags & 2u) != 0;
+    plan.provider_enabled =
+        (header.feature_flags & kBootstrapFeatureProviderEnabled) != 0;
+    plan.app_path_status_available =
+        (header.app_path_install.flags & kPathInstallAvailable) != 0;
+    plan.app_path_install = DecodePathInstallTelemetry(header.app_path_install);
     if (!ReadFully(client, plan.process_name, header.process_name_length)) {
         close(module_dir_fd);
         munmap(state, sizeof(*state));

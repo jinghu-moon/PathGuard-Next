@@ -277,7 +277,13 @@ bool NormalizePolicy(const PolicyV6& input, PolicyV6* output, std::string* error
                 || action.kind == PolicyActionKind::kRedirect;
             const bool event_action = action.kind == PolicyActionKind::kObserve
                 || action.kind == PolicyActionKind::kExport;
-            if ((action.domain == PolicyExecutionDomain::kMount
+            const bool known_domain = action.domain == PolicyExecutionDomain::kMount
+                || action.domain == PolicyExecutionDomain::kAppPath
+                || action.domain == PolicyExecutionDomain::kProvider
+                || action.domain == PolicyExecutionDomain::kCompleteVfs
+                || action.domain == PolicyExecutionDomain::kEvent;
+            if (!known_domain
+                || (action.domain == PolicyExecutionDomain::kMount
                  && (!path_action || package.selectors[action.selector_index].match_kind != PolicyMatchKind::kLiteralPrefix))
                 || (action.domain == PolicyExecutionDomain::kEvent && !event_action)
                 || (action.domain != PolicyExecutionDomain::kEvent && !path_action)) {

@@ -6,8 +6,6 @@
 #include <string>
 #include <vector>
 
-#include "pathguard/binary.h"
-#include "pathguard/policy.h"
 #include "pathguard/policy_v6.h"
 #include "pathguard/rules/diagnostic.h"
 #include "pathguard/rules/semantic.h"
@@ -23,7 +21,81 @@ static bool Read(const fs::path& path, std::string* out) {
     return true;
 }
 
-static int PrintStatus(const fs::path& module_dir, const char* pid) {
+static std::string JsonEscape(std::string_view value) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string output;
+    output.reserve(value.size() + 2);
+    output.push_back('"');
+    for (const unsigned char byte : value) {
+        switch (byte) {
+            case '"': output.append("\\\""); break;
+            case '\\': output.append("\\\\"); break;
+            case '\b': output.append("\\b"); break;
+            case '\f': output.append("\\f"); break;
+            case '\n': output.append("\\n"); break;
+            case '\r': output.append("\\r"); break;
+            case '\t': output.append("\\t"); break;
+            default:
+                if (byte < 0x20) {
+                    output.append("\\u00");
+                    output.push_back(kHex[byte >> 4U]);
+                    output.push_back(kHex[byte & 0x0fU]);
+                } else {
+                    output.push_back(static_cast<char>(byte));
+                }
+                break;
+        }
+    }
+    output.push_back('"');
+    return output;
+}
+
+static bool IsJsonInteger(std::string_view value) {
+    if (value.empty()) return false;
+    std::size_t offset = value.front() == '-' ? 1 : 0;
+    if (offset == value.size()) return false;
+    if (value[offset] == '0') return offset + 1 == value.size();
+    if (value[offset] < '1' || value[offset] > '9') return false;
+    for (++offset; offset < value.size(); ++offset) {
+        if (value[offset] < '0' || value[offset] > '9') return false;
+    }
+    return true;
+}
+
+static std::string StatusTextToJson(std::string_view text) {
+    std::string output = "{";
+    bool first = true;
+    std::size_t begin = 0;
+    while (begin <= text.size()) {
+        const std::size_t newline = text.find('\n', begin);
+        const std::size_t end = newline == std::string_view::npos
+            ? text.size() : newline;
+        std::string_view line = text.substr(begin, end - begin);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        const std::size_t equals = line.find('=');
+        if (equals != std::string_view::npos && equals != 0) {
+            const std::string_view key = line.substr(0, equals);
+            const std::string_view value = line.substr(equals + 1);
+            if (!first) output.push_back(',');
+            first = false;
+            output.append(JsonEscape(key));
+            output.push_back(':');
+            if (IsJsonInteger(value) || value == "true" || value == "false"
+                || value == "null") {
+                output.append(value);
+            } else {
+                output.append(JsonEscape(value));
+            }
+        }
+        if (newline == std::string_view::npos) break;
+        begin = newline + 1;
+    }
+    output.push_back('}');
+    return output;
+}
+
+static int PrintStatus(const fs::path& module_dir, const char* pid,
+                       bool json) {
     const fs::path directory = module_dir / "run" / "status";
     if (pid != nullptr) {
         std::string text;
@@ -31,7 +103,39 @@ static int PrintStatus(const fs::path& module_dir, const char* pid) {
             std::cerr << "status not found\n";
             return 1;
         }
-        std::cout << text;
+        std::cout << (json ? StatusTextToJson(text) : text);
+        if (json) std::cout << '\n';
+        return 0;
+    }
+    if (json) {
+        std::string rules_json;
+        const bool has_rules = Read(module_dir / "run" / "rules-status.json",
+                                    &rules_json);
+        std::error_code error;
+        std::vector<fs::path> entries;
+        if (fs::is_directory(directory, error)) {
+            for (const fs::directory_entry& entry :
+                 fs::directory_iterator(directory, error)) {
+                if (entry.is_regular_file()
+                    && entry.path().extension() == ".status") {
+                    entries.push_back(entry.path());
+                }
+            }
+        }
+        if (error) return 1;
+        std::sort(entries.begin(), entries.end());
+        std::cout << "{\"schema\":\"pathguard.status.v1\",\"rules\":";
+        std::cout << (has_rules ? rules_json : "null");
+        std::cout << ",\"processes\":[";
+        bool first = true;
+        for (const fs::path& entry : entries) {
+            std::string text;
+            if (!Read(entry, &text)) continue;
+            if (!first) std::cout << ',';
+            first = false;
+            std::cout << StatusTextToJson(text);
+        }
+        std::cout << "]}\n";
         return 0;
     }
     std::string rules_status;
@@ -181,8 +285,14 @@ static const char* ChangeName(pathguard::rules::PolicyChangeKind kind) {
 }
 
 static const char* RuleName(pathguard::rules::PolicyRuleKind kind) {
-    return kind == pathguard::rules::PolicyRuleKind::kDeny
-        ? "deny" : "redirect";
+    using pathguard::rules::PolicyRuleKind;
+    switch (kind) {
+        case PolicyRuleKind::kDeny: return "deny";
+        case PolicyRuleKind::kRedirect: return "redirect";
+        case PolicyRuleKind::kObserve: return "observe";
+        case PolicyRuleKind::kExport: return "export";
+    }
+    return "unknown";
 }
 
 static int PlanRulesFiles(const fs::path& before_path,
@@ -213,7 +323,7 @@ static int PlanRulesFiles(const fs::path& before_path,
         return 1;
     }
     for (const PolicyChange& change :
-         BuildPolicyPlan(*before.canonical, *after.canonical)) {
+         BuildPolicyPlan(*before.canonical_v2, *after.canonical_v2)) {
         std::cout << ChangeName(change.kind) << ' ' << change.package << ' '
                   << RuleName(change.rule_kind) << ' ' << change.source;
         if (!change.before_target.empty()) {
@@ -239,12 +349,12 @@ static int ExplainRulesPath(const fs::path& rules_path,
         std::cerr << (error.empty() ? "invalid rules.toml" : error) << '\n';
         return 1;
     }
-    if (!result.resolved.has_value()) {
+    if (!result.canonical_v2.has_value()) {
         PrintDiagnostics(result, *source);
         return 1;
     }
     const PathExplanation explanation = ExplainPath(
-        *result.resolved, package, path, RulesLimits{});
+        *result.canonical_v2, package, path, RulesLimits{});
     std::cout << "package=" << explanation.package
               << "\npath=" << explanation.query << '\n';
     if (!explanation.source.has_value()) {
@@ -363,7 +473,8 @@ static std::string RenderPattern(
     return output;
 }
 
-static int ExplainPolicy(const fs::path& policy, const std::string& package) {
+static int ExplainPolicy(const fs::path& policy, const std::string& package,
+                         bool json) {
     std::string raw;
     if (!Read(policy, &raw)) {
         std::cerr << "cannot read policy.bin\n";
@@ -384,6 +495,63 @@ static int ExplainPolicy(const fs::path& policy, const std::string& package) {
         for (const auto& action : app.actions) {
             capability_union |= action.required_capabilities;
             operation_union |= action.required_operations;
+        }
+        if (json) {
+            std::cout << "{\"schema\":\"pathguard.explain.v1\",\"package\":"
+                      << JsonEscape(app.package)
+                      << ",\"content_generation\":" << decoded.content_generation
+                      << ",\"plan_generation\":" << app.plan_generation
+                      << ",\"provider_intent\":"
+                      << (app.provider_enabled ? "true" : "false")
+                      << ",\"required_capabilities_union\":"
+                      << capability_union
+                      << ",\"required_operations_union\":"
+                      << operation_union
+                      << ",\"admission\":\"not_evaluated\",\"actions\":[";
+            bool first_action = true;
+            for (const pathguard::PolicyActionV6& action : app.actions) {
+                if (action.selector_index >= app.selectors.size()) {
+                    std::cerr << "invalid selector reference\n";
+                    return 1;
+                }
+                const auto& selector = app.selectors[action.selector_index];
+                if (!first_action) std::cout << ',';
+                first_action = false;
+                std::cout << "{\"action\":" << JsonEscape(ActionName(action.kind))
+                          << ",\"domain\":" << JsonEscape(DomainName(action.domain))
+                          << ",\"rule_id\":" << action.rule_id
+                          << ",\"selector_id\":" << action.selector_index
+                          << ",\"root\":" << JsonEscape(selector.root)
+                          << ",\"object_type\":"
+                          << static_cast<unsigned>(selector.object_type)
+                          << ",\"match_kind\":"
+                          << JsonEscape(selector.match_kind
+                                  == pathguard::PolicyMatchKind::kGlob
+                              ? "glob" : "literal_prefix");
+                if (selector.match_kind == pathguard::PolicyMatchKind::kGlob) {
+                    std::cout << ",\"glob\":"
+                              << JsonEscape(RenderPattern(selector.base_pattern))
+                              << ",\"except\":[";
+                    bool first_except = true;
+                    for (const auto& except : selector.except_patterns) {
+                        if (!first_except) std::cout << ',';
+                        first_except = false;
+                        std::cout << JsonEscape(RenderPattern(except));
+                    }
+                    std::cout << ']';
+                }
+                if (!action.target.empty()) {
+                    std::cout << ",\"target\":" << JsonEscape(action.target);
+                }
+                std::cout << ",\"priority\":" << action.priority
+                          << ",\"required_capabilities\":"
+                          << action.required_capabilities
+                          << ",\"required_operations\":"
+                          << action.required_operations
+                          << ",\"options\":" << action.options << '}';
+            }
+            std::cout << "]}\n";
+            return 0;
         }
         std::cout << "package=" << app.package
                   << "\ncontent_generation=" << decoded.content_generation
@@ -406,6 +574,9 @@ static int ExplainPolicy(const fs::path& policy, const std::string& package) {
                       << " root=" << selector.root;
             if (selector.match_kind == pathguard::PolicyMatchKind::kGlob) {
                 std::cout << " glob=" << RenderPattern(selector.base_pattern);
+                for (const auto& except : selector.except_patterns) {
+                    std::cout << " except=" << RenderPattern(except);
+                }
             }
             if (!action.target.empty()) std::cout << " target=" << action.target;
             std::cout << " priority=" << action.priority
@@ -427,8 +598,8 @@ int main(int argc, char** argv) {
                      "       pathguardctl plan <old-rules.toml> <new-rules.toml>\n"
                      "       pathguardctl explain --path <rules.toml> <package> <path>\n"
                      "       pathguardctl reload <module-dir>\n"
-                     "       pathguardctl explain <policy.bin> <package>\n"
-                     "       pathguardctl status <module-dir> [pid]\n";
+                     "       pathguardctl explain <policy.bin> <package> [--json]\n"
+                     "       pathguardctl status <module-dir> [pid] [--json]\n";
         return 2;
     }
     const std::string command = argv[1];
@@ -453,11 +624,23 @@ int main(int argc, char** argv) {
     }
     if (command == "status") {
         if (argc < 3) { std::cerr << "missing module directory\n"; return 2; }
-        return PrintStatus(argv[2], argc >= 4 ? argv[3] : nullptr);
+        const char* pid = nullptr;
+        bool json = false;
+        for (int index = 3; index < argc; ++index) {
+            if (std::string_view(argv[index]) == "--json") json = true;
+            else if (pid == nullptr) pid = argv[index];
+            else { std::cerr << "unexpected status argument\n"; return 2; }
+        }
+        return PrintStatus(argv[2], pid, json);
     }
     if (command == "explain") {
         if (argc < 4) { std::cerr << "missing policy.bin or package\n"; return 2; }
-        return ExplainPolicy(argv[2], argv[3]);
+        if (argc > 5 || (argc == 5
+            && std::string_view(argv[4]) != "--json")) {
+            std::cerr << "unexpected explain argument\n";
+            return 2;
+        }
+        return ExplainPolicy(argv[2], argv[3], argc == 5);
     }
     if (command == "reload") {
         if (argc < 3) { std::cerr << "missing module directory\n"; return 2; }

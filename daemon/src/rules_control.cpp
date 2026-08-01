@@ -23,7 +23,7 @@
 #include <unistd.h>
 #endif
 
-#include "pathguard/binary.h"
+#include "pathguard/policy_v6.h"
 
 namespace pathguard::control {
 namespace {
@@ -232,9 +232,12 @@ bool ReadGeneration(const fs::path& path, std::uint64_t* generation) {
     std::string raw;
     if (!ReadAll(path, &raw)) return false;
     std::vector<std::uint8_t> bytes(raw.begin(), raw.end());
-    pathguard::PolicyDocument document;
-    pathguard::ParseError error;
-    return pathguard::DecodePolicy(bytes, &document, generation, &error);
+    pathguard::PolicyV6 policy;
+    const pathguard::PolicyV6DecodeResult decoded =
+        pathguard::DecodePolicyV6(bytes, &policy);
+    if (!decoded.ok) return false;
+    *generation = decoded.content_generation;
+    return true;
 }
 
 std::uint64_t ReadStatusNumber(const fs::path& path, std::string_view key) {
@@ -560,7 +563,8 @@ std::string RenderControlStatusText(const ControlState& state) {
 
 std::string RenderControlStatusJson(const ControlState& state) {
     std::ostringstream output;
-    output << "{\"source\":\"rules.toml\",\"source_digest\":\""
+    output << "{\"schema\":\"pathguard.rules_status.v1\",\"version\":1,"
+              "\"source\":\"rules.toml\",\"source_digest\":\""
            << JsonEscape(state.source_digest)
            << "\",\"candidate_sequence\":" << state.candidate_sequence
            << ",\"active_content_generation\":"

@@ -1,24 +1,17 @@
 #include "pathguard/rules/semantic.h"
 
 #include <algorithm>
-#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
-
-#include "pathguard/binary.h"
-#include "pathguard/policy.h"
-#include "pathguard/rules/compiler.h"
 
 namespace pathguard::rules {
 namespace {
@@ -38,60 +31,27 @@ bool HasErrors(const std::vector<Diagnostic>& diagnostics) {
                        });
 }
 
-ByteSpan OriginSpan(const OriginMap& origins, RuleId id);
+using CanonicalActionKey = std::tuple<
+    RuleActionKind, std::string, std::string, SelectorObjectType, std::string,
+    std::int32_t, RuleEnforcement, ExportMode, bool, std::string>;
+
+CanonicalActionKey ActionKey(const CanonicalActionV2& action) {
+    std::string except_key;
+    for (const auto& except : action.selector.except_patterns) {
+        except_key.append(except.canonical);
+        except_key.push_back('\0');
+    }
+    return {action.action, action.selector.root, action.selector.glob,
+            action.selector.object_type, action.target, action.priority,
+            action.enforcement, action.export_mode, action.media_scan,
+            std::move(except_key)};
+}
+
 void AddDiagnostic(std::vector<Diagnostic>* diagnostics,
                    std::string_view code, std::string_view message,
                    ByteSpan primary, DiagnosticSeverity severity,
                    const RulesLimits& limits,
                    std::optional<ByteSpan> related = std::nullopt);
-
-bool AddExpanded(std::size_t value, std::size_t limit, std::size_t* total) {
-    if (value > limit || *total > limit - value) return false;
-    *total += value;
-    return true;
-}
-
-bool ValidateExpandedRuleLimit(const RulesDocument& document,
-                               const OriginMap& origins,
-                               const RulesLimits& limits,
-                               std::vector<Diagnostic>* diagnostics) {
-    std::size_t expanded = 0;
-    for (const AppRules& app : document.apps) {
-        if (!app.enabled) continue;
-        const std::size_t users = std::max<std::size_t>(app.users.size(), 1);
-        const std::size_t processes = std::max<std::size_t>(app.processes.size(), 1);
-        const std::size_t rules = app.deny.size() + app.redirects.size();
-        if (rules != 0
-            && (users > limits.max_expanded_rules / rules
-                || users * rules > limits.max_expanded_rules / processes
-                || !AddExpanded(users * rules * processes,
-                                limits.max_expanded_rules, &expanded))) {
-            RuleId first = !app.redirects.empty() ? app.redirects.front().id
-                                                  : app.deny.front().id;
-            AddDiagnostic(diagnostics, kResourceLimit,
-                          "expanded_rule_limit", OriginSpan(origins, first),
-                          DiagnosticSeverity::kError, limits);
-            return false;
-        }
-    }
-    return true;
-}
-
-bool ExceedsPathLimits(std::string_view input, const RulesLimits& limits) {
-    if (input.size() > limits.max_path_bytes) return true;
-    std::size_t components = input.empty() ? 0 : 1;
-    for (const char value : input) {
-        if (value == '/' && ++components > limits.max_path_components) {
-            return true;
-        }
-    }
-    return components > limits.max_path_components;
-}
-
-ByteSpan OriginSpan(const OriginMap& origins, RuleId id) {
-    const RuleOrigin* origin = origins.Find(id);
-    return origin == nullptr ? ByteSpan{} : origin->primary;
-}
 
 void AddDiagnostic(std::vector<Diagnostic>* diagnostics,
                    std::string_view code, std::string_view message,
@@ -109,210 +69,6 @@ void AddDiagnostic(std::vector<Diagnostic>* diagnostics,
         diagnostic.related.push_back({*related, "related_rule"});
     }
     diagnostics->push_back(std::move(diagnostic));
-}
-
-std::uint16_t PathDepth(const NormalizedPath& path) {
-    return static_cast<std::uint16_t>(path.component_offsets.size());
-}
-
-pathguard::PolicyDocument ToPolicyDocument(const CanonicalPolicy& canonical) {
-    pathguard::PolicyDocument output;
-    output.schema = 2;
-    output.failure_mode = pathguard::FailureMode::kOpen;
-    output.allow_legacy_string_bind = canonical.allow_legacy_mount;
-    output.apps.reserve(canonical.apps.size());
-    for (const CanonicalAppPolicy& source : canonical.apps) {
-        pathguard::AppPolicy app;
-        app.package = source.package;
-        app.provider_compat = source.file_picker
-            ? pathguard::ProviderCompat::kVirtualize
-            : pathguard::ProviderCompat::kOff;
-        app.users.clear();
-        app.users.reserve(source.users.size());
-        for (const std::int32_t user : source.users) {
-            app.users.push_back(std::to_string(user));
-        }
-        if (app.users.empty()) app.users.push_back("*");
-        app.processes = source.processes;
-        if (app.processes.empty()) app.processes.push_back("*");
-        app.mounts.reserve(source.deny.size() + source.redirects.size());
-        for (const NormalizedPath& deny : source.deny) {
-            app.mounts.push_back({
-                pathguard::MountAction::kDeny, deny.bytes, {}, 0, 0, 0});
-        }
-        for (const CanonicalRedirectRule& redirect : source.redirects) {
-            app.mounts.push_back({
-                pathguard::MountAction::kRedirect,
-                redirect.source.bytes,
-                redirect.target.bytes,
-                PathDepth(redirect.source),
-                0,
-                0,
-            });
-        }
-        output.apps.push_back(std::move(app));
-    }
-    return output;
-}
-
-bool SamePath(const NormalizedPath& lhs, const NormalizedPath& rhs) {
-    return lhs.bytes == rhs.bytes;
-}
-
-bool PathsOverlap(const NormalizedPath& lhs, const NormalizedPath& rhs) {
-    return IsSameOrAncestor(lhs, rhs) || IsSameOrAncestor(rhs, lhs);
-}
-
-struct RedirectRef {
-    const ResolvedRedirectRule* rule = nullptr;
-};
-
-void ValidateRedirects(ResolvedAppPolicy* app, const OriginMap& origins,
-                       const RulesLimits& limits,
-                       std::vector<Diagnostic>* diagnostics) {
-    std::sort(app->redirects.begin(), app->redirects.end(),
-              [](const ResolvedRedirectRule& lhs,
-                 const ResolvedRedirectRule& rhs) {
-                  return std::tie(lhs.source.bytes, lhs.target.bytes, lhs.id)
-                      < std::tie(rhs.source.bytes, rhs.target.bytes, rhs.id);
-              });
-
-    std::vector<ResolvedRedirectRule> unique;
-    unique.reserve(app->redirects.size());
-    for (ResolvedRedirectRule& rule : app->redirects) {
-        if (!unique.empty() && SamePath(unique.back().source, rule.source)
-            && SamePath(unique.back().target, rule.target)) {
-            AddDiagnostic(diagnostics, kRuleRedundant, "duplicate_redirect",
-                          OriginSpan(origins, rule.id),
-                          DiagnosticSeverity::kWarning, limits,
-                          OriginSpan(origins, unique.back().id));
-            continue;
-        }
-        unique.push_back(std::move(rule));
-    }
-    app->redirects = std::move(unique);
-
-    for (std::size_t index = 0; index < app->redirects.size(); ++index) {
-        const ResolvedRedirectRule& current = app->redirects[index];
-        if (PathsOverlap(current.source, current.target)) {
-            AddDiagnostic(diagnostics, kRuleConflict,
-                          "redirect_source_target_overlap",
-                          OriginSpan(origins, current.id),
-                          DiagnosticSeverity::kError, limits);
-        }
-        if (index == 0) continue;
-        const ResolvedRedirectRule& previous = app->redirects[index - 1];
-        if (PathsOverlap(previous.source, current.source)) {
-            AddDiagnostic(diagnostics, kRuleConflict,
-                          "redirect_source_conflict",
-                          OriginSpan(origins, current.id),
-                          DiagnosticSeverity::kError, limits,
-                          OriginSpan(origins, previous.id));
-        }
-    }
-
-    std::unordered_map<std::string, std::size_t> source_index;
-    source_index.reserve(app->redirects.size());
-    for (std::size_t index = 0; index < app->redirects.size(); ++index) {
-        source_index.emplace(app->redirects[index].source.bytes, index);
-    }
-    std::vector<std::uint8_t> colors(app->redirects.size());
-    std::function<bool(std::size_t)> visit = [&](std::size_t index) {
-        if (colors[index] == 1) return true;
-        if (colors[index] == 2) return false;
-        colors[index] = 1;
-        const auto next = source_index.find(app->redirects[index].target.bytes);
-        if (next != source_index.end() && visit(next->second)) return true;
-        colors[index] = 2;
-        return false;
-    };
-    for (std::size_t index = 0; index < app->redirects.size(); ++index) {
-        if (visit(index)) {
-            AddDiagnostic(diagnostics, kRedirectCycle, "redirect_cycle",
-                          OriginSpan(origins, app->redirects[index].id),
-                          DiagnosticSeverity::kError, limits);
-            break;
-        }
-    }
-
-    if (app->file_picker) {
-        if (app->redirects.empty()) {
-            AddDiagnostic(diagnostics, kInvalidValue,
-                          "file_picker_requires_redirect", {},
-                          DiagnosticSeverity::kError, limits);
-        }
-    }
-}
-
-void ValidateDeny(ResolvedAppPolicy* app, const OriginMap& origins,
-                  const RulesLimits& limits,
-                  std::vector<Diagnostic>* diagnostics) {
-    std::sort(app->deny.begin(), app->deny.end(),
-              [](const ResolvedDenyRule& lhs, const ResolvedDenyRule& rhs) {
-                  return std::tie(lhs.path.bytes, lhs.id)
-                      < std::tie(rhs.path.bytes, rhs.id);
-              });
-    std::vector<ResolvedDenyRule> unique;
-    unique.reserve(app->deny.size());
-    for (ResolvedDenyRule& current : app->deny) {
-        if (!unique.empty()
-            && IsSameOrAncestor(unique.back().path, current.path)) {
-            AddDiagnostic(diagnostics, kRuleRedundant, "deny_redundant",
-                          OriginSpan(origins, current.id),
-                          DiagnosticSeverity::kWarning, limits,
-                          OriginSpan(origins, unique.back().id));
-            continue;
-        }
-        unique.push_back(std::move(current));
-    }
-    app->deny = std::move(unique);
-    for (const ResolvedRedirectRule& redirect : app->redirects) {
-        const auto next = std::lower_bound(
-            app->deny.begin(), app->deny.end(), redirect.source.bytes,
-            [](const ResolvedDenyRule& deny, std::string_view path) {
-                return deny.path.bytes < path;
-            });
-        const ResolvedDenyRule* conflict = nullptr;
-        if (next != app->deny.end()
-            && SamePath(redirect.source, next->path)) {
-            conflict = &*next;
-        }
-        if (next != app->deny.begin()) {
-            const ResolvedDenyRule& previous = *std::prev(next);
-            if (IsSameOrAncestor(previous.path, redirect.source)) {
-                conflict = &previous;
-            }
-        }
-        if (conflict != nullptr) {
-            AddDiagnostic(diagnostics, kRuleConflict,
-                          "deny_redirect_conflict",
-                          OriginSpan(origins, redirect.id),
-                          DiagnosticSeverity::kError, limits,
-                          OriginSpan(origins, conflict->id));
-        }
-    }
-}
-
-std::optional<PolicyBlob> EncodeAndVerify(const CanonicalPolicy& canonical,
-                                          CompileStatistics* statistics) {
-    pathguard::PolicyDocument document = ToPolicyDocument(canonical);
-    PolicyBlob blob;
-    pathguard::ParseError error;
-    const auto encode_started = Clock::now();
-    if (!pathguard::EncodePolicy(document, &blob.bytes, &error)) {
-        statistics->encode_ns += ElapsedNs(encode_started);
-        return std::nullopt;
-    }
-    statistics->encode_ns += ElapsedNs(encode_started);
-    blob.content_generation = pathguard::ComputeContentGeneration(document);
-    const auto verify_started = Clock::now();
-    const bool verified = blob.content_generation != 0
-        && VerifyPolicyBlob(canonical, blob);
-    statistics->verify_ns += ElapsedNs(verify_started);
-    if (!verified) {
-        return std::nullopt;
-    }
-    return blob;
 }
 
 }  // namespace
@@ -363,152 +119,6 @@ bool IsSameOrAncestor(const NormalizedPath& ancestor,
             && path.bytes[ancestor.bytes.size()] == '/');
 }
 
-static RulesBuildResult CompileRulesLegacy(const SourceBuffer& source,
-                                           const RulesLimits& limits) {
-    RulesBuildResult output;
-    RulesCompileResult parsed = ParseRulesDocument(source, limits);
-    output.statistics = parsed.statistics;
-    output.origins = std::move(parsed.origins);
-    output.diagnostics = std::move(parsed.diagnostics);
-    if (!parsed.document.has_value() || HasErrors(output.diagnostics)) {
-        return output;
-    }
-    if (!ValidateExpandedRuleLimit(*parsed.document, output.origins, limits,
-                                   &output.diagnostics)) {
-        return output;
-    }
-
-    ResolvedPolicy resolved;
-    resolved.allow_legacy_mount = parsed.document->compatibility.allow_legacy_mount;
-    resolved.apps.reserve(parsed.document->apps.size());
-    for (const AppRules& source_app : parsed.document->apps) {
-        ResolvedAppPolicy app;
-        app.package = source_app.package;
-        app.enabled = source_app.enabled;
-        app.users = source_app.users;
-        app.processes = source_app.processes;
-        app.file_picker = source_app.file_picker;
-        app.deny.reserve(source_app.deny.size());
-        app.redirects.reserve(source_app.redirects.size());
-        const auto normalize_started = Clock::now();
-        for (const DenyRule& rule : source_app.deny) {
-            if (ExceedsPathLimits(rule.path, limits)) {
-                AddDiagnostic(&output.diagnostics, kResourceLimit,
-                              "path_resource_limit",
-                              OriginSpan(output.origins, rule.id),
-                              DiagnosticSeverity::kError, limits);
-                continue;
-            }
-            auto path = NormalizeRulePath(rule.path, limits, &output.statistics);
-            if (!path.has_value()) {
-                AddDiagnostic(&output.diagnostics, kPathInvalid, "invalid_path",
-                              OriginSpan(output.origins, rule.id),
-                              DiagnosticSeverity::kError, limits);
-                continue;
-            }
-            app.deny.push_back({rule.id, std::move(*path)});
-        }
-        for (const RedirectRule& rule : source_app.redirects) {
-            if (ExceedsPathLimits(rule.source, limits)
-                || ExceedsPathLimits(rule.target, limits)) {
-                AddDiagnostic(&output.diagnostics, kResourceLimit,
-                              "path_resource_limit",
-                              OriginSpan(output.origins, rule.id),
-                              DiagnosticSeverity::kError, limits);
-                continue;
-            }
-            auto from = NormalizeRulePath(rule.source, limits, &output.statistics);
-            auto to = NormalizeRulePath(rule.target, limits, &output.statistics);
-            if (!from.has_value() || !to.has_value()) {
-                AddDiagnostic(&output.diagnostics, kPathInvalid, "invalid_path",
-                              OriginSpan(output.origins, rule.id),
-                              DiagnosticSeverity::kError, limits);
-                continue;
-            }
-            app.redirects.push_back(
-                {rule.id, std::move(*from), std::move(*to)});
-        }
-        output.statistics.normalize_ns += ElapsedNs(normalize_started);
-        const auto conflict_started = Clock::now();
-        ValidateRedirects(&app, output.origins, limits, &output.diagnostics);
-        ValidateDeny(&app, output.origins, limits, &output.diagnostics);
-        output.statistics.conflict_ns += ElapsedNs(conflict_started);
-        resolved.apps.push_back(std::move(app));
-    }
-    if (HasErrors(output.diagnostics)) {
-        output.resolved = std::move(resolved);
-        return output;
-    }
-
-    const auto canonicalize_started = Clock::now();
-    CanonicalPolicy canonical;
-    canonical.allow_legacy_mount = resolved.allow_legacy_mount;
-    for (const ResolvedAppPolicy& source_app : resolved.apps) {
-        if (!source_app.enabled) continue;
-        CanonicalAppPolicy app;
-        app.package = source_app.package;
-        app.users = source_app.users;
-        app.processes = source_app.processes;
-        app.file_picker = source_app.file_picker;
-        app.deny.reserve(source_app.deny.size());
-        for (const ResolvedDenyRule& deny : source_app.deny) {
-            app.deny.push_back(deny.path);
-        }
-        std::sort(app.deny.begin(), app.deny.end(),
-                  [](const NormalizedPath& lhs, const NormalizedPath& rhs) {
-                      return lhs.bytes < rhs.bytes;
-                  });
-        std::sort(app.users.begin(), app.users.end());
-        app.users.erase(std::unique(app.users.begin(), app.users.end()),
-                        app.users.end());
-        std::sort(app.processes.begin(), app.processes.end());
-        app.processes.erase(
-            std::unique(app.processes.begin(), app.processes.end()),
-            app.processes.end());
-        app.redirects.reserve(source_app.redirects.size());
-        for (const ResolvedRedirectRule& redirect : source_app.redirects) {
-            app.redirects.push_back({redirect.source, redirect.target});
-        }
-        std::sort(app.redirects.begin(), app.redirects.end(),
-                  [](const CanonicalRedirectRule& lhs,
-                     const CanonicalRedirectRule& rhs) {
-                      return std::tie(lhs.source.bytes, lhs.target.bytes)
-                          < std::tie(rhs.source.bytes, rhs.target.bytes);
-                  });
-        canonical.apps.push_back(std::move(app));
-    }
-    std::sort(canonical.apps.begin(), canonical.apps.end(),
-              [](const CanonicalAppPolicy& lhs,
-                 const CanonicalAppPolicy& rhs) {
-                  return lhs.package < rhs.package;
-              });
-    output.statistics.canonicalize_ns = ElapsedNs(canonicalize_started);
-    output.requirements.mount_actions = 0;
-    for (const CanonicalAppPolicy& app : canonical.apps) {
-        if (!app.redirects.empty()) {
-            output.requirements.mount_actions |= kMountActionRedirect;
-        }
-        if (!app.deny.empty()) {
-            output.requirements.mount_actions |= kMountActionDenyAnchor;
-        }
-    }
-    output.requirements.provider = std::any_of(
-        canonical.apps.begin(), canonical.apps.end(),
-        [](const CanonicalAppPolicy& app) { return app.file_picker; });
-    output.requirements.topology = !canonical.apps.empty();
-    output.blob = EncodeAndVerify(canonical, &output.statistics);
-    if (!output.blob.has_value()) {
-        AddDiagnostic(&output.diagnostics, kPolicyEncode,
-                      "policy_encode_failed", {},
-                      DiagnosticSeverity::kError, limits);
-        output.canonical.reset();
-    } else {
-        output.canonical = std::move(canonical);
-    }
-    output.resolved = std::move(resolved);
-    return output;
-}
-
 RulesBuildResult CompileRules(const SourceBuffer& source,
                               const RulesLimits& limits) {
     RulesBuildResult output;
@@ -519,6 +129,22 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
     output.diagnostics.insert(output.diagnostics.end(),
                               built.diagnostics.begin(), built.diagnostics.end());
     if (!built.ok() || HasErrors(output.diagnostics)) return output;
+
+    for (CanonicalAppPolicyV2& app : built.canonical->apps) {
+        std::set<CanonicalActionKey> seen;
+        std::vector<CanonicalActionV2> unique;
+        unique.reserve(app.actions.size());
+        for (CanonicalActionV2& action : app.actions) {
+            if (!seen.insert(ActionKey(action)).second) {
+                AddDiagnostic(&output.diagnostics, kRuleRedundant,
+                              "rules.rule_redundant", {},
+                              DiagnosticSeverity::kWarning, limits);
+                continue;
+            }
+            unique.push_back(std::move(action));
+        }
+        app.actions = std::move(unique);
+    }
 
     pathguard::PolicyV6 policy;
     policy.allow_legacy_mount = built.canonical->allow_legacy_mount;
@@ -699,25 +325,6 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
     return output;
 }
 
-AdmissionResult AdmitPolicy(const CanonicalPolicy& policy,
-                            const PolicyRequirements& requirements,
-                            const DeviceSnapshot& snapshot) {
-    AdmissionResult output;
-    const pathguard::PolicyDocument document = ToPolicyDocument(policy);
-    output.content_generation = pathguard::ComputeContentGeneration(document);
-    output.capability_generation = snapshot.capability_generation;
-    output.topology_generation = snapshot.topology_generation;
-    const MountBackendSelection selection = SelectMountBackend(
-        requirements.mount_actions, snapshot.mount,
-        policy.allow_legacy_mount);
-    output.backend = selection.backend;
-    output.reason = selection.reason;
-    output.admitted = selection.backend != MountBackendKind::kUnsupported
-        && (!requirements.provider || snapshot.provider_supported)
-        && (!requirements.topology || snapshot.topology_supported);
-    return output;
-}
-
 AdmissionResult AdmitPolicy(const pathguard::PolicyV6& policy,
                             const PolicyRequirements& requirements,
                             const DeviceSnapshot& snapshot) {
@@ -745,13 +352,6 @@ bool VerifyPolicyBytes(const std::vector<std::uint8_t>& bytes,
     return result.ok && result.content_generation == expected_content_generation
         && pathguard::ComputePolicyV6ContentGeneration(decoded)
             == expected_content_generation;
-}
-
-bool VerifyPolicyBlob(const CanonicalPolicy& policy, const PolicyBlob& blob) {
-    const pathguard::PolicyDocument expected = ToPolicyDocument(policy);
-    return pathguard::ComputeContentGeneration(expected)
-            == blob.content_generation
-        && VerifyPolicyBytes(blob.bytes, blob.content_generation);
 }
 
 bool VerifyPolicyBlob(const pathguard::PolicyV6& policy,

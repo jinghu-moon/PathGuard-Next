@@ -10,7 +10,6 @@
 #include "pathguard/mount_backend.h"
 #include "pathguard/policy_v6.h"
 #include "pathguard/rules/diagnostic.h"
-#include "pathguard/rules/document.h"
 #include "pathguard/rules/source.h"
 #include "pathguard/rules/schema_v2.h"
 #include "pathguard/rules_contract.h"
@@ -22,57 +21,6 @@ struct NormalizedPath {
     std::vector<std::uint16_t> component_offsets;
 
     bool operator==(const NormalizedPath&) const = default;
-};
-
-struct ResolvedDenyRule {
-    RuleId id = 0;
-    NormalizedPath path;
-};
-
-struct ResolvedRedirectRule {
-    RuleId id = 0;
-    NormalizedPath source;
-    NormalizedPath target;
-};
-
-struct ResolvedAppPolicy {
-    std::string package;
-    bool enabled = true;
-    std::vector<std::int32_t> users;
-    std::vector<std::string> processes;
-    bool file_picker = false;
-    std::vector<ResolvedDenyRule> deny;
-    std::vector<ResolvedRedirectRule> redirects;
-};
-
-struct ResolvedPolicy {
-    bool allow_legacy_mount = false;
-    std::vector<ResolvedAppPolicy> apps;
-};
-
-struct CanonicalRedirectRule {
-    NormalizedPath source;
-    NormalizedPath target;
-
-    bool operator==(const CanonicalRedirectRule&) const = default;
-};
-
-struct CanonicalAppPolicy {
-    std::string package;
-    std::vector<std::int32_t> users;
-    std::vector<std::string> processes;
-    bool file_picker = false;
-    std::vector<NormalizedPath> deny;
-    std::vector<CanonicalRedirectRule> redirects;
-
-    bool operator==(const CanonicalAppPolicy&) const = default;
-};
-
-struct CanonicalPolicy {
-    bool allow_legacy_mount = false;
-    std::vector<CanonicalAppPolicy> apps;
-
-    bool operator==(const CanonicalPolicy&) const = default;
 };
 
 struct PolicyRequirements {
@@ -104,15 +52,12 @@ struct AdmissionResult {
 };
 
 struct RulesBuildResult {
-    std::optional<ResolvedPolicy> resolved;
-    std::optional<CanonicalPolicy> canonical;
     std::optional<CanonicalPolicyV2> canonical_v2;
     std::optional<pathguard::PolicyV6> policy_v6;
     PolicyRequirements requirements;
     std::optional<PolicyBlob> blob;
     CompileStatistics statistics;
     std::vector<Diagnostic> diagnostics;
-    OriginMap origins;
 
     bool ok() const;
 };
@@ -125,13 +70,9 @@ bool IsSameOrAncestor(const NormalizedPath& ancestor,
 
 RulesBuildResult CompileRules(const SourceBuffer& source,
                               const RulesLimits& limits);
-AdmissionResult AdmitPolicy(const CanonicalPolicy& policy,
-                            const PolicyRequirements& requirements,
-                            const DeviceSnapshot& snapshot);
 AdmissionResult AdmitPolicy(const pathguard::PolicyV6& policy,
                             const PolicyRequirements& requirements,
                             const DeviceSnapshot& snapshot);
-bool VerifyPolicyBlob(const CanonicalPolicy& policy, const PolicyBlob& blob);
 bool VerifyPolicyBlob(const pathguard::PolicyV6& policy, const PolicyBlob& blob);
 bool VerifyPolicyBytes(const std::vector<std::uint8_t>& bytes,
                        std::uint64_t expected_content_generation);

@@ -9,11 +9,6 @@
 namespace pathguard::rules {
 namespace {
 
-struct PathRef {
-    std::string_view bytes;
-    RuleId id = 0;
-};
-
 std::uint32_t DecodeCodePoint(std::string_view input, std::size_t* offset) {
     const auto lead = static_cast<unsigned char>(input[*offset]);
     std::size_t width = 1;
@@ -80,27 +75,62 @@ std::string VisualSkeleton(std::string_view input) {
     return output;
 }
 
-ByteSpan Origin(const OriginMap& origins, RuleId id) {
-    const RuleOrigin* origin = origins.Find(id);
-    return origin == nullptr ? ByteSpan{} : origin->primary;
+PolicyRuleKind ToRuleKind(RuleActionKind kind) {
+    switch (kind) {
+        case RuleActionKind::kDeny: return PolicyRuleKind::kDeny;
+        case RuleActionKind::kRedirect: return PolicyRuleKind::kRedirect;
+        case RuleActionKind::kObserve: return PolicyRuleKind::kObserve;
+        case RuleActionKind::kExport: return PolicyRuleKind::kExport;
+    }
+    return PolicyRuleKind::kDeny;
+}
+
+std::string SelectorText(const CanonicalSelectorV2& selector) {
+    return selector.root + "/" + selector.glob;
 }
 
 using PlanKey = std::tuple<std::string, PolicyRuleKind, std::string>;
 
-std::map<PlanKey, std::string> IndexPolicy(const CanonicalPolicy& policy) {
+std::map<PlanKey, std::string> IndexPolicy(const CanonicalPolicyV2& policy) {
     std::map<PlanKey, std::string> output;
-    for (const CanonicalAppPolicy& app : policy.apps) {
-        for (const NormalizedPath& deny : app.deny) {
-            output.emplace(PlanKey{app.package, PolicyRuleKind::kDeny,
-                                   deny.bytes}, std::string{});
-        }
-        for (const CanonicalRedirectRule& redirect : app.redirects) {
-            output.emplace(PlanKey{app.package, PolicyRuleKind::kRedirect,
-                                   redirect.source.bytes},
-                           redirect.target.bytes);
+    for (const CanonicalAppPolicyV2& app : policy.apps) {
+        for (const CanonicalActionV2& action : app.actions) {
+            output.emplace(
+                PlanKey{app.package, ToRuleKind(action.action),
+                        SelectorText(action.selector)},
+                action.target);
         }
     }
     return output;
+}
+
+bool MatchesSelector(const CanonicalSelectorV2& selector,
+                     std::string_view query) {
+    if (query.size() <= selector.root.size()
+        || query.compare(0, selector.root.size(), selector.root) != 0
+        || query[selector.root.size()] != '/') {
+        return false;
+    }
+    const std::string_view relative = query.substr(selector.root.size() + 1);
+    if (selector.source_kind == SelectorSourceKind::kLiteral) {
+        const std::string source = SelectorText(selector);
+        return query == source
+            || (query.size() > source.size()
+                && query.compare(0, source.size(), source) == 0
+                && query[source.size()] == '/');
+    }
+    pathguard::pattern::PatternMatchScratch scratch;
+    if (pathguard::pattern::MatchPattern(selector.base_pattern, relative, &scratch)
+        != pathguard::pattern::PatternMatchResult::kMatch) {
+        return false;
+    }
+    for (const auto& except : selector.except_patterns) {
+        if (pathguard::pattern::MatchPattern(except, relative, &scratch)
+            == pathguard::pattern::PatternMatchResult::kMatch) {
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace
@@ -113,44 +143,51 @@ std::vector<Diagnostic> LintRules(const RulesBuildResult& result,
             output.push_back(diagnostic);
         }
     }
-    if (!result.resolved.has_value()) return output;
-    if (result.resolved->allow_legacy_mount
+    if (!result.canonical_v2.has_value()) return output;
+    if (result.canonical_v2->allow_legacy_mount
         && output.size() < limits.max_diagnostics) {
         Diagnostic legacy{kLintLegacy, "rules.lint_legacy", {}, false};
         legacy.severity = DiagnosticSeverity::kWarning;
         legacy.phase = DiagnosticPhase::kSemantic;
         output.push_back(std::move(legacy));
     }
-    for (const ResolvedAppPolicy& app : result.resolved->apps) {
-        std::vector<PathRef> paths;
-        for (const ResolvedDenyRule& deny : app.deny) {
-            paths.push_back({deny.path.bytes, deny.id});
-        }
-        for (const ResolvedRedirectRule& redirect : app.redirects) {
-            paths.push_back({redirect.source.bytes, redirect.id});
-            paths.push_back({redirect.target.bytes, redirect.id});
-        }
-        std::map<std::string, PathRef> skeletons;
-        for (const PathRef& path : paths) {
-            const std::string skeleton = VisualSkeleton(path.bytes);
-            const auto [found, inserted] = skeletons.emplace(skeleton, path);
-            if (!inserted && found->second.bytes != path.bytes
+    for (const CanonicalAppPolicyV2& app : result.canonical_v2->apps) {
+        std::map<std::string, std::string> skeletons;
+        std::map<std::tuple<RuleActionKind, std::string, std::string>, RuleId>
+            rules;
+        for (const CanonicalActionV2& action : app.actions) {
+            const auto rule_key = std::make_tuple(
+                action.action, SelectorText(action.selector), action.target);
+            if (!rules.emplace(rule_key, action.id).second
                 && output.size() < limits.max_diagnostics) {
-                Diagnostic unicode{kLintUnicode, "rules.lint_unicode_near",
-                                   Origin(result.origins, path.id), false};
-                unicode.severity = DiagnosticSeverity::kWarning;
-                unicode.phase = DiagnosticPhase::kSemantic;
-                unicode.related.push_back(
-                    {Origin(result.origins, found->second.id), "near_path"});
-                output.push_back(std::move(unicode));
+                Diagnostic redundant{kRuleRedundant, "rules.rule_redundant",
+                                     {}, false};
+                redundant.severity = DiagnosticSeverity::kWarning;
+                redundant.phase = DiagnosticPhase::kSemantic;
+                output.push_back(std::move(redundant));
+            }
+            std::vector<std::string> paths{
+                SelectorText(action.selector), action.target};
+            for (const std::string& path : paths) {
+                if (path.empty()) continue;
+                const std::string skeleton = VisualSkeleton(path);
+                const auto [found, inserted] = skeletons.emplace(skeleton, path);
+                if (!inserted && found->second != path
+                    && output.size() < limits.max_diagnostics) {
+                    Diagnostic unicode{kLintUnicode, "rules.lint_unicode_near",
+                                       {}, false};
+                    unicode.severity = DiagnosticSeverity::kWarning;
+                    unicode.phase = DiagnosticPhase::kSemantic;
+                    output.push_back(std::move(unicode));
+                }
             }
         }
     }
     return output;
 }
 
-std::vector<PolicyChange> BuildPolicyPlan(const CanonicalPolicy& before,
-                                          const CanonicalPolicy& after) {
+std::vector<PolicyChange> BuildPolicyPlan(const CanonicalPolicyV2& before,
+                                          const CanonicalPolicyV2& after) {
     const auto old_index = IndexPolicy(before);
     const auto new_index = IndexPolicy(after);
     std::vector<PolicyChange> output;
@@ -188,54 +225,40 @@ std::vector<PolicyChange> BuildPolicyPlan(const CanonicalPolicy& before,
     return output;
 }
 
-PathExplanation ExplainPath(const ResolvedPolicy& policy,
+PathExplanation ExplainPath(const CanonicalPolicyV2& policy,
                             std::string_view package,
                             std::string_view path,
                             const RulesLimits& limits) {
     PathExplanation output;
     output.package = package;
     output.query = path;
-    const auto query = NormalizeRulePath(path, limits);
-    if (!query.has_value()) return output;
+    if (!NormalizeRulePath(path, limits).has_value()) return output;
     const auto app = std::find_if(
         policy.apps.begin(), policy.apps.end(),
-        [package](const ResolvedAppPolicy& item) {
+        [package](const CanonicalAppPolicyV2& item) {
             return item.package == package;
         });
     if (app == policy.apps.end()) return output;
-    struct Match {
-        PolicyRuleKind action;
-        const NormalizedPath* source;
-        const NormalizedPath* target;
-    };
-    std::vector<Match> matches;
-    for (const ResolvedDenyRule& deny : app->deny) {
-        if (IsSameOrAncestor(deny.path, *query)) {
-            matches.push_back({PolicyRuleKind::kDeny, &deny.path, nullptr});
+
+    const CanonicalActionV2* winner = nullptr;
+    std::vector<const CanonicalActionV2*> matches;
+    for (const CanonicalActionV2& action : app->actions) {
+        if (!MatchesSelector(action.selector, path)) continue;
+        matches.push_back(&action);
+        if (winner == nullptr
+            || std::tie(action.priority, action.selector.specificity, action.id)
+                > std::tie(winner->priority, winner->selector.specificity,
+                           winner->id)) {
+            winner = &action;
         }
     }
-    for (const ResolvedRedirectRule& redirect : app->redirects) {
-        if (IsSameOrAncestor(redirect.source, *query)) {
-            matches.push_back({PolicyRuleKind::kRedirect, &redirect.source,
-                               &redirect.target});
-        }
-    }
-    std::sort(matches.begin(), matches.end(),
-              [](const Match& lhs, const Match& rhs) {
-                  return std::tie(lhs.source->bytes, lhs.action)
-                      < std::tie(rhs.source->bytes, rhs.action);
-              });
-    if (matches.empty()) return output;
-    const auto longest = std::max_element(
-        matches.begin(), matches.end(), [](const Match& lhs, const Match& rhs) {
-            return lhs.source->bytes.size() < rhs.source->bytes.size();
-        });
-    output.action = longest->action;
-    output.source = longest->source->bytes;
-    if (longest->target != nullptr) output.target = longest->target->bytes;
-    for (const Match& match : matches) {
-        if (&match != &*longest) {
-            output.shadowed_parents.push_back(match.source->bytes);
+    if (winner == nullptr) return output;
+    output.action = ToRuleKind(winner->action);
+    output.source = SelectorText(winner->selector);
+    if (!winner->target.empty()) output.target = winner->target;
+    for (const CanonicalActionV2* match : matches) {
+        if (match != winner) {
+            output.shadowed_parents.push_back(SelectorText(match->selector));
         }
     }
     std::sort(output.shadowed_parents.begin(), output.shadowed_parents.end());

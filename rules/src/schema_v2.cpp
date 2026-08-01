@@ -328,6 +328,10 @@ private:
                 Add(kTypeMismatch, "rules.selector_except_array_required",
                     SourceSpan(source_, except->source()), path + "/except");
                 valid = false;
+            } else if (values->empty()) {
+                Add(kInvalidValue, "rules.selector_except_empty",
+                    SourceSpan(source_, except->source()), path + "/except");
+                valid = false;
             } else {
                 for (const toml::node& value_node : *values) {
                     const auto value = value_node.value<std::string>();
