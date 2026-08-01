@@ -1,7 +1,11 @@
 # ADR 0006：SAF 系统代写进程虚拟化
 
-- 状态：试验性完整目录虚拟化
+- 状态：部分 Superseded / 试验性 Provider path-I/O
 - 日期：2026-07-22
+
+> 实施说明（2026-08-01）：本文的 `provider_compat` v5 格式已由 ADR-0012/0016 supersede。
+> 当前 format 2 只用 `provider = { enabled = true }` 表达 intent，实际 active 状态由独立
+> capability/operation admission 决定；query/insert/reverse 未通过设备矩阵前保持 unsupported。
 
 ## 背景
 

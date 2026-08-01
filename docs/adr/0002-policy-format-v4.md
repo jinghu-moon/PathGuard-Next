@@ -1,7 +1,8 @@
 # ADR-0002：冻结 policy format v5 与 canonical IR
 
 > 历史：初版冻结 v4；ADR-0006 增加 `provider_compat` 后升级为 v5。本文件现描述
-> 唯一可执行的 v5 契约，v4 不再生成或读取。
+> 历史 v5 契约，v4 不再生成或读取。自 2026-08-01 起生产只生成/读取 ADR-0016 的
+> policy v6/schema 3；本文仅作为 before baseline 保留。
 
 状态：Superseded by [ADR-0016](0016-policy-format-v6.md)
 

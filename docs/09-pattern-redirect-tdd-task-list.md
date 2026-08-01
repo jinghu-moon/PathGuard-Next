@@ -1,6 +1,13 @@
 # PathGuard Next Pattern Redirect TDD 执行清单
 
-> 状态：执行中；第一、二部分的自动化工作已完成；第二部分真机观察项按授权标记为 `not_observed`
+> 状态：所有当前范围内可执行任务已完成；V-46 `adapter-only` 决策形成合法阻断，fanotify/Export
+> 因当前设备 `CONFIG_FANOTIFY` disabled 按用户授权跳过并保持 unsupported/not_observed。第二部分已有单设备
+> LocalSend/Provider 生命周期补充证据；2026-08-01 已增加一台 Android 16/myron/SukiSU Ultra
+> 的 0.1.19 Provider 修复、50 次启动和接收批次；0.1.24 又补齐 Provider per-action 状态、
+> Provider restart、死亡 PID 状态回收与 10 次冷启动。上述批次仅为 partial observed；用户已于
+> 2026-08-01 明确跳过第二设备验证，其余 ROM、root framework、kernel tier 和 arm32 保持
+> `not_observed` 且不纳入当前待执行范围；未覆盖 operation/state 矩阵按当前设备能力标记
+> `unsupported/not_observed`
 >
 > 基准设计：`docs/08-pattern-redirect-design.md` v0.8
 >
@@ -170,8 +177,9 @@ tests/fuzz/seeds/pattern-v1/
 > 执行结果（2026-07-30）：T-03～T-24、I-03～I-24、R-03～R-24 的可自动化实现与
 > 验证完成；Host Release CTest `75/75`、Android NDK arm64-v8a/armeabi-v7a、Zygisk
 > `APP_STL=none` 构建通过，`git diff --check` 通过。V-12～V-39 的 Host/契约证据已归档。
-> LocalSend 实际接收、Provider 50 次冷启动、真实 strong identity 与多 ROM/kernel
-> 兼容矩阵需要人工/设备协助，按用户授权记录为 `not_observed`，不伪报通过。自动化范围内
+> 2026-07-31 已在一台 Xiaomi Android 13/Magisk 设备补测 Provider early-start 恢复与 LocalSend
+> TXT/JPG 实际接收；Provider 50 次冷启动、真实 strong identity 与多 ROM/kernel 兼容矩阵仍
+> 记录为 `not_observed`，不伪报通过。自动化范围内
 > unexpected regression 为 0。Provider query/insert/reverse 生产 ABI adapter 尚未准入，bit 17
 > 明确保持 `unsupported`；C3 的前向 path-I/O 最低闭环完成，不宣称复合视图已在设备 active。
 
@@ -180,7 +188,7 @@ tests/fuzz/seeds/pattern-v1/
 | V-12～V-14、T-03～R-11 | complete | format 2、Glob v1、brace、selector/index/evaluator/OperationPlan |
 | V-15～V-23、T-12～R-16 | complete | format 6、admission、hazard snapshot、MountPlan adapter |
 | T-17～R-20 | complete（bit 17 runtime unsupported） | app-path/Provider path-I/O、operation mask、composite admission、Hook lifecycle；无伪 active |
-| V-24～V-31 | complete + device not_observed | Host 契约通过；query/insert/reverse unsupported；LocalSend/Provider soak 未观察 |
+| V-24～V-31 | complete + partial device observed | Host 契约通过；单设备 LocalSend/Provider 生命周期已观察；query/insert/reverse unsupported，Provider soak/多 ROM 未观察 |
 | T-21～R-24 | complete | provenance create/rename/delete、WAL/CRC、resolver probe、failure policy |
 | V-32～V-39 | complete + device not_observed | Host 故障矩阵通过；真实设备恢复/TOCTOU 未观察 |
 
@@ -846,6 +854,30 @@ tests/fuzz/seeds/pattern-v1/
 
 本部分不得阻塞已经通过的 C1～C6。能力无法满足时允许明确 `unsupported`，但不得退化核心执行域或改变其 admission。
 
+> 历史执行审计（2026-07-31）：有界 `select.except` 已完成并关闭空数组校验缺口；当时 Host
+> Release CTest `82/82`、Android NDK arm64-v8a/armeabi-v7a、Zygisk `APP_STL=none` 和
+> Host/Android rules parity 通过。Observe、Export、CLI/status、CompleteVfs 和性能门仅完成下表
+> 所列契约范围；后续当前设备闭环状态以本表和第四部分汇总为准，未观察能力不得宣称 active。
+
+| 任务 | 状态 | 已验证范围与剩余边界 |
+| --- | --- | --- |
+| V-40、T-25～R-25、V-41 | complete | canonical except、空/全排除、预算、复用 matcher、候选调用次数与 CLI explain 均有自动化和基准证据 |
+| T-26～R-26 | complete（event runtime unsupported） | 正交 effect dispatch、固定窗口限速、basename 脱敏、并发竞争丢弃、有界队列和 metrics 已满足 adapter 合同；设备 event source 属于 T-27/V-43，当前 bit 8～11 不误报 active |
+| V-42 | complete + device unsupported | Xiaomi Android 13 内核实测 `CONFIG_FANOTIFY` 未启用，bit 8～11 必须 unsupported；队列/overflow/跨 FS/restart 因 source 不可构造保持 `not_observed` |
+| T-27～R-27 | not_observed（用户授权跳过） | Host worker/store/executor 合同已完成；生产 fanotify adapter 因当前内核 `CONFIG_FANOTIFY` disabled 不准入，按范围豁免跳过 |
+| V-43 | not_observed（当前设备 unsupported） | myron 缺少 fanotify source；normal/overflow/crash/跨 FS 不执行，bits 8～11 保持 unsupported |
+| V-44 | complete | 已归档 status 文本/JSON、静态 explain JSON、exit code、未知 version 边界和 planned breaks |
+| T-28～R-28 | complete | 无 STL `RuntimeStatusRecord` v2、共享 policy→per-action admission builder、截断与 counters 已冻结；Zygisk Provider/app-path 安装后原子写入 per-action/counters，CLI JSON 透传稳定字段；实际文件结果对比留在 V-45 |
+| V-45 | complete（available-device scope） | myron active/restart fail-open 与实际文件结果一致；inactive/unsupported/collision/ambiguous/overflow 因当前 production 无构造入口记为 not_observed/unsupported |
+| V-46 | complete (`adapter-only`) | 仅保留核心零依赖的 fake adapter 合同；未授权真实 CompleteVfs backend 或 bit 18 active 声明 |
+| T-29～R-29 | blocked（V-46 非 go） | V-46 决策为 `adapter-only`，未满足任务明确的 `go` 依赖；只保留最小 OperationPlan/backend/admission fake，不实现或发布真实 CompleteVfs backend |
+| V-47 | blocked（V-46 非 go） | 无已批准原型可做 available/unavailable/partial 重放；核心 C1～C6 不依赖 CompleteVfs |
+| T-30～R-30 | complete（Host CI） | matcher gate 外新增 Provider route、provenance、snapshot reload/slot exhaustion、RSS相对基线与可配置 soak；均输出 machine/compiler/arch profile、P50/P95/P99/max、allocation/counters 并以同次 reference 形成可解析失败门；无证据要求热路径重构 |
+| V-48 | complete（available device scope） | 2 秒 CI soak、30 分钟 Host soak、myron 双 Provider restart/republication 与 RSS 采样已通过；第二设备/ROM 已按用户授权记为 `not_observed`，不扩大兼容性声明 |
+
+详细审计证据：`tests/baseline/pattern-v6/p6-auxiliary-20260731/V-42-event-before.md` 和
+`tests/baseline/pattern-v6/p6-auxiliary-20260731/V-42-V-48-auxiliary-audit.md`。
+
 ### V-40 [验证] 检查 ADR-0015 实施条件
 
 - **任务描述**：确认 V-08 结论。若非 Accepted，记录跳过理由并结束 V-40～V-42；若 Accepted，记录无 except 的 C1～C6 与 candidate benchmark 基线。
@@ -915,6 +947,16 @@ tests/fuzz/seeds/pattern-v1/
 - **验收标准**：测试因 Export worker 缺失而失败；任何 event loss 不得被报告为同步 redirect 成功。
 - **关联需求**：设计 7.7、11.2～11.4；ADR-0004；Linux `fanotify(7)`。
 - **依赖/时间盒**：V-42、R-26；4 小时。
+
+> Host 执行结果（2026-08-01）：新增独立 `pathguard_export_worker_test`，红测确认缺失 event
+> source、FID key、recovery store 和结构化 transfer 合同；绿测覆盖 close-write/rename 乱序、
+> 重复/事件窗口、overflow、queued/failed/running/complete 重启恢复、完成项淘汰、失败项有界保留、
+> 长期记录总量和 4096 条恢复格式硬上限、损坏/超容量 snapshot，及
+> copy/sync/rename 失败阶段不得进入 complete。随后补齐带 CRC/版本/容量限制的 durable file store，
+> 通过同目录临时文件、fsync 与原子安装实现同 FS/跨 FS 一致搬运，并只在安装成功后删除 move/trash
+> source。生产 fanotify capability/DFID_NAME/pidfd adapter 因当前设备内核不支持而未准入，故
+> 该批当时将 T-27～R-27 保持 `in_progress`、V-43 保持 `pending`；当前已按设备能力范围豁免
+> 更新为 `not_observed/unsupported`。
 
 ### I-27 [绿] 实现最小 Export worker
 
@@ -1014,6 +1056,17 @@ tests/fuzz/seeds/pattern-v1/
 - **关联需求**：设计 3.7、5.4～5.6、11.4；ADR-0011、0015。
 - **依赖/时间盒**：V-39、R-02；4 小时。
 
+> Host 执行结果（2026-08-01）：benchmark schema v2 增加 no-rules、scope-miss、warmup、
+> allocation 和 `reject_1000_patterns`。无规则/scope miss/zero candidate 的 matcher calls 与
+> 热循环 allocation 均为 0；1000 个同 bucket pattern 在构造 index 时以
+> `candidate/bucket limit` 拒绝，未进入 runtime。性能门以当前 machine profile 的
+> `one_candidate.p99` 为 reference 并按工作量/噪声容忍计算相对预算，不再用固定纳秒值判定。
+> 独立 runtime benchmark 进一步覆盖真实 policy v6 Provider route、provenance
+> prepare/abort/materialize/commit、snapshot reload/retire、256 slot exhaustion 与 RSS 相对基线；
+> 所有场景输出 machine/compiler/arch、P50/P95/P99/max、allocation 和 counters，并用同次轻量
+> reference 计算门限。2 秒并发 reload/match CI soak 已通过；30 分钟 Host soak 归入 V-48，
+> Provider restart/profile 继续按设备验证，因此 T-30～R-30 的 Host CI 工作已完成。
+
 ### I-30 [绿] 实现可重复性能 gate
 
 - **任务描述**：接入 Release benchmark、warmup、固定 corpus、噪声容忍和 machine profile；无规则/scope miss 明确断言不运行 token matcher、不分配、不写日志。
@@ -1036,6 +1089,37 @@ tests/fuzz/seeds/pattern-v1/
 - **依赖/时间盒**：R-30；4 小时。
 
 ## 第四部分：同步与收尾
+
+> 离线执行结果（2026-08-01）：V-49～V-56 的 Host/NDK/ABI 工作已完成。干净 MSVC Release
+> CTest `77/77`、Clang UBSan CTest `77/77`、三个 libFuzzer 固定种子运行、NDK r27d 双 ABI
+> production build、Zygisk `APP_STL=none`/ELF isolation 和旧接口 guard 全部通过；ASan 因当前
+> Windows 环境缺少 `stl_asan.lib`、TSan 因 Clang Windows runtime 不可用，已作为工具链限制归档。
+> V-59/V-60 的 Host 故障与 30 分钟 soak 已完成，V-61/V-62 的离线追踪审计已完成。
+> 0.1.24 设备补充修复归档后，最新 MSVC Release 与 Clang UBSan/static-runtime CTest 均为
+> `78/78`，NDK r27d 双 ABI、Zygisk ELF/integration guard 与 comparison report guard 再次通过。
+
+| 任务 | 当前状态 | 剩余边界 |
+| --- | --- | --- |
+| V-49～V-54 | complete | 无；旧接口删除为 planned break，Host unexpected regression 为 0 |
+| V-55 | complete（available Host toolchain） | ASan/TSan 当前 Windows runtime unavailable，非项目失败 |
+| V-56 | complete（offline gate） | 实际 Android operation/parity 归入 V-57/V-58 |
+| T-27～R-27 | not_observed（用户授权跳过） | Host worker/store/executor 已完成；生产 fanotify adapter 在当前内核不可准入，保持 unsupported |
+| V-43 | not_observed（current device unsupported） | Export normal/overflow/crash/cross-FS 不执行，bits 8～11 不误报 active |
+| V-45 | complete（available-device scope） | myron active/restart fail-open 与真实文件结果一致；无生产构造入口的状态明确 not_observed/unsupported |
+| V-48 | complete（available device scope） | Host soak、myron Provider restart/republication 与 RSS 已观察；第二设备/ROM 已按用户授权记为 `not_observed` |
+| T-29～R-29/V-47 | blocked（V-46 adapter-only） | V-46 非 go，合法阻断真实 CompleteVfs backend 与设备重放 |
+| V-57～V-58 | complete（available-device scope） | C1～C6 可执行场景、Provider path-I/O、FUSE open、restart 已归档；bit 17、shared UID、identity clear、query/insert 和未构造状态明确 unsupported/not_observed |
+| V-59 | complete（available-device scope） | policy reload/race、topology race、snapshot gate、mount fault 和 production recovery 已归档；fanotify overflow 保持 unsupported |
+| V-60 | complete（available-device scope） | 50 cold/50 warm 功能、10 cold 补充、Provider restart、RSS 已归档；warm latency telemetry 与 Export 保持 not_observed |
+| V-61～V-62 | complete（available-device scope） | Host 与 myron 证据审计闭环；第二设备及跳过能力保留 not_observed/unsupported 边界 |
+| V-63 | complete（available-device scope） | 当前范围 go；V-46 adapter-only、fanotify、bit 17、未构造状态及第二设备均为明确边界，不宣称 active |
+
+详细证据索引：`tests/baseline/pattern-v6/README.md`。最终四个 Host/离线门均有通过
+`tests/baseline/validate_comparison_report.cmake` 的 format 1 JSON 报告。
+第二设备范围豁免记录于
+`tests/baseline/pattern-v6/device-matrix-scope-waiver-20260801.md`；未观察组合不标记为通过。
+当前设备闭环报告：
+`tests/baseline/pattern-v6/p6-final-device-myron-v024-20260801/V-45-V-63-current-device-closure.json`。
 
 ### V-49 [验证] 记录 v5/format 1 删除前最后基线
 
@@ -1162,6 +1246,24 @@ tests/fuzz/seeds/pattern-v1/
 - **验收标准**：仅当 ADR 前置决策关闭、Host/ABI/设备/故障/性能门通过、unexpected regression 为零时判定完成；否则列出阻断任务 ID，不以“基本可用”替代验收。
 - **关联需求**：设计 1.3、10～14；项目最终验收标准。
 - **依赖/时间盒**：V-62；2 小时。
+
+### 2026-08-01 myron 单设备批次
+
+comparison format 1 报告：
+`tests/baseline/pattern-v6/p6-final-device-myron-20260801/V-57-V-62-myron-device.json`。
+
+| Task | 本批状态 | 结论边界 |
+| --- | --- | --- |
+| V-57 | partial observed | C1 deny、C2 mount redirect、C3 Provider、C4 多源不同名、C5 lifecycle 与 C6 Provider `**` 文件匹配已观察；第二设备与完整 operation matrix 未观察 |
+| V-58 | partial observed | ExternalStorageProvider/MediaProvider `access/open/stat64` 和 MediaProvider FUSE open 已观察；shared UID、query/insert、Provider restart、FUSE unavailable 未观察 |
+| V-59 | partial observed | pre-mutation cancel、verified rollback、owner death、rollback failure 和 production recovery 已完成；myron 为 `CONFIG_FANOTIFY` disabled，Provider restart、policy/topology/snapshot 与 fanotify 故障仍未观察 |
+| V-60 | partial observed | 50/50 cold 功能检查通过，48 次 `am COLD`、2 次 `am UNKNOWN`；50/50 warm 操作保持同一 PID/status/mount，但 `am` 全部返回 UNKNOWN/0，故不宣称 warm latency；soak 后 TXT/JPG 接收通过；分阶段 timing/counters、Provider restart profile 和可选 Export 未观察 |
+| V-61 | partial audited | 本批计划内 Provider resolver 变化无剩余 unexpected regression；最终结论依赖其余设备报告 |
+| V-62 | partial audited | 本批 requirements-to-evidence 路径闭环；完整 ROM/framework/operation 追踪仍未闭环 |
+
+该历史批次当时不改变 V-63 `blocked` 结论。后续补充证据与范围豁免已由
+`p6-final-device-myron-v024-20260801/V-45-V-63-current-device-closure.json` supersede；
+T-29～R-29/V-47 仍按 V-46 `adapter-only` 保持合法阻断。
 
 ## 参考依据
 

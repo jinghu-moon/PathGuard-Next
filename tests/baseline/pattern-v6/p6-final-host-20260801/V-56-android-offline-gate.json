@@ -1,0 +1,37 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-final-host-20260801",
+  "before_commit": "1fcb35ba327dd7e24e42286ad1ecf734326d07bd",
+  "after_commit": "working_tree",
+  "environment": {
+    "host": "Windows x86_64; Android NDK r27d 27.3.13750724; API 31",
+    "device": "not_applicable; offline arm64-v8a and armeabi-v7a production builds"
+  },
+  "rules_source_hash": "sha256:DEA93C4B7A3FFF4853F552F76EC581EBC3AA674BB70FFDD0452B00D6FE869419",
+  "policy_hash": "sha256:83573557AC1AB99DCAF6AD12416E9EB97C971F29C7DA86DCDB569D39C8366288",
+  "module_abi_hashes": {
+    "arm64-v8a:pathguardd": "sha256:E0B8E60FDA347A0DFA50F68E39EA147CF0CFFF5E2284461C83C8F41CB4E3541F",
+    "arm64-v8a:pathguardctl": "sha256:8E84E08AA87712D17FC52F3CC6B9B66C4907322C51968971C5600490A0B7D61F",
+    "armeabi-v7a:pathguardd": "sha256:DF80753E22BDCF762D5BBAE58773831D9A951B5AED15451C665851552A843437",
+    "armeabi-v7a:pathguardctl": "sha256:B8CF4A3B814F088657B93FA6470E19E28B9F47E03F41E216926CBC0270E13695",
+    "arm64-v8a:zygisk": "sha256:5BF73F48FCA8F1DED18418118AC8210811730ACEDDC1C94C842AF741065B60C2",
+    "armeabi-v7a:zygisk": "sha256:0117BDD1B4F2D5B05414A05DD8B49E23DDCC4F6C757CD861E1AD7780B29E6F59"
+  },
+  "scenario_id": "V-56-android-offline-production-gate",
+  "steps": [
+    "Build pathguardd and pathguardctl for arm64-v8a and armeabi-v7a with NDK r27d",
+    "Rebuild both Zygisk variants with APP_STL=none",
+    "Inspect ELF class, machine, PT_TLS, exports, link isolation, test injection and legacy symbols",
+    "Hash all six production artifacts"
+  ],
+  "expected_result": "Both ABIs build and all production isolation, ABI, export and legacy cutover checks pass",
+  "before_actual": "The baseline did not contain the final dual-ABI v6 cutover artifact set",
+  "after_actual": "Both production ABIs built; Zygisk had no PT_TLS or STL leakage; all six artifact hashes matched the archived manifest",
+  "classification": "unchanged",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-final-host-20260801/V-56-android-offline-gate.md",
+    "scripts/build-native.ps1",
+    "native/Android.mk"
+  ],
+  "reviewer_conclusion": "The complete offline Android gate passed; runtime operation and parity remain assigned to V-57 and V-58 device tasks"
+}

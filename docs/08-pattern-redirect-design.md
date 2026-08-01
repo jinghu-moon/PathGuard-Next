@@ -1,6 +1,6 @@
 # PathGuard Next 通用路径模式匹配与动作路由设计
 
-> 状态：提案 / Draft
+> 状态：已实施（设备矩阵与明确 unsupported 边界除外）
 >
 > 文档版本：0.8
 >
@@ -10,7 +10,7 @@
 
 ## 1. 摘要
 
-PathGuard 当前的 `redirect = ["A" -> "B"]` 是目录前缀映射。它适合把一个完整子树
+PathGuard 改造前的 `redirect = ["A" -> "B"]` 是目录前缀映射。它适合把一个完整子树
 绑定到另一个目录，但不能表达以下需求：
 
 ```text
@@ -46,32 +46,32 @@ mount 内部接口和 plan 表达允许随统一 IR 重构；
 - 判断“目标应该做什么”：以最新需求和核心业务闭环为首要约束，以 Android/Linux/POSIX 官方
   契约为平台边界，再用当前实验数据验证；ADR、现有接口和参考项目都允许修订或替换。
 
-因此 ADR 与代码都不是不可推翻的权威。ADR-0002 记录过 policy format v4，而当前代码执行 v5，
-只能说明事实已经演进；同理，当前 v5、`file_picker` 和 prefix mapper 也只是改动前基线，不能
-阻止 format 6、统一 Action IR 或 Provider contract 的根因重构。
+因此 ADR 与代码都不是不可推翻的权威。ADR-0002 记录过 policy format v4/v5；这些内容与
+`file_picker`、prefix mapper 现仅是改动前基线。当前生产实现已切换到 format 2、policy format 6、
+统一 Action IR 和分域 Provider contract，详细执行证据见 `docs/09-pattern-redirect-tdd-task-list.md`。
 
 | 层级 | 当前状态 | 本文用法 |
 | --- | --- | --- |
-| 已实现基线 | rules TOML format 1；policy format v5/schema 2；literal deny/redirect；`file_picker`；mount 与 Provider literal virtualization | 记录为前测事实；不形成接口兼容承诺 |
+| 历史 before 基线 | rules TOML format 1；policy format v5/schema 2；literal deny/redirect；`file_picker`；prefix mapper | 仅用于前后对比，不形成接口兼容承诺 |
+| 当前实现 | rules TOML format 2；policy format 6/schema 3；Selector/Action/Glob v1；五执行域 capability admission；provenance/status v2 | Host/NDK 自动化完成；设备未观察项和 unsupported 能力以任务清单为准 |
 | 已接受目标 | ADR-0010～0015 的后端策略、snapshot、capability、Glob v1 和有界反选 | 作为当前目标设计；发现与最新需求/平台事实冲突时必须修订 |
 | 已接受目标 | ADR-0016 policy format 6/schema 3 | format 6 首版编码统一 Selector/Action、PatternTable 和有界 selector 差集；不增加 NOT token |
 | 已接受目标 | ADR-0017 route provenance | daemon 单写持久 owner；多源反向只接受 strong identity + committed record，不恢复 canonical source fallback |
 
-本文出现“当前”时只指上述已实现基线；出现“目标”“应”或 Phase P0～P5 时指尚待实现和验证的
-设计。任何 capability 只有对应代码、probe 和 conformance test 同时成立后才能从目标变成运行时
-事实。
+本文保留的 Phase P0～P5 和 format 1/v5 描述是实施时的设计与 before 基线，不代表当前生产入口。
+任何 capability 仍只有在对应代码、probe 和 conformance test 同时成立后才能报告 active。
 
 ### 1.2 关键结论的相互印证
 
 | 议题 | 当前代码 | ADR/官方证据 | 本文结论 |
 | --- | --- | --- | --- |
-| policy 格式 | v5/schema 2 是唯一 reader | ADR-0002 的 v4 已过时；ADR-0016 已冻结 v6/schema 3 | v5 是前测基线；目标 v6 一次性替换，不要求运行时兼容 |
+| policy 格式 | v6/schema 3 是唯一 reader | ADR-0016 supersede ADR-0002 的 v4/v5 | v5 仅保留历史证据；生产不提供兼容 reader |
 | Provider 身份 | Binder caller UID；shared UID 按 UID 共享 | ADR-0006 明确 package attribution 未完成；Binder/SAF 不保证自动给出唯一 package | UID/user 是最低安全 scope，package 只作可信附加限定 |
-| 动态能力位 | 只有 bit 0～4、8～11 | ADR-0012/0013 接受 bit 16～19，但注明分阶段实现 | 目标协议已决，运行时能力尚未实现 |
+| 动态能力位 | bit 0～4、8～11、16～19 已进入共享协议 | ADR-0012/0013 定义分域准入 | 未通过 probe 的位保持 unsupported，不由 hook 日志推断 active |
 | Provider 操作 | literal path virtualization + 部分 query deny | DocumentsProvider 将 query/create/open 分成不同接口 | glob Provider action 必须 composite admission |
 | FUSE | 存在设备相关兼容 Hook，不构成 complete probe | AOSP Mainline 可更新；passthrough 可绕过后续 read/write daemon path | 按当前模块/内核 probe，并在 open/create 固定 FD route |
-| snapshot | specialize 时独立读取当前 policy | ADR-0001 延期 Zygote mmap；ADR-0011 接受进程内 hazard pointer | 每进程 immutable snapshot，seq_cst 首版，不改变 ADR-0001 |
-| 反选 | 当前代码尚未支持 glob/except | ADR-0014 接受字符类补集；ADR-0015 已 Accepted | `[!abc]` 属于 v1；selector except 已进入 ADR-0016 的 format 6/schema 3 |
+| snapshot | immutable snapshot/hazard domain 已实现 | ADR-0001 延期 Zygote mmap；ADR-0011 接受进程内 hazard pointer | seq_cst、slot/retire 有界门已自动化验证 |
+| 反选 | Glob v1 与有界 selector except 已实现 | ADR-0014/0015 已 Accepted | `[!abc]` 属于 v1；except 编码于 format 6/schema 3 |
 
 ### 1.3 未发布阶段的改动与验收原则
 
@@ -109,11 +109,14 @@ Host 前测写入 `tests/baseline/` 的清单/报告；真机证据沿用 `tests
 命令、hash、结果摘要和证据路径。破坏性变更必须在同一 change set 更新测试、配置样例、共享
 格式头、状态解析和相关 ADR/设计文档，禁止先合入不一致的半套协议。
 
-## 2. 背景与当前实现边界
+## 2. 背景与实现边界
 
-### 2.1 当前代码的实际语义
+### 2.1 改造前代码语义（历史基线）
 
-当前 `rules.toml` 仍是 `format = 1`，规则模型中的 `RedirectRule` 只有 `source` 和 `target`
+以下内容记录 V-12/V-14 改造前基线。当前生产入口已是 format 2/PolicyV6，旧 reader、parser 和
+prefix mapper 已删除。
+
+改造前 `rules.toml` 是 `format = 1`，规则模型中的 `RedirectRule` 只有 `source` 和 `target`
 两个规范化路径。宿主编译器生成唯一可执行的 `policy.bin` format v5/schema 2；其表只有
 Package、MountRule、EventRule 和 String，动态 selector/action/token 表尚不存在。运行时
 `provider_path_mapper` 以组件边界检查做最长前缀匹配，并把剩余 tail 拼接到目标路径。
@@ -127,23 +130,22 @@ Pictures/Album/a.jpg -> Download/redirect/Album/a.jpg
 这不是 glob，而是整棵目录树的 prefix mapping。现有 mount executor 同样只能对准备好的
 目录执行 bind；单个文件或一个目录中的部分文件无法通过一次 bind 表达。
 
-当前 Provider Hook 已具备以下基础能力：
+改造前 Provider Hook 已具备以下基础能力：
 
 - 通过 Binder JNI 读取真实调用方 UID，而不是把 Provider 自身 UID 当作规则主体；
 - 对 `open/stat/access/opendir/mkdir/rename` 等 libc 边界做路径虚拟化；
 - 按 user 和 caller UID 隔离规则；
 - 规则不命中时 fail-open。
 
-Provider rule load 当前通过每个 user 的 `/data/user/<user>/<package>` owner UID 解析 caller
-scope；shared UID 因而按 UID 共享语义，而不是已经完成 package attribution。Hook 当前对
+Provider rule load 当时通过每个 user 的 `/data/user/<user>/<package>` owner UID 解析 caller
+scope；shared UID 因而按 UID 共享语义，而不是已经完成 package attribution。Hook 当时对
 `MediaProvider`/`ExternalStorageProvider` 进程安装 Binder identity、libc path 和部分 FUSE
-兼容入口，并继续使用 `provider_compat = virtualize`。这些真机验证过的 literal 能力可以作为
+兼容入口，并继续使用 `provider_compat = virtualize`。这些真机验证过的 literal 能力作为了
 新的 Pattern Engine/ActionEvaluator 的执行适配器，但不能直接扩展现有 `PathRule` 的字符串
 前缀逻辑来实现 glob，也不能据此宣称 query/insert/reverse scan 或完整 FUSE glob 已准入。
 
-当前稳定 capability 代码只定义 bit 0～4 和 8～11。ADR-0012/0013 分配的 bit 16～19 是已接受
-但尚未进入共享头、probe 和 status 的目标协议；在 P1 落地前不得由日志中的“hook installed”
-替代这些位。
+当时稳定 capability 代码只定义 bit 0～4 和 8～11。当前 bit 16～19 已进入共享头、admission
+和 status，但未通过实际 operation probe 的能力仍不得由“hook installed”日志替代。
 
 ### 2.2 需求定义
 

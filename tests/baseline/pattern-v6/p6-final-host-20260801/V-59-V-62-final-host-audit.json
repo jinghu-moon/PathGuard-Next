@@ -1,0 +1,34 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-final-host-20260801",
+  "before_commit": "1fcb35ba327dd7e24e42286ad1ecf734326d07bd",
+  "after_commit": "working_tree",
+  "environment": {
+    "host": "Windows x86_64; MSVC Release and Clang UBSan; 30 minute runtime soak",
+    "device": "device matrix not_observed; deferred to V-57 through V-60"
+  },
+  "rules_source_hash": "sha256:DEA93C4B7A3FFF4853F552F76EC581EBC3AA674BB70FFDD0452B00D6FE869419",
+  "policy_hash": "sha256:83573557AC1AB99DCAF6AD12416E9EB97C971F29C7DA86DCDB569D39C8366288",
+  "module_abi_hashes": {
+    "arm64-v8a:zygisk": "sha256:5BF73F48FCA8F1DED18418118AC8210811730ACEDDC1C94C842AF741065B60C2",
+    "armeabi-v7a:zygisk": "sha256:0117BDD1B4F2D5B05414A05DD8B49E23DDCC4F6C757CD861E1AD7780B29E6F59"
+  },
+  "scenario_id": "V-59-V-62-host-fault-soak-trace-audit",
+  "steps": [
+    "Replay the Host fault groups in MSVC Release and Clang UBSan CTest",
+    "Run the relative performance gates and the 30 minute reload and match soak",
+    "Trace every planned cutover to its replacement tests, interfaces, documentation and evidence",
+    "Classify device-only observations and implementation gates without promoting them to Host success"
+  ],
+  "expected_result": "The Host fault and resource gates pass, every planned break is traceable and unresolved device or adapter work remains explicit",
+  "before_actual": "Final Host results existed as separate summaries and did not satisfy the frozen comparison report schema",
+  "after_actual": "Host fault and soak gates passed; the schema-valid audit records zero unexpected Host regressions and preserves all device and T-27 adapter blockers",
+  "classification": "unchanged",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-final-host-20260801/V-59-V-62-final-host-audit.md",
+    "tests/baseline/pattern-v6/p6-auxiliary-20260731/V-48-host-soak-after.md",
+    "tests/baseline/pattern-v6/p6-auxiliary-20260731/T-27-export-host-contract.md",
+    "docs/09-pattern-redirect-tdd-task-list.md"
+  ],
+  "reviewer_conclusion": "V-61 and V-62 are complete only for the offline audit scope; V-63 remains blocked until the listed production adapter and device reports close"
+}

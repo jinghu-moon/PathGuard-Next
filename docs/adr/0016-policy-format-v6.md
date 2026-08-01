@@ -1,6 +1,6 @@
 # ADR-0016：冻结 policy format 6 / schema 3
 
-状态：Accepted
+状态：Accepted / Implemented（2026-08-01 Host/NDK 门通过，设备矩阵见任务清单）
 
 日期：2026-07-29
 
@@ -9,7 +9,8 @@ Supersedes：[ADR-0002](0002-policy-format-v4.md) 的 policy v5 格式与 canoni
 
 ## 背景
 
-当前唯一可执行格式是 policy v5/schema 2。它只包含 Package、MountRule、EventRule 和 String
+本段记录决策时的 before 状态：当时唯一可执行格式是 policy v5/schema 2。它只包含
+Package、MountRule、EventRule 和 String
 四张表，无法表达统一 Selector/Action、Glob v1、字符类、有界 `select.except`、execution
 domain、capability requirement 和 operation mask。把这些语义追加到 v5 会保留两套规则模型，
 也会使 Provider、app-path 和 event adapter 继续各自解析路径规则。
@@ -17,7 +18,8 @@ domain、capability requirement 和 operation mask。把这些语义追加到 v5
 项目尚未发布，不需要运行时兼容旧格式。V-08 已接受 ADR-0015，因此 format 6 首版必须直接
 包含 except refs，不能预留半成品字段后再升级。format 6 同时需要解决主设计草案中的一个结构
 缺口：selector/except 使用 `PatternId`，但草案没有 PatternTable。没有显式 PatternTable 会迫使
-base 与 except 复制 token range，破坏 PatternProgram 去重和引用校验。
+base 与 except 复制 token range，破坏 PatternProgram 去重和引用校验。当前生产实现已完成
+format 2 / policy v6 一次性切换，v5 reader/writer 不再进入生产构建。
 
 ## 决策摘要
 

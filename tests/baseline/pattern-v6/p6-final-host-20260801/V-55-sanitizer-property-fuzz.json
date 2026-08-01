@@ -1,0 +1,32 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-final-host-20260801",
+  "before_commit": "1fcb35ba327dd7e24e42286ad1ecf734326d07bd",
+  "after_commit": "working_tree",
+  "environment": {
+    "host": "Windows x86_64; Clang 20.1.7 RelWithDebInfo; UBSan; fixed fuzz seed 1885434929",
+    "device": "not_applicable"
+  },
+  "rules_source_hash": "sha256:DEA93C4B7A3FFF4853F552F76EC581EBC3AA674BB70FFDD0452B00D6FE869419",
+  "policy_hash": "sha256:83573557AC1AB99DCAF6AD12416E9EB97C971F29C7DA86DCDB569D39C8366288",
+  "module_abi_hashes": {
+    "arm64-v8a:zygisk": "sha256:5BF73F48FCA8F1DED18418118AC8210811730ACEDDC1C94C842AF741065B60C2",
+    "armeabi-v7a:zygisk": "sha256:0117BDD1B4F2D5B05414A05DD8B49E23DDCC4F6C757CD861E1AD7780B29E6F59"
+  },
+  "scenario_id": "V-55-host-sanitizer-property-fuzz",
+  "steps": [
+    "Build the complete Host test set with Clang UBSan",
+    "Run all 77 registered tests including property, corruption and concurrency harnesses",
+    "Run the rules compiler, pattern tokenizer and pattern matcher libFuzzer targets with the fixed seed"
+  ],
+  "expected_result": "No sanitizer diagnostic, crash, hang, historical seed regression or concurrency harness failure is observed",
+  "before_actual": "The MSVC Release baseline passed 77 of 77 tests without sanitizer instrumentation",
+  "after_actual": "Clang UBSan passed 77 of 77 tests and all three fixed-seed fuzzers exited zero without artifacts",
+  "classification": "unchanged",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-final-host-20260801/V-55-sanitizer-property-fuzz.md",
+    "tests/fuzz/README.md",
+    "tests/fuzz/seeds/pattern-v1/manifest.txt"
+  ],
+  "reviewer_conclusion": "All sanitizer and fuzz work executable on this Host passed; unavailable Windows ASan and TSan runtimes remain explicit toolchain limitations"
+}

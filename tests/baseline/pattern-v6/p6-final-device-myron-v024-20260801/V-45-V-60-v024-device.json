@@ -1,0 +1,48 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-final-device-myron-v024-20260801",
+  "before_commit": "1fcb35ba327dd7e24e42286ad1ecf734326d07bd",
+  "after_commit": "working_tree",
+  "environment": {
+    "device": "Xiaomi 25102RKBEC (myron)",
+    "android": "16 / API 36",
+    "kernel": "6.12.23-android16-5-g16e473de48a3-abogki462654244-4k",
+    "root_framework": "SukiSU Ultra / KernelSU 4.1.2-2-gf39c001e, version code 40545",
+    "selinux": "Enforcing",
+    "abi": "arm64-v8a only",
+    "module": "PathGuard Next 0.1.24-dev, version code 25",
+    "application": "LocalSend 1.17.0, version code 583, UID 10358"
+  },
+  "rules_source_hash": "sha256:dea93c4b7a3fff4853f552f76ec581ebc3aa674bb70ffdd0452b00d6fe869419",
+  "policy_hash": "sha256:e2b2e771b4daccedceb49b2e6064f9c833b44ae942a69832352cc3baf6aef9af",
+  "module_abi_hashes": {
+    "universal_zip": "sha256:631c3a82e9a5c2e1438d3813027545a789bc8e5aea1cc0ff4ee385ae148488e1",
+    "arm64-v8a:zygisk": "sha256:72bb60e43e7a94b65e320fbc15d79b52a676c8b74c8c04f482b10c2407d6ff97",
+    "armeabi-v7a:zygisk": "sha256:0f9e4846534199923caba0889b973adf2ef8bb527b080de22ae037ec69157544",
+    "arm64-v8a:pathguardd": "sha256:e0b8e60fda347a0dfa50f68e39ea147cf0cfff5e2284461c83c8f41cb4e3541f",
+    "armeabi-v7a:pathguardd": "sha256:df80753e22bdcf762d5bbae58773831d9a951b5aed15451c665851552a843437",
+    "arm64-v8a:pathguardctl": "sha256:8e84e08aa87712d17fc52f3cc6b9b66c4907322c51968971c5600490a0b7d61f",
+    "armeabi-v7a:pathguardctl": "sha256:b8cf4a3b814f088657b93fa6470e19e28b9f47e03f41e216926cbc0270e13695"
+  },
+  "scenario_id": "V-45-V-48-V-60-provider-status-restart-retention-and-localsend-soak",
+  "steps": [
+    "Install the host-built 0.1.24-dev universal module, reboot with the module enabled, and compare the ZIP plus six installed native artifact SHA-256 values",
+    "Receive test.txt through Download/localsend-source and test.jpg through Pictures using LocalSend, then verify the payload hashes and unique physical destinations",
+    "Read the LocalSend, ExternalStorageProvider and MediaProvider runtime status records and compare domain-specific admission with the actual file results",
+    "Force-stop and cold-start LocalSend ten times while checking previous PID cleanup, active/complete/fd_pinned status, three rule mounts, launch telemetry and RSS",
+    "Compare runtime status file counts before the retention fix, after reboot, and after ten distinct application PIDs",
+    "Stop LocalSend, restart both system Providers, verify new Provider PIDs and active per-action status, then restart LocalSend before and after the Android storage service settles",
+    "Force-stop the final LocalSend process and scan every process mountinfo for configured mount residuals while leaving both Providers alive"
+  ],
+  "expected_result": "Provider status publication succeeds without post-specialize companion access, per-action Provider admission agrees with LocalSend file placement, dead-PID status history remains bounded, Provider restart fails open during any transient storage gap and recovers after the storage service settles, and application mount namespaces leave no global residual",
+  "before_actual": "In 0.1.22-dev, LocalSend file placement worked but Provider post-specialize companion access failed with errno 13, no Provider status file was published, and only the aggregate LocalSend mount record existed. In 0.1.23-dev, shared-memory Provider status publication worked, but 26 PID-named status files accumulated after cold starts and Provider restarts because dead PID records had no garbage collection",
+  "after_actual": "In 0.1.24-dev, both Providers published two active redirect admissions with no missing capability or operation, while LocalSend correctly reported only its mount transaction because this policy has no app-path action. test.txt and test.jpg matched their baseline hashes and existed only under localsend-redirect. Ten cold starts passed 10/10 with one of each configured mount and the status directory stayed at three live-PID files. Restarting both Providers reduced the directory to their two new live records; restarting LocalSend restored it to three and pruned the failed predecessor PID. An immediate application start during storage-service reconstruction reported failed_preflight/ENOENT rather than false active, and a settled retry recovered active/complete/fd_pinned with three mounts. Final force-stop removed the process and all three configured mount residual counts were zero",
+  "classification": "planned_break",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-final-device-myron-v024-20260801/V-45-V-60-v024-device.md",
+    "tests/baseline/pattern-v6/p6-final-device-myron-v024-20260801/V-45-V-60-v024-device-results.json",
+    "tests/baseline/pattern-v6/p6-final-device-myron-v024-20260801/V-45-V-60-v024-cold-start-10.jsonl",
+    "tests/baseline/pattern-v6/production-integration-guard.cmake"
+  ],
+  "reviewer_conclusion": "The v0.1.24 changes close the observed Provider status transport and dead-PID retention regressions without changing redirect semantics. V-45 active-state agreement, V-48 Provider restart recovery, and the v0.1.24 ten-cycle V-60 supplement are observed on this device with no unexpected regression. The immediate ENOENT is an explicit fail-open storage reconstruction window and recovered on retry; it is not reported as active. Inactive, unsupported, collision, ambiguous and overflow V-45 cases, additional ROM/root/kernel tiers, arm32 execution, and fanotify-dependent scenarios remain outside this single-device report"
+}

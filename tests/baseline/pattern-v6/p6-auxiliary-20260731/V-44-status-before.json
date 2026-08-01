@@ -1,0 +1,1 @@
+{"schema":"pathguard.status.v1","rules":{"status":"active","capability_generation":4},"processes":[{"version":1,"pid":42,"process":"com.example.cli","enforcement":"active","error":0,"attempt":"01"}]}

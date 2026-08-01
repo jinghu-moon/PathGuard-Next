@@ -35,6 +35,32 @@
 | `p6-core-20260730` | T-12～R-16 / V-15～V-23 | complete | `p6-core-20260730/V-15-V-23-policy-runtime-after.md` |
 | `p6-core-20260730` | T-17～R-20 / V-24～V-31 | complete + device not_observed | `p6-core-20260730/V-24-V-31-path-provider-after.md` |
 | `p6-core-20260730` | T-21～R-24 / V-32～V-39 | complete + device not_observed | `p6-core-20260730/V-32-V-39-provenance-security-after.md` |
+| `p6-provider-lifecycle-20260731` | V-31 follow-up | complete + partial device observed | `p6-auxiliary-20260731/V-31-provider-lifecycle-after.md` |
+| `p6-selector-except-audit-20260731` | V-40 / T-25～R-25 / V-41 | complete | `p6-auxiliary-20260731/V-40-V-41-selector-except-after.md` |
+| `p6-event-before-20260731` | V-42 | complete + device unsupported | `p6-auxiliary-20260731/V-42-event-before.md` |
+| `p6-auxiliary-audit-20260731` | T-26～V-48 implementation audit | complete（available-device scope） | `p6-final-device-myron-v024-20260801/V-45-V-63-current-device-closure.json` |
+| `p6-export-host-20260801` | T-27～R-27 Host contract | not_observed（production fanotify scope waived） | `p6-auxiliary-20260731/T-27-export-host-contract.md` |
+| `p6-status-before-20260801` | V-44 | complete | `p6-auxiliary-20260731/V-44-cli-status-before.md` |
+| `p6-runtime-status-20260801` | T-28～R-28 status contract/wiring | complete | `p6-auxiliary-20260731/T-28-runtime-status-host.md` |
+| `p6-complete-vfs-gate-20260801` | V-46 | complete | `p6-auxiliary-20260731/V-46-complete-vfs-investment-gate.md` |
+| `p6-pattern-gate-20260801` | T-30 matcher gate | complete | `p6-auxiliary-20260731/T-30-pattern-gate-host.md` |
+| `p6-runtime-gate-20260801` | T-30～R-30 runtime/soak Host gate | complete | `p6-auxiliary-20260731/T-30-runtime-performance-gate.md` |
+| `p6-v48-host-after-20260801` | V-48 Host soak after | complete | `p6-auxiliary-20260731/V-48-host-soak-after.md` |
+| `p6-final-host-20260801` | V-49～V-54 cutover/Release Host gate | complete | `p6-final-host-20260801/V-49-V-54-cutover-host.json` |
+| `p6-final-host-20260801` | V-55 sanitizer/property/fuzz Host gate | complete | `p6-final-host-20260801/V-55-sanitizer-property-fuzz.json` |
+| `p6-final-host-20260801` | V-56 Android NDK/ABI/ELF offline gate | complete | `p6-final-host-20260801/V-56-android-offline-gate.json` |
+| `p6-final-host-20260801` | V-59～V-62 Host/final offline audit | complete + available-device closure | `p6-final-host-20260801/V-59-V-62-final-host-audit.json` |
+| `p6-final-device-myron-20260801` | V-57～V-62 Android 16/myron device batch | complete（available-device scope） | `p6-final-device-myron-v024-20260801/V-45-V-63-current-device-closure.json` |
+| `p6-final-device-myron-v59-20260801` | V-59 myron fault injection and production recovery | complete（available-device scope） | `p6-final-device-myron-v024-20260801/V-45-V-63-current-device-closure.json` |
+| `p6-final-device-myron-v024-20260801` | V-45/V-48/V-60 Provider status、restart、retention 与 cold-start 补充 | complete（available-device scope） | `p6-final-device-myron-v024-20260801/V-45-V-60-v024-device.json` |
+| `p6-final-device-myron-v024-20260801` | V-45～V-63 current-device closure | complete（available-device scope） | `p6-final-device-myron-v024-20260801/V-45-V-63-current-device-closure.json` |
+| `device-matrix-scope-waiver-20260801` | V-48、V-57～V-60 第二设备子矩阵 | not_observed（user-authorized scope waiver） | `device-matrix-scope-waiver-20260801.md` |
+
+`p6-auxiliary-20260730/V-31-provider-early-start-before.md` 是上述 Provider 生命周期修复的 before 证据；
+原文件曾误标为 V-40，已按任务清单更正为 V-31，避免与 ADR-0015 决策门冲突。
 
 状态只能使用 `pending`、`in_progress`、`complete`、`blocked` 或 `not_observed`。
 `complete` 要求对应任务的验收标准和证据均已满足。
+最终 Host/离线门和独立设备批次均以 comparison report format 1 JSON 为机器可验证入口；
+同名 Markdown 保留执行细节。每份 JSON 均须通过
+`tests/baseline/validate_comparison_report.cmake`。

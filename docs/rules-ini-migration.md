@@ -14,16 +14,19 @@ redirect Download/Source -> PathGuard/Target
 对应为：
 
 ```toml
-format = 1
+format = 2
 
 [apps."com.example.app"]
 users = [0]
-redirect = [
-    "Download/Source" -> "PathGuard/Target",
+redirect_rules = [
+    { select = { root = "Download", glob = "Source", type = "directory" }, to = "PathGuard/Target" },
 ]
 ```
 
-旧格式中的 `{user}`、`{package}`、`isolate`、`allow`、`observe` 和 `export` 没有自动迁移。必须先把占位符具体化，并只保留当前 format 1 已实现的 redirect 能力。迁移后运行：
+旧格式中的 `{user}`、`{package}`、`isolate`、`allow`、`observe` 和 `export` 没有自动迁移。
+必须先把占位符具体化，再将 deny/redirect 显式改写为 format 2 Selector/Action。需要 Provider
+path-I/O 时使用 `provider = { enabled = true }` 表达 intent；这不代表设备能力已准入。
+迁移后运行：
 
 ```text
 pathguardctl validate config/rules.toml --host

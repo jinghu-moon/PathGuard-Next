@@ -81,3 +81,31 @@
 - bit 16～19 没有因现有 Hook 日志而被提前宣称落地；
 - C3 MediaStore 与 C4 reverse 两个关键缺口已绑定对应 TDD 工作包；
 - V-04 判定 `complete`。
+
+## 2026-08-01 当前设备闭环更新
+
+本节 supersede 上述 bootstrap 时点的 `planned-red/partial` 实施状态，不改写历史 before 事实。
+机器入口为
+`tests/baseline/pattern-v6/p6-final-device-myron-v024-20260801/V-45-V-63-current-device-closure.json`。
+
+| 范围 | 当前结论 | 设备边界 |
+| --- | --- | --- |
+| C1 | Host 与 myron deny 均 observed | Nagram、Screenshots 返回 Permission denied |
+| C2 | Host 与 myron mount redirect observed | create 落入 backing；生产 smoke 三挂载 1/1/1 |
+| C3 | Provider path-I/O、TXT/JPG、FUSE open observed | bit 17 query/insert/reverse composite ABI unsupported |
+| C4 | 多源不同名前向 observed；collision/provenance Host contract complete | collision/ambiguous 生产注入入口 not_observed |
+| C5 | policy reload/race、topology race、mount cancel/rollback/owner death、snapshot gate observed | fanotify overflow unsupported |
+| C6 | Glob v1 Host 全覆盖，Provider `**` 文件路由设备 observed | 多 operand 生产设备注入 not_observed |
+
+| Capability | 当前结论 |
+| --- | --- |
+| bits 0～4 | mount backend/secure resolver Host 覆盖；myron `fd_pinned/backend=1` observed |
+| bits 8～11 | `CONFIG_FANOTIFY` disabled，明确 unsupported |
+| bit 16 | 两个 Provider 各 2/2 active per-action admission，与文件结果一致 |
+| bit 17 | 无 production query/insert/reverse composite adapter，保持 unsupported |
+| bit 18 | V-46 `adapter-only`，保持 unsupported |
+| bit 19 | app-path/Provider path-I/O Host contract complete；当前 policy 无独立 app-path action |
+
+第二设备、其他 ROM/root/kernel、arm32、当前设备无生产构造入口的 operation/state，以及无有效
+warm latency telemetry 均按用户授权保持 `not_observed`。这些边界不阻断当前范围 V-61～V-63，
+也不构成兼容性或 capability active 声明。

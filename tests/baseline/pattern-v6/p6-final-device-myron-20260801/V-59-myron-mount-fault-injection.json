@@ -1,0 +1,55 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-final-device-myron-v59-20260801",
+  "before_commit": "1fcb35ba327dd7e24e42286ad1ecf734326d07bd",
+  "after_commit": "working_tree",
+  "environment": {
+    "device": "Xiaomi 25102RKBEC (myron)",
+    "android": "16 / API 36",
+    "kernel": "6.12.23-android16-5-g16e473de48a3-abogki462654244-4k",
+    "root_framework": "SukiSU Ultra / KernelSU 4.1.2-2-gf39c001e, version code 40545",
+    "selinux": "Enforcing",
+    "abi": "arm64-v8a only",
+    "application": "LocalSend 1.17.0, UID 10358"
+  },
+  "rules_source_hash": "sha256:dea93c4b7a3fff4853f552f76ec581ebc3aa674bb70ffdd0452b00d6fe869419",
+  "policy_hash": "sha256:e2b2e771b4daccedceb49b2e6064f9c833b44ae942a69832352cc3baf6aef9af",
+  "module_abi_hashes": {
+    "prelease450:arm64-v8a:zygisk": "sha256:b1bb36c3c5291b20e4743a22101daaccc0fe5bfbd615c19128eb6dccdc613727",
+    "prelease1000:arm64-v8a:zygisk": "sha256:91bb8f78f894acf75d46015aa4a81b882c41d8c843c77364ef759a180b6ea063",
+    "mountdelay1000:arm64-v8a:zygisk": "sha256:92d6ef11dbe59b75a7e7ea598eada0feed9fd52c8cd5a7293ca1247295443b7d",
+    "crash-after-mount:arm64-v8a:zygisk": "sha256:8b658672f905099e34dae0b17cf08fe4207cc821e32695975e0d0dedb89fe9f3",
+    "rollbackfailure:arm64-v8a:zygisk": "sha256:8505bb4bf73e1120c98aec990fe106d06adc615bd6e6197f1f32bd55e588b3e7",
+    "production-recovery:arm64-v8a:zygisk": "sha256:ce1423947cbfeed572e54b6b3a3e4fc295f1876a067637f52da78ba7eb2d8950"
+  },
+  "scenario_id": "V-59-myron-mount-cancellation-owner-death-rollback-failure",
+  "steps": [
+    "Run the historical 450 ms pre-lease delay profile for five cold starts and determine whether the current 300 plus 500 ms completion budget still cancels it",
+    "Run a corrected 1000 ms pre-lease delay profile for five cold starts and require failed_preflight with ECANCELED, no mutation and no residual mount",
+    "Run a 1000 ms delay after the first mount for five cold starts and require verified rollback_complete with ECANCELED and no residual mount",
+    "Exit the mount worker after journaling the first mutation for five cold starts and require owner_death namespace taint plus complete namespace-member termination",
+    "Inject EIO into the verified rollback unmount after a 1000 ms post-mount delay for five cold starts and require rollback_failed namespace taint, never rollback_complete",
+    "Restore the production module, verify installed artifact hashes, run ten successful cold starts and receive one TXT plus one JPG through the two Android Providers"
+  ],
+  "expected_result": "Pre-mutation cancellation performs no namespace mutation, post-mutation cancellation rolls back verified mounts, owner death and rollback failure taint and terminate the namespace, and restoring the production artifact returns LocalSend and both Providers to normal operation",
+  "before_actual": "The historical 450 ms pre-lease profile no longer exercised cancellation: five of five runs completed with all three mounts because the current preflight completion grace extends the bounded wait to 800 ms",
+  "after_actual": "The corrected prelease1000 and mountdelay1000 profiles passed five of five as failed_preflight/ECANCELED with zero mounts and rollback_complete/ECANCELED with zero mounts respectively. Crash-after-mount passed five of five as namespace_tainted/owner_death/EOWNERDEAD with remaining zero. Rollbackfailure passed five of five as namespace_tainted/rollback_failed/EIO with identity-confirmed rollback failure, remaining zero and zero rollback_complete results. Production recovery matched every expected SHA-256, passed ten of ten cold starts, then received TXT and JPG with HTTP 200 and matching payload hashes without Provider crash",
+  "classification": "planned_break",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-final-device-myron-20260801/V-59-myron-mount-fault-injection.md",
+    "build/device-evidence/p6-final-device-myron-v019-fi-prelease450-20260801/prelease450-summary.json",
+    "build/device-evidence/p6-final-device-myron-v019-fi-prelease450-20260801/prelease450-pathguard.log",
+    "build/device-evidence/p6-final-device-myron-v019-fi-prelease1000-20260801/prelease1000-summary.json",
+    "build/device-evidence/p6-final-device-myron-v019-fi-prelease1000-20260801/prelease1000-pathguard.log",
+    "build/device-evidence/p6-final-device-myron-v019-fi-mountdelay1000-20260801/mountdelay1000-summary.json",
+    "build/device-evidence/p6-final-device-myron-v019-fi-mountdelay1000-20260801/mountdelay1000-pathguard.log",
+    "build/device-evidence/p6-final-device-myron-v019-fi-crash-after-mount-20260801/crash-after-mount-summary.json",
+    "build/device-evidence/p6-final-device-myron-v019-fi-crash-after-mount-20260801/crash-after-mount-pathguard.log",
+    "build/device-evidence/p6-final-device-myron-v019-fi-rollbackfailure-20260801/rollbackfailure-summary.json",
+    "build/device-evidence/p6-final-device-myron-v019-fi-rollbackfailure-20260801/rollbackfailure-pathguard.log",
+    "build/device-evidence/p6-final-device-myron-v019-production-recovery-20260801/production-recovery-summary.json",
+    "build/device-evidence/p6-final-device-myron-v019-production-recovery-20260801/post-fi-provider-receive.json",
+    "build/device-evidence/p6-final-device-myron-v019-production-recovery-20260801/production-recovery-cleanup.json"
+  ],
+  "reviewer_conclusion": "The current mount cancellation, verified rollback, owner-death containment, rollback-failure containment and production recovery paths have no unexpected regression on myron. Replacing the stale 450 ms test delay with 1000 ms is a planned test-profile correction. V-59 remains partial because fanotify is unsupported on this kernel and Provider restart, policy corruption, topology change and snapshot exhaustion were not injected on this device"
+}

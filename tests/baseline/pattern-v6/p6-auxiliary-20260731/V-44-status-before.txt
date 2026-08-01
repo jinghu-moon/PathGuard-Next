@@ -1,0 +1,10 @@
+status_version=6
+capability_generation=4
+bit17=unsupported
+[42]
+version=1
+pid=42
+process=com.example.cli
+enforcement=active
+error=0
+attempt=01
