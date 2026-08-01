@@ -1,0 +1,42 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-provider-contract-20260801",
+  "before_commit": "88cc9d3787c98521400258404959b182a3586891",
+  "after_commit": "working_tree",
+  "environment": {
+    "device": "Xiaomi M2012K11AC (alioth)",
+    "android": "13 / API 33 / MIUI V14.0.8.0.TKHCNXM",
+    "fingerprint": "Redmi/alioth/alioth:13/TKQ1.220829.002/V14.0.8.0.TKHCNXM:user/release-keys",
+    "kernel": "4.19.157-perf-g9607d8651312",
+    "selinux": "Enforcing",
+    "abi": "arm64-v8a,armeabi-v7a,armeabi",
+    "probe": "dev.pathguard.providercontract / UID 10437 / targetSdk 35",
+    "saf_tree": "primary:Download/test-SAF"
+  },
+  "rules_source_hash": "not_applicable: public Provider contract probe does not load PathGuard rules",
+  "policy_hash": "not_applicable: public Provider contract probe does not load a PathGuard policy",
+  "module_abi_hashes": {
+    "ExternalStorageProvider.apk": "sha256:44a42eeef364a1bd538e75c3553e45c9adfbd04a4b7af2dcfaa3f76bb448856e",
+    "MediaProvider.apk": "sha256:f8f71eaedd78a1bb0c3bb3d81405f2529221fe6358ca5fe4ce74a5c3853ca9ed",
+    "MediaProvider.apex_version": "339990000"
+  },
+  "scenario_id": "V-64-provider-public-contract-and-build-identity-alioth",
+  "steps": [
+    "Install the isolated provider contract probe without MANAGE_EXTERNAL_STORAGE",
+    "Insert, write, publish, query, read, rename and delete one MediaStore image",
+    "Select primary:Download/test-SAF and create, query, write, read, rename and delete one SAF document",
+    "Capture device, kernel, Provider package and MediaProvider APEX identities",
+    "Hash the installed ExternalStorageProvider and MediaProvider APKs",
+    "Search all probe directories for pg-contract-* residual objects"
+  ],
+  "expected_result": "All 12 required public Provider operations pass, probe objects are removed, and build identities are recorded without treating the public API result as a production adapter profile or bit 17 observation",
+  "before_actual": "The Host ProviderContractProbeV1 and Android probe APK existed, but no version-pinned device public-operation or installed Provider hash evidence had been archived",
+  "after_actual": "All six required MediaStore and six required DocumentsProvider operations passed on alioth; the additional MediaStore publish check passed; no pg-contract-* object remained; the installed ExternalStorageProvider and MediaProvider APK SHA-256 values and MediaProvider APEX version were recorded",
+  "classification": "unchanged",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-provider-contract-20260801/V-64-provider-public-contract-alioth.md",
+    "tests/baseline/pattern-v6/p6-provider-contract-20260801/V-64-provider-public-contract-alioth-observations.jsonl",
+    "build/device-evidence/provider-contract-v1/20260801-231015"
+  ],
+  "reviewer_conclusion": "The alioth Android 13 public Provider baseline is complete and permits T-35 Host contract work. It does not establish a private ABI adapter profile, virtual source/target mapping, FD identity, reverse mapping, restart recovery, or bit 17 support. The myron Android 16 target remains not_observed in this run."
+}

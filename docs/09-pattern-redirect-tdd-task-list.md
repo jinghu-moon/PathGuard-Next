@@ -1,6 +1,9 @@
 # PathGuard Next Pattern Redirect TDD 执行清单
 
-> 状态：所有当前范围内可执行任务已完成；V-46 `adapter-only` 决策形成合法阻断，fanotify/Export
+> 状态：原 pattern v6 当前设备范围已闭环；2026-08-01 根据用户决策启动 Provider contract
+> adapter（方案 B）后续工作，T-34～R-35 Host 合同及 V-64 alioth/Android 13 公共操作基线已完成，
+> bit 17 在真实 adapter profile、虚拟映射、FD identity、reverse 和 restart 全部通过前保持
+> `unsupported`。原 V-46 `adapter-only` 决策形成合法阻断，fanotify/Export
 > 因当前设备 `CONFIG_FANOTIFY` disabled 按用户授权跳过并保持 unsupported/not_observed。第二部分已有单设备
 > LocalSend/Provider 生命周期补充证据；2026-08-01 已增加一台 Android 16/myron/SukiSU Ultra
 > 的 0.1.19 Provider 修复、50 次启动和接收批次；0.1.24 又补齐 Provider per-action 状态、
@@ -1264,6 +1267,88 @@ comparison format 1 报告：
 该历史批次当时不改变 V-63 `blocked` 结论。后续补充证据与范围豁免已由
 `p6-final-device-myron-v024-20260801/V-45-V-63-current-device-closure.json` supersede；
 T-29～R-29/V-47 仍按 V-46 `adapter-only` 保持合法阻断。
+
+## 第六部分：Provider contract adapter（方案 B）
+
+本部分由用户于 2026-08-01 明确启动。它不改变此前 current-device closure，只扩展原设计 P3
+中尚未投产的 query/insert/document ID/FD/reverse composite contract。现有 Provider 前向
+path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 bit 17 `unsupported`，不得影响
+已验证的前向保存。
+
+| Task | 状态 | 当前证据/边界 |
+| --- | --- | --- |
+| T-34～R-34 | complete | `ProviderContractProbeV1`、Documents/MediaStore pair gate、缺 profile/check/operation/failure 矩阵；Host 红绿证据已归档 |
+| V-64 | complete（alioth public-contract scope） | Android 13/alioth 上 12 个必需公开操作全部通过且临时对象残留为 0；Provider APK/APEX 身份和 SHA-256 已归档，myron/Android 16 本轮未观察 |
+| T-35～R-35 | complete | 精确 APK SHA-256/build identity deployment pair gate、完整 check/operation mask、virtual source/target/URI/document-ID/strong FD/provenance binding conformance；MSVC Release 80/80 |
+| V-65 | pending | 真机验证 virtual query/create/open/rename/delete/reverse、FD identity 和 fail-open；全部通过前 bit 17 不置位 |
+| V-66 | pending | Provider restart、Mainline build identity 变化、provenance recovery、冷启动和实际应用回归 |
+
+### T-34 [红] 冻结 Provider contract pair gate
+
+- **任务描述**：定义 versioned Provider probe，使 DocumentsProvider 与 MediaStore 必须分别完成
+  ABI profile、caller UID、query、create/insert、stable document ID、FD identity、rename/delete、
+  reverse 和 restart 检查；任一单域 partial 不得形成部署级 active。
+- **验收标准**：测试先因 `ObserveProviderContractPair` 缺失而编译失败；失败点只能是 pair gate
+  尚未实现。
+- **关联需求**：设计 7.4、7.6、10 P3、11.3；ADR-0006、0012、0017。
+
+### I-34 [绿] 实现版本化 Provider contract evaluator
+
+- **任务描述**：实现无 Android 私有 ABI 依赖的 `ProviderContractProbeV1` 和 Documents/MediaStore
+  pair evaluator；只输出 capability/operation/check 缺失事实，不安装生产 Hook。
+- **验收标准**：完整 pair active；缺 adapter profile、失败/缺失 check、缺 operation、类型交换
+  均保持 inactive/unsupported，bit 17 不误置。
+- **依赖/时间盒**：T-34；2 小时。
+
+### R-34 [重构] 建立独立 Android 公共合同探针
+
+- **任务描述**：复用现有 Gradle wrapper，新增独立 probe APK；MediaStore 自动执行
+  insert/query/open/rename/delete，SAF 经用户授权目录执行 create/query/document-ID/open/rename/delete，
+  临时对象必须清理，JSONL 证据与 Provider/APEX 环境信息归档。
+- **验收标准**：`:providerContract:assembleDebug` 通过；PowerShell runner 语法通过；APK 不申请
+  `MANAGE_EXTERNAL_STORAGE`，不能把公开 API 基线通过解释为生产 adapter active。
+- **依赖/时间盒**：I-34；3 小时。
+
+### V-64 [验证] 可用设备 Provider 公共操作与模块身份基线
+
+- **任务描述**：在可用 production 配置安装 probe APK，选择可写 SAF 测试目录，
+  归档两类 Provider 的公开操作结果、fingerprint、SDK、kernel、Provider package/APEX 信息。
+- **验收标准**：12 个必需公开操作全部通过且无临时文件残留；失败项精确记录，不据此直接设置
+  adapter profile 或 bit 17。
+- **依赖/时间盒**：R-34；设备交互 10 分钟。
+- **执行结果**：2026-08-01 在 Redmi alioth、Android 13/API 33、MIUI
+  `V14.0.8.0.TKHCNXM` 上完成。MediaStore 与 DocumentsProvider 的 12 个必需操作全部通过，
+  `pg-contract-*` 残留为 0；ExternalStorageProvider APK 与 MediaProvider APK/APEX 身份及 SHA-256
+  已冻结。该结果只关闭公开合同基线，不代表私有 adapter profile、虚拟映射或 bit 17 active；
+  myron/Android 16 本轮未连接，按可用设备原则记为 `not_observed`，不阻塞 T-35 Host 工作。
+
+### T-35 [红] 冻结 version-pinned deployment profile 与 route binding
+
+- **任务描述**：DocumentsProvider 与 MediaStore profile 必须分别精确绑定 kind、SDK、versionCode、
+  APEX version（适用时）和完整 APK SHA-256；部署级 profile 只有在两端同时匹配时才成立。冻结
+  visible source、backing target、Provider URI/document ID、FD object identity 与 reverse provenance
+  的单对象一致性合同。
+- **验收标准**：测试先因 `provider_adapter_profile.h` 缺失而编译失败；Android 大版本或单一
+  versionCode 相同但 APK hash 不同不得匹配；弱 identity、source/target 同址和 reverse 不一致必须拒绝。
+- **依赖/时间盒**：V-64；2 小时。
+
+### I-35 [绿] 实现 Host adapter profile 与 mapping conformance
+
+- **任务描述**：实现 `ProviderBuildIdentityV1`、单 Provider profile、部署 pair gate 和
+  `ProviderRouteBindingV1` validator；未知 build、profile 缺 check/operation、任一 Provider 不匹配
+  均返回非 matched，不设置运行时 capability。
+- **验收标准**：alioth 两个已归档 APK 的完整 SHA-256 profile pair 通过；hash/kind/build/mask
+  负矩阵及 route binding 负矩阵全绿。
+- **依赖/时间盒**：T-35；3 小时。
+
+### R-35 [重构] 固化 composite profile 的 fail-open 边界
+
+- **任务描述**：单 Provider 匹配与 deployment pair 选择复用同一 evaluator；route binding 复用
+  ADR-0017 `ObjectIdentity`/`RouteRecord`，不另建 Provider-only reverse owner 模型。
+- **验收标准**：Provider 专项测试和完整 MSVC Release 回归通过；现有生产 wiring 与 bit 17 不变。
+- **执行结果**：红测为缺少 `pathguard/provider_adapter_profile.h`；实现后两个 Provider 专项测试
+  2/2、MSVC Release 80/80、comparison report validator 与 `git diff --check` 通过。
+- **依赖/时间盒**：I-35；2 小时。
 
 ## 参考依据
 

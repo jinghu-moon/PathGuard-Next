@@ -16,3 +16,5 @@ dependencyResolutionManagement {
 
 rootProject.name = 'PathGuardHideProbe'
 include ':app'
+include ':providerContract'
+project(':providerContract').projectDir = file('../../provider-contract/app')

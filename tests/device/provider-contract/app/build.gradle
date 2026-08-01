@@ -1,0 +1,25 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = 'dev.pathguard.providercontract'
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = 'dev.pathguard.providercontract'
+        minSdk = 31
+        targetSdk = 35
+        versionCode = 1
+        versionName = '0.1-probe'
+    }
+
+    buildTypes {
+        debug {
+            debuggable = true
+        }
+        release {
+            minifyEnabled = false
+        }
+    }
+}

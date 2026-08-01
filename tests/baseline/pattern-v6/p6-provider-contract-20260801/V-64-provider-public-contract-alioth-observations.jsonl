@@ -1,0 +1,13 @@
+{"schema":1,"domain":"media_store","operation":"insert","passed":true,"detail":"content://media/external_primary/images/media/1000079534"}
+{"schema":1,"domain":"media_store","operation":"open_write","passed":true,"detail":"content://media/external_primary/images/media/1000079534"}
+{"schema":1,"domain":"media_store","operation":"publish","passed":true,"detail":"content://media/external_primary/images/media/1000079534"}
+{"schema":1,"domain":"media_store","operation":"query","passed":true,"detail":"content://media/external_primary/images/media/1000079534"}
+{"schema":1,"domain":"media_store","operation":"open_read","passed":true,"detail":"content://media/external_primary/images/media/1000079534"}
+{"schema":1,"domain":"media_store","operation":"rename","passed":true,"detail":"content://media/external_primary/images/media/1000079534"}
+{"schema":1,"domain":"media_store","operation":"delete","passed":true,"detail":"content://media/external_primary/images/media/1000079534"}
+{"schema":1,"domain":"documents_provider","operation":"create","passed":true,"detail":"content://com.android.externalstorage.documents/tree/primary%3ADownload%2Ftest-SAF/document/primary%3ADownload%2Ftest-SAF%2Fpg-contract-1785597020936.bin"}
+{"schema":1,"domain":"documents_provider","operation":"query","passed":true,"detail":"primary:Download/test-SAF/pg-contract-1785597020936.bin"}
+{"schema":1,"domain":"documents_provider","operation":"open_write","passed":true,"detail":"primary:Download/test-SAF/pg-contract-1785597020936.bin"}
+{"schema":1,"domain":"documents_provider","operation":"open_read","passed":true,"detail":"primary:Download/test-SAF/pg-contract-1785597020936.bin"}
+{"schema":1,"domain":"documents_provider","operation":"rename","passed":true,"detail":"primary:Download/test-SAF/pg-contract-renamed-1785597020936.bin"}
+{"schema":1,"domain":"documents_provider","operation":"delete","passed":true,"detail":"content://com.android.externalstorage.documents/tree/primary%3ADownload%2Ftest-SAF/document/primary%3ADownload%2Ftest-SAF%2Fpg-contract-renamed-1785597020936.bin"}

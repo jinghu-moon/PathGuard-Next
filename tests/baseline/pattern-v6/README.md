@@ -55,6 +55,9 @@
 | `p6-final-device-myron-v024-20260801` | V-45/V-48/V-60 Provider status、restart、retention 与 cold-start 补充 | complete（available-device scope） | `p6-final-device-myron-v024-20260801/V-45-V-60-v024-device.json` |
 | `p6-final-device-myron-v024-20260801` | V-45～V-63 current-device closure | complete（available-device scope） | `p6-final-device-myron-v024-20260801/V-45-V-63-current-device-closure.json` |
 | `device-matrix-scope-waiver-20260801` | V-48、V-57～V-60 第二设备子矩阵 | not_observed（user-authorized scope waiver） | `device-matrix-scope-waiver-20260801.md` |
+| `p6-provider-contract-20260801` | T-34～R-34 Provider contract Host 合同 | complete | `p6-provider-contract-20260801/T-34-R-34-provider-contract-host.md` |
+| `p6-provider-contract-20260801` | V-64 Provider 公共操作与模块身份基线 | complete（alioth public-contract scope） | `p6-provider-contract-20260801/V-64-provider-public-contract-alioth.json` |
+| `p6-provider-contract-20260801` | T-35～R-35 version-pinned profile 与 mapping Host 合同 | complete | `p6-provider-contract-20260801/T-35-R-35-provider-adapter-profile-host.md` |
 
 `p6-auxiliary-20260730/V-31-provider-early-start-before.md` 是上述 Provider 生命周期修复的 before 证据；
 原文件曾误标为 V-40，已按任务清单更正为 V-31，避免与 ADR-0015 决策门冲突。

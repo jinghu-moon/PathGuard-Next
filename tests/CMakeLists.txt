@@ -256,6 +256,20 @@ target_include_directories(pathguard_provider_route_context_test PRIVATE
 target_link_libraries(pathguard_provider_route_context_test PRIVATE pathguard_core)
 add_test(NAME pathguard_provider_route_context_test
   COMMAND pathguard_provider_route_context_test)
+add_executable(pathguard_provider_contract_test
+  unit/provider_contract_test.cpp)
+target_include_directories(pathguard_provider_contract_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit)
+target_link_libraries(pathguard_provider_contract_test PRIVATE pathguard_core)
+add_test(NAME pathguard_provider_contract_test
+  COMMAND pathguard_provider_contract_test)
+add_executable(pathguard_provider_adapter_profile_test
+  unit/provider_adapter_profile_test.cpp)
+target_include_directories(pathguard_provider_adapter_profile_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit)
+target_link_libraries(pathguard_provider_adapter_profile_test PRIVATE pathguard_core)
+add_test(NAME pathguard_provider_adapter_profile_test
+  COMMAND pathguard_provider_adapter_profile_test)
 pathguard_add_runtime_test(pathguard_operation_plan_test
   unit/operation_plan_test.cpp)
 add_executable(pathguard_auxiliary_adapters_test
