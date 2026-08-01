@@ -3,7 +3,6 @@
 #include <fstream>
 #include <string>
 
-#include "pathguard/binary.h"
 #include "pathguard/rules_control.h"
 #include "test_assert.h"
 

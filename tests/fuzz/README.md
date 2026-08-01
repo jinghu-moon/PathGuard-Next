@@ -1,24 +1,21 @@
-# Rules compiler fuzz assets
+# Rules compiler and pattern fuzz assets
 
-RF0 只冻结 corpus 命名和 seed 规则；RF2/RF3/RF8 创建实际 fuzz target。
+RF0 冻结 corpus 命名和 seed 规则。当前生产切换后只保留 format 2 compiler 与
+Pattern v1 tokenizer/matcher fuzz target；format 1 scanner/desugarer target 已随生产代码删除。
 
 - seed 名称：`<target>-<sha256-prefix>.seed`
 - regression 名称：`<target>-<issue-or-date>-<sha256-prefix>.case`
 - 每个失败记录工具版本、固定 seed、最小输入和对应普通回归测试。
 
-RF2 提供两个层次：
+Rules format 2 提供两个层次：
 
-- `pathguard_rules_string_fuzz_smoke` 与 `pathguard_rules_candidate_fuzz_smoke`
-  使用固定 PRNG seed 进入日常 CTest。
-- `pathguard_rules_string_fuzzer` 与 `pathguard_rules_candidate_fuzzer`
-  仅在 Clang 构建中启用 `PATHGUARD_BUILD_FUZZERS=ON`。
-- `pathguard_rules_desugar_fuzz_smoke` 与 `pathguard_rules_desugar_fuzzer`
-  覆盖 FormatProbe、scanner、单次 emitter、RewriteMap 和畸形前缀组合。
-- `pathguard_rules_compile_fuzz_smoke` 与 `pathguard_rules_compile_fuzzer`
-  覆盖 parser/scope、decoder、语义、encoder 和独立 verifier；成功结果必须可复验，
-  任一 error 不得携带 blob。
+- `pathguard_rules_compile_fuzz_smoke` 使用固定 PRNG seed 进入日常 CTest。
+- `pathguard_rules_compile_fuzzer` 仅在 Clang 构建中启用
+  `PATHGUARD_BUILD_FUZZERS=ON`。
+- 两者覆盖 format 2 parser/scope、decoder、语义、PolicyV6 encoder 和独立 verifier；
+  成功结果必须可复验，任一 error 不得携带 blob。
 
-固定工具链为 LLVM/Clang 18 compatible libFuzzer，日常 smoke 使用仓库固定
+固定工具链为 LLVM/Clang compatible libFuzzer，日常 smoke 使用仓库固定
 PRNG seed，长任务使用 `-max_total_time=3600 -timeout=10 -rss_limit_mb=512`。
 发现崩溃后先用 `-minimize_crash=1` 最小化，再把输入登记为 `.case` 和普通
 回归测试，不允许仅加入 ignore 列表。

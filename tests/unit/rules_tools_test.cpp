@@ -28,69 +28,95 @@ bool HasCode(const std::vector<pathguard::rules::Diagnostic>& diagnostics,
 int main() {
     using namespace pathguard::rules;
 
-    const RulesBuildResult redundant = Compile(
-        "format = 1\n[compatibility]\nallow_legacy_mount=true\n"
-        "[apps.\"com.example.app\"]\n"
-        "redirect=[\"A\" -> \"B\",\"A\" -> \"B\"]\n");
+    const RulesBuildResult redundant = Compile(R"(format = 2
+[compatibility]
+allow_legacy_mount = true
+[apps."com.example.app"]
+redirect_rules = [
+  { select = { root = "Root", glob = "A", type = "any" }, to = "B" },
+  { select = { root = "Root", glob = "A", type = "any" }, to = "B" },
+]
+)");
     assert(redundant.ok());
     const auto redundant_lint = LintRules(redundant, RulesLimits{});
     assert(HasCode(redundant_lint, kRuleRedundant));
     assert(HasCode(redundant_lint, kLintLegacy));
 
     const RulesBuildResult unicode = Compile(
-        "format = 1\n[apps.\"com.example.app\"]\n"
-        "redirect=[\"Path/A\" -> \"Path/\xef\xbc\xa1\"]\n");
+        "format = 2\n[apps.\"com.example.app\"]\n"
+        "redirect_rules=["
+        "{select={root=\"Path\",glob=\"A\",type=\"any\"},to=\"Path/A\"},"
+        "{select={root=\"Path\",glob=\"B\",type=\"any\"},"
+        "to=\"Path/\xef\xbc\xa1\"}]\n");
     assert(unicode.ok());
     assert(HasCode(LintRules(unicode, RulesLimits{}), kLintUnicode));
 
-    const RulesBuildResult before = Compile(
-        "format = 1\n[apps.\"com.example.app\"]\n"
-        "redirect=[\"A\" -> \"B\",\"C\" -> \"D\"]\n");
-    const RulesBuildResult after = Compile(
-        "format = 1\n[apps.\"com.example.app\"]\n"
-        "redirect=[\"A\" -> \"X\",\"E\" -> \"F\"]\n");
+    const RulesBuildResult before = Compile(R"(format = 2
+[apps."com.example.app"]
+redirect_rules = [
+  { select = { root = "Root", glob = "A", type = "any" }, to = "B" },
+  { select = { root = "Root", glob = "C", type = "any" }, to = "D" },
+]
+)");
+    const RulesBuildResult after = Compile(R"(format = 2
+[apps."com.example.app"]
+redirect_rules = [
+  { select = { root = "Root", glob = "A", type = "any" }, to = "X" },
+  { select = { root = "Root", glob = "E", type = "any" }, to = "F" },
+]
+)");
     assert(before.ok() && after.ok());
-    const auto plan = BuildPolicyPlan(*before.canonical, *after.canonical);
+    const auto plan = BuildPolicyPlan(*before.canonical_v2, *after.canonical_v2);
     assert(plan.size() == 3);
     assert(plan[0].kind == PolicyChangeKind::kModify);
-    assert(plan[0].source == "A" && plan[0].before_target == "B"
+    assert(plan[0].source == "Root/A" && plan[0].before_target == "B"
            && plan[0].after_target == "X");
-    assert(plan[1].kind == PolicyChangeKind::kRemove && plan[1].source == "C");
-    assert(plan[2].kind == PolicyChangeKind::kAdd && plan[2].source == "E");
+    assert(plan[1].kind == PolicyChangeKind::kRemove
+           && plan[1].source == "Root/C");
+    assert(plan[2].kind == PolicyChangeKind::kAdd
+           && plan[2].source == "Root/E");
 
-    const RulesBuildResult deny_before = Compile(
-        "format = 1\n[apps.\"com.example.app\"]\n"
-        "deny=[\"Private\"]\nredirect=[\"A\" -> \"B\"]\n");
-    const RulesBuildResult deny_after = Compile(
-        "format = 1\n[apps.\"com.example.app\"]\n"
-        "deny=[\"Secret\"]\nredirect=[\"A\" -> \"B\"]\n");
+    const RulesBuildResult deny_before = Compile(R"(format = 2
+[apps."com.example.app"]
+deny_rules = [ { select = { root = "Root", glob = "Private", type = "any" } } ]
+redirect_rules = [ { select = { root = "Root", glob = "A", type = "any" }, to = "B" } ]
+)");
+    const RulesBuildResult deny_after = Compile(R"(format = 2
+[apps."com.example.app"]
+deny_rules = [ { select = { root = "Root", glob = "Secret", type = "any" } } ]
+redirect_rules = [ { select = { root = "Root", glob = "A", type = "any" }, to = "B" } ]
+)");
     assert(deny_before.ok() && deny_after.ok());
     const auto deny_plan = BuildPolicyPlan(
-        *deny_before.canonical, *deny_after.canonical);
+        *deny_before.canonical_v2, *deny_after.canonical_v2);
     assert(deny_plan.size() == 2);
     assert(deny_plan[0].kind == PolicyChangeKind::kRemove);
     assert(deny_plan[0].rule_kind == PolicyRuleKind::kDeny);
-    assert(deny_plan[0].source == "Private");
+    assert(deny_plan[0].source == "Root/Private");
     assert(deny_plan[1].kind == PolicyChangeKind::kAdd);
     assert(deny_plan[1].rule_kind == PolicyRuleKind::kDeny);
-    assert(deny_plan[1].source == "Secret");
+    assert(deny_plan[1].source == "Root/Secret");
 
-    const RulesBuildResult overlap = Compile(
-        "format = 1\n[apps.\"com.example.app\"]\n"
-        "redirect=[\"A\" -> \"X\",\"A/B\" -> \"Y\"]\n");
-    assert(!overlap.ok());
-    assert(overlap.resolved.has_value());
+    const RulesBuildResult overlap = Compile(R"(format = 2
+[apps."com.example.app"]
+redirect_rules = [
+  { select = { root = "Root", glob = "A", type = "any" }, to = "X" },
+  { select = { root = "Root/A", glob = "B", type = "any" }, to = "Y" },
+]
+)");
+    assert(overlap.ok());
     const PathExplanation explanation = ExplainPath(
-        *overlap.resolved, "com.example.app", "A/B/file", RulesLimits{});
-    assert(explanation.source == "A/B");
+        *overlap.canonical_v2, "com.example.app", "Root/A/B/file", RulesLimits{});
+    assert(explanation.source == "Root/A/B");
     assert(explanation.target == "Y");
     assert(explanation.shadowed_parents.size() == 1);
-    assert(explanation.shadowed_parents.front() == "A");
+    assert(explanation.shadowed_parents.front() == "Root/A");
 
     const PathExplanation denied = ExplainPath(
-        *deny_after.resolved, "com.example.app", "Secret/file", RulesLimits{});
+        *deny_after.canonical_v2, "com.example.app", "Root/Secret/file",
+        RulesLimits{});
     assert(denied.action == PolicyRuleKind::kDeny);
-    assert(denied.source == "Secret");
+    assert(denied.source == "Root/Secret");
     assert(!denied.target.has_value());
     return 0;
 }

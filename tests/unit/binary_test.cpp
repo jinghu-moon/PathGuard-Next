@@ -2,8 +2,6 @@
 #include <string>
 #include <vector>
 
-#include "pathguard/binary.h"
-#include "pathguard/policy.h"
 #include "pathguard/policy_format.h"
 #include "pathguard/policy_v6.h"
 #include "test_assert.h"
@@ -11,42 +9,47 @@
 int main() {
     using namespace pathguard;
 
-    PolicyDocument document;
-    document.schema = 2;
-    document.failure_mode = FailureMode::kOpen;
-    document.allow_legacy_string_bind = true;
-    AppPolicy app;
-    app.package = "org.localsend.localsend_app";
-    app.users = {"0"};
-    app.processes = {"*"};
-    app.provider_compat = ProviderCompat::kVirtualize;
-    app.mounts.push_back({MountAction::kRedirect,
-                          "Download/localsend-source",
-                          "Download/localsend-redirect", 2, 0, 0});
-    document.apps.push_back(app);
+    PolicyV6 policy;
+    PolicyPackageV6 package;
+    package.package = "org.localsend.localsend_app";
+    package.users = {0};
+    package.all_processes = true;
+    package.provider_enabled = true;
+    package.selectors.push_back({
+        PolicyMatchKind::kLiteralPrefix,
+        PolicyObjectType::kDirectory,
+        "Download/localsend-source",
+    });
+    PolicyActionV6 action;
+    action.selector_index = 0;
+    action.kind = PolicyActionKind::kRedirect;
+    action.domain = PolicyExecutionDomain::kMount;
+    action.target = "Download/localsend-redirect";
+    action.preserve = PolicyPreserveMode::kRelative;
+    action.collision = PolicyCollisionMode::kReject;
+    action.reverse = PolicyReverseMode::kStaticUnique;
+    package.actions.push_back(action);
+    policy.packages.push_back(package);
 
     std::vector<std::uint8_t> bytes;
-    ParseError error;
-    assert(EncodePolicy(document, &bytes, &error));
+    std::string error;
+    assert(EncodePolicyV6(policy, &bytes, &error));
     assert(bytes[4] == binary_format::kFormatVersion);
     assert(bytes[6] == binary_format::kSchemaVersion);
-    PolicyV6 semantic;
-    const auto v6 = DecodePolicyV6(bytes, &semantic);
-    assert(v6.ok);
-    assert(semantic.packages.front().selectors.front().root
-           == "Download/localsend-source");
 
-    PolicyDocument decoded;
-    std::uint64_t generation = 0;
-    assert(DecodePolicy(bytes, &decoded, &generation, &error));
-    assert(generation == ComputeContentGeneration(document));
-    assert(decoded.apps.front().mounts.front().backing_path
+    PolicyV6 decoded;
+    const PolicyV6DecodeResult result = DecodePolicyV6(bytes, &decoded);
+    assert(result.ok);
+    assert(result.content_generation
+           == ComputePolicyV6ContentGeneration(policy));
+    assert(decoded.packages.front().provider_enabled);
+    assert(decoded.packages.front().actions.front().target
            == "Download/localsend-redirect");
 
     std::vector<std::uint8_t> old = bytes;
     old[4] = 5;
-    assert(!DecodePolicy(old, &decoded, &generation, &error));
+    assert(!DecodePolicyV6(old, &decoded).ok);
     bytes[binary_format::kPayloadChecksumOffset] ^= 1;
-    assert(!DecodePolicy(bytes, &decoded, &generation, &error));
+    assert(!DecodePolicyV6(bytes, &decoded).ok);
     return 0;
 }

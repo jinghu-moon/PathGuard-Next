@@ -4,7 +4,7 @@ endif()
 
 set(production_files
   "${SOURCE_DIR}/core/CMakeLists.txt"
-  "${SOURCE_DIR}/core/include/pathguard/policy.h"
+  "${SOURCE_DIR}/core/include/pathguard/policy_v6.h"
   "${SOURCE_DIR}/daemon/CMakeLists.txt"
   "${SOURCE_DIR}/daemon/src/main.cpp"
   "${SOURCE_DIR}/daemon/src/rules_control.cpp"

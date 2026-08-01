@@ -32,5 +32,8 @@ int main() {
     assert(cache.mode() == ResolverMode::kUnknown);
     cache.ObserveOpenAt2(0, true);
     assert(cache.mode() == ResolverMode::kOpenAt2);
+    cache.ObserveOpenAt2(EPERM, true);
+    assert(cache.mode() == ResolverMode::kComponentWalk);
+    assert(cache.probe_error() == EPERM);
     return 0;
 }

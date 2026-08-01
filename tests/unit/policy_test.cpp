@@ -1,32 +1,48 @@
-#include "pathguard/policy.h"
-#include "pathguard/validation.h"
+#include <string>
+
+#include "pathguard/policy_v6.h"
 #include "test_assert.h"
 
+namespace {
+
+pathguard::PolicyV6 MakePolicy(bool provider_enabled) {
+    using namespace pathguard;
+    PolicyV6 policy;
+    PolicyPackageV6 package;
+    package.package = "com.example.app";
+    package.users = {0};
+    package.all_processes = true;
+    package.provider_enabled = provider_enabled;
+    package.selectors.push_back({
+        PolicyMatchKind::kLiteralPrefix,
+        PolicyObjectType::kDirectory,
+        "Download/Source",
+    });
+    PolicyActionV6 action;
+    action.selector_index = 0;
+    action.kind = PolicyActionKind::kRedirect;
+    action.domain = PolicyExecutionDomain::kMount;
+    action.target = "PathGuard/Target";
+    action.preserve = PolicyPreserveMode::kRelative;
+    action.collision = PolicyCollisionMode::kReject;
+    action.reverse = PolicyReverseMode::kStaticUnique;
+    package.actions.push_back(action);
+    policy.packages.push_back(package);
+    return policy;
+}
+
+}  // namespace
+
 int main() {
-    pathguard::AppPolicy app;
-    app.package = "com.example.app";
-    app.users = {"0"};
-    app.processes = {"*"};
-    app.mounts.push_back({pathguard::MountAction::kRedirect,
-                          "Download/Source", "PathGuard/Target", 0, 0, 0});
-    pathguard::ParseError error;
-    assert(pathguard::ValidatePolicy(&app, &error));
-    assert(app.mounts.front().depth == 2);
-
-    pathguard::AppPolicy provider_without_redirect;
-    provider_without_redirect.package = "com.example.provider";
-    provider_without_redirect.users = {"0"};
-    provider_without_redirect.provider_compat =
-        pathguard::ProviderCompat::kVirtualize;
-    assert(!pathguard::ValidatePolicy(&provider_without_redirect, &error));
-
-    pathguard::AppPolicy provider_wildcard = app;
-    provider_wildcard.users = {"*"};
-    provider_wildcard.provider_compat = pathguard::ProviderCompat::kVirtualize;
-    assert(!pathguard::ValidatePolicy(&provider_wildcard, &error));
-
-    pathguard::AppPolicy duplicate = app;
-    duplicate.mounts.push_back(duplicate.mounts.front());
-    assert(!pathguard::ValidatePolicy(&duplicate, &error));
+    const pathguard::PolicyV6 policy = MakePolicy(false);
+    const pathguard::PolicyV6 provider_policy = MakePolicy(true);
+    assert(pathguard::ComputePolicyV6ContentGeneration(policy) != 0);
+    assert(pathguard::ComputePolicyV6ContentGeneration(policy)
+           != pathguard::ComputePolicyV6ContentGeneration(provider_policy));
+    assert(pathguard::ComputePolicyV6PlanGeneration(
+               policy.packages.front(), policy.allow_legacy_mount)
+           != pathguard::ComputePolicyV6PlanGeneration(
+               provider_policy.packages.front(),
+               provider_policy.allow_legacy_mount));
     return 0;
 }

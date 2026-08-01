@@ -17,7 +17,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     if (!source.has_value()) return 0;
     const RulesBuildResult result = CompileRules(*source, limits);
     if (result.ok()
-        && !VerifyPolicyBlob(*result.canonical, *result.blob)) {
+        && !VerifyPolicyBlob(*result.policy_v6, *result.blob)) {
         __builtin_trap();
     }
     if (!result.ok() && result.blob.has_value()) __builtin_trap();

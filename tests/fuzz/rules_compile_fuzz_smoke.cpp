@@ -10,7 +10,7 @@ int main() {
     using namespace pathguard::rules;
     std::mt19937_64 random(UINT64_C(0x524638434f4d5049));
     std::string input =
-        "format = 1\n[apps.\"com.example.app\"]\nredirect=[\"A\" -> \"B\"]\n";
+        "format = 2\n[apps.\"com.example.app\"]\nredirect_rules=[{select={root=\"\",glob=\"A\"},to=\"B\"}]\n";
     for (int iteration = 0; iteration < 2048; ++iteration) {
         std::string mutated = input;
         const std::size_t changes = 1 + random() % 8;
@@ -28,9 +28,10 @@ int main() {
         if (!source.has_value()) continue;
         const RulesBuildResult result = CompileRules(*source, RulesLimits{});
         if (result.ok()) {
-            assert(result.canonical.has_value());
+            assert(result.canonical_v2.has_value());
+            assert(result.policy_v6.has_value());
             assert(result.blob.has_value());
-            assert(VerifyPolicyBlob(*result.canonical, *result.blob));
+            assert(VerifyPolicyBlob(*result.policy_v6, *result.blob));
         } else {
             assert(!result.blob.has_value());
         }

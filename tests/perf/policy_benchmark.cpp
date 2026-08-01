@@ -15,7 +15,6 @@
 #endif
 
 #include "pathguard/rules/semantic.h"
-#include "pathguard/rules/compiler.h"
 #include "pathguard/rules/source.h"
 #include "pathguard/rules_control.h"
 

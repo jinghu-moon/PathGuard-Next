@@ -89,6 +89,9 @@ redirect_rules = [
                "to=\"Download/x\",collision=\"replace\"}]\n", kInvalidValue);
     ExpectCode("format = 2\n[apps.\"com.example.app\"]\n"
                "provider={enabled=\"yes\"}\n", kTypeMismatch);
+    ExpectCode("format = 2\n[apps.\"com.example.app\"]\n"
+               "redirect_rules=[{select={root=\"Pictures\",glob=\"**\","
+               "except=[]},to=\"Download/x\"}]\n", kInvalidValue);
 
     const auto unsafe = Parse("format = 2\n[apps.\"com.example.app\"]\n"
         "redirect_rules=[{select={root=\"/Pictures\",glob=\"*.jpg\"},"

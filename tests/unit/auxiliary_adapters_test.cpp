@@ -1,6 +1,5 @@
 #include "pathguard/complete_vfs_adapter.h"
 #include "pathguard/effect_adapter.h"
-#include "pathguard/export_worker.h"
 #include "test_assert.h"
 
 namespace {
@@ -31,6 +30,10 @@ public:
     unsigned calls = 0;
 };
 
+std::uint64_t g_observe_clock = 0;
+
+std::uint64_t ObserveClock() noexcept { return g_observe_clock; }
+
 }  // namespace
 
 int main() {
@@ -49,27 +52,68 @@ int main() {
     assert(dispatched.failed == pattern::kEffectExport);
     assert(observed.calls == 1 && rejected.calls == 1);
 
-    exporting::ExportWorker worker(1);
-    exporting::ExportTask task{{1, 2, 30, 3}, "Pictures/a.jpg",
-                               "Download/export/a.jpg"};
-    assert(worker.Enqueue(task) == exporting::EnqueueResult::kQueued);
-    assert(worker.Enqueue(task) == exporting::EnqueueResult::kDuplicate);
-    assert(worker.Enqueue({{1, 4, 40, 3}, "Pictures/b.jpg", "Download/b.jpg"})
-           == exporting::EnqueueResult::kFull);
-    assert(worker.RunNext([](const exporting::ExportTask&) { return true; }));
-    assert(worker.State(task.key) == exporting::TaskState::kComplete);
-    assert(worker.metrics().duplicates == 1 && worker.metrics().overflow == 1);
+    effects::BoundedEffectQueue observe_queue(1);
+    const auto queued_effect = effects::Dispatch(
+        pattern::kEffectObserve, event, &observe_queue, nullptr);
+    assert(queued_effect.submitted == pattern::kEffectObserve);
+    const auto dropped_effect = effects::Dispatch(
+        pattern::kEffectObserve, event, &observe_queue, nullptr);
+    assert(dropped_effect.failed == pattern::kEffectObserve);
+    assert(observe_queue.pending() == 1);
+    effects::EffectEvent drained;
+    assert(observe_queue.Pop(&drained));
+    assert(drained.source == event.source && drained.generation == 3);
+    const auto effect_metrics = observe_queue.metrics();
+    assert(effect_metrics.accepted == 1);
+    assert(effect_metrics.dropped == 1);
+    assert(effect_metrics.drained == 1);
+
+    effects::BoundedEffectQueue sanitized_queue(4);
+    effects::ObserveEffectSink observe_sink(
+        &sanitized_queue, 2, 1000, true, &ObserveClock);
+    event.target = "Download/localsend-redirect/a.jpg";
+    assert(observe_sink.Submit(event));
+    assert(observe_sink.Submit(event));
+    assert(!observe_sink.Submit(event));
+    assert(observe_sink.metrics().accepted == 2);
+    assert(observe_sink.metrics().rate_limited == 1);
+    effects::EffectEvent sanitized;
+    assert(sanitized_queue.Pop(&sanitized));
+    assert(sanitized.source == "<redacted>/a.jpg");
+    assert(sanitized.target == "<redacted>/a.jpg");
+    g_observe_clock = 1000;
+    assert(observe_sink.Submit(event));
+    event.kind = effects::EffectKind::kExport;
+    assert(!observe_sink.Submit(event));
+    assert(observe_sink.metrics().invalid_kind == 1);
+    event.kind = effects::EffectKind::kObserve;
+    const auto no_effect_dispatch = effects::Dispatch(
+        pattern::kEffectNone, event, &observe_sink, nullptr);
+    assert(no_effect_dispatch.requested == pattern::kEffectNone);
+    assert(no_effect_dispatch.submitted == pattern::kEffectNone);
 
     pattern::OperationPlan plan;
     plan.accepted = true;
+    plan.plan_generation = 9;
     CapabilitySnapshot capabilities;
     VfsBackend backend;
     assert(complete_vfs::Apply(plan, capabilities, kOperationOpenRead, &backend)
            == complete_vfs::ApplyStatus::kUnsupported);
     capabilities.observed_capabilities = kCapabilityFuseCompletePath;
+    capabilities.capability_generation = 1;
+    capabilities.plan_generation = plan.plan_generation;
+    capabilities.domains[static_cast<unsigned>(AdmissionDomain::kCompleteVfs)] = {
+        AdapterState::kActive,
+        kOperationOpenRead | kOperationCreate,
+        0,
+    };
     assert(complete_vfs::Apply(plan, capabilities,
                               kOperationOpenRead | kOperationCreate, &backend)
            == complete_vfs::ApplyStatus::kApplied);
+    assert(backend.calls == 1);
+    ++capabilities.plan_generation;
+    assert(complete_vfs::Apply(plan, capabilities, kOperationOpenRead, &backend)
+           == complete_vfs::ApplyStatus::kUnsupported);
     assert(backend.calls == 1);
     return 0;
 }

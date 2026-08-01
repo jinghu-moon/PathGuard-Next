@@ -2,12 +2,24 @@
 
 #include <cassert>
 
+namespace {
+
+int Replacement() { return 0; }
+int Original() { return 1; }
+
+}  // namespace
+
 int main() {
     using pathguard::provider_redirect::InstallResult;
     using pathguard::provider_redirect::MustRetainModule;
     using pathguard::provider_redirect::ShouldEnableHooks;
     using pathguard::provider_redirect::HookLifecycle;
     using pathguard::provider_redirect::HookState;
+    using pathguard::provider_redirect::IsResolvedJniHook;
+
+    assert(!IsResolvedJniHook(static_cast<int (*)()>(nullptr), Replacement));
+    assert(!IsResolvedJniHook(Replacement, Replacement));
+    assert(IsResolvedJniHook(Original, Replacement));
 
     HookLifecycle lifecycle;
     assert(lifecycle.unloadable());

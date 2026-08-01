@@ -54,6 +54,9 @@ int main() {
     ExpectNoMatch("?.txt", "ab.txt");
     ExpectMatch("*", ".hidden");
     ExpectMatch("\\*", "*");
+    assert(CompilePattern("!private/**").error
+           == PatternCompileError::kUnsupportedSyntax);
+    ExpectMatch("\\!private", "!private");
     assert(CompilePattern("tail\\").error == PatternCompileError::kTrailingEscape);
 
     ExpectMatch("**/*.jpg", "a.jpg");

@@ -40,6 +40,45 @@ if(NOT valid_result EQUAL 0)
   list(APPEND failures "valid report was rejected")
 endif()
 
+set(final_reports
+  p6-final-host-20260801/V-49-V-54-cutover-host.json
+  p6-final-host-20260801/V-55-sanitizer-property-fuzz.json
+  p6-final-host-20260801/V-56-android-offline-gate.json
+  p6-final-host-20260801/V-59-V-62-final-host-audit.json
+  p6-final-device-myron-v024-20260801/V-45-V-60-v024-device.json
+)
+foreach(report_relative IN LISTS final_reports)
+  set(report
+    "${SOURCE_DIR}/tests/baseline/pattern-v6/${report_relative}")
+  get_filename_component(report_name "${report_relative}" NAME)
+  if(NOT EXISTS "${report}")
+    list(APPEND failures "final report is missing: ${report_name}")
+    continue()
+  endif()
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" "-DREPORT=${report}" -P "${verifier}"
+    RESULT_VARIABLE report_result
+    OUTPUT_VARIABLE report_output
+    ERROR_VARIABLE report_error
+  )
+  if(NOT report_result EQUAL 0)
+    list(APPEND failures "final report was rejected: ${report_name}")
+    continue()
+  endif()
+  file(READ "${report}" final_report_json)
+  string(JSON evidence_count LENGTH "${final_report_json}" evidence_paths)
+  math(EXPR last_evidence "${evidence_count} - 1")
+  foreach(evidence_index RANGE 0 ${last_evidence})
+    string(JSON evidence_path GET
+      "${final_report_json}" evidence_paths ${evidence_index})
+    if(IS_ABSOLUTE "${evidence_path}"
+       OR NOT EXISTS "${SOURCE_DIR}/${evidence_path}")
+      list(APPEND failures
+        "final report has unavailable evidence: ${report_name}: ${evidence_path}")
+    endif()
+  endforeach()
+endforeach()
+
 set(invalid_classification "${valid_json}")
 string(REPLACE
   "\"classification\": \"unchanged\""

@@ -10,7 +10,8 @@ foreach(contract IN ITEMS
     "PolicySnapshotDomain"
     "snapshot_guard"
     "ResolveStoragePathParent"
-    "BuildPinnedProcPath")
+    "BuildPinnedProcPath"
+    "g_resolver_probe.ObserveOpenAt2")
   if(NOT hook MATCHES "${contract}")
     message(FATAL_ERROR "production hook misses ${contract}")
   endif()
@@ -52,4 +53,27 @@ endif()
 if(hook MATCHES "probe.query = path_derived" OR
    hook MATCHES "kPathDerivedDocuments")
   message(FATAL_ERROR "Provider bit 17 must not be inferred from libc path hooks")
+endif()
+if(NOT entry MATCHES "SameStoragePlane\\(plan\\.topology, transaction_topology\\)" OR
+   NOT entry MATCHES "SameStorageTopology\\(transaction_topology, lease_topology\\)")
+  message(FATAL_ERROR "lease topology must use a baseline from the target namespace")
+endif()
+if(entry MATCHES "SameStorageTopology\\(plan\\.topology, lease_topology\\)")
+  message(FATAL_ERROR "namespace-local mount IDs must not be compared with companion topology")
+endif()
+foreach(contract IN ITEMS
+    "BuildPathRuntimeStatus"
+    "SendRuntimeStatusBootstrap"
+    "PublishRuntimeStatusRecord"
+    "ReceiveRuntimeStatusSubmission"
+    "WaitForRuntimeStatus"
+    "ReadProcessStartTime"
+    "unlinkat\\(dirfd\\(directory\\), entry->d_name, 0\\)"
+    "plan.app_path_status_available")
+  if(NOT entry MATCHES "${contract}")
+    message(FATAL_ERROR "runtime status integration misses ${contract}")
+  endif()
+endforeach()
+if(entry MATCHES "exemptFd")
+  message(FATAL_ERROR "Provider runtime status must not depend on optional Zygisk FD exemption")
 endif()

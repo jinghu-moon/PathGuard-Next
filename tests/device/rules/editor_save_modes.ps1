@@ -23,7 +23,8 @@ New-Item -ItemType Directory -Path $local | Out-Null
 
 function Write-Rules([string]$Path, [string]$Target, [bool]$Bom,
                      [bool]$Crlf) {
-    $text = "format = 1`n[apps.`"com.example.app`"]`nredirect = [`"A`" -> `"$Target`"]`n"
+    $text = "format = 2`n[apps.`"com.example.app`"]`n" +
+        "redirect_rules = [{ select = { root = `"A`", glob = `"item`", type = `"directory`" }, to = `"$Target`" }]`n"
     if ($Crlf) { $text = $text.Replace("`n", "`r`n") }
     $encoding = [Text.UTF8Encoding]::new($Bom)
     [IO.File]::WriteAllText($Path, $text, $encoding)

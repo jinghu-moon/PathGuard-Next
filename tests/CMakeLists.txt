@@ -58,13 +58,8 @@ add_executable(pathguard_mount_backend_test unit/mount_backend_test.cpp)
 target_link_libraries(pathguard_mount_backend_test PRIVATE pathguard_core)
 add_test(NAME pathguard_mount_backend_test COMMAND pathguard_mount_backend_test)
 
-add_executable(pathguard_provider_path_mapper_test
-    unit/provider_path_mapper_test.cpp
-    ../zygisk/src/provider_path_mapper.cpp)
-target_include_directories(pathguard_provider_path_mapper_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../zygisk/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/unit)
-add_test(NAME pathguard_provider_path_mapper_test COMMAND pathguard_provider_path_mapper_test)
+add_test(NAME pathguard_provider_path_mapper_test
+    COMMAND $<TARGET_FILE:pathguard_policy_action_router_test>)
 
 add_executable(pathguard_provider_redirect_lifecycle_test
     unit/provider_redirect_lifecycle_test.cpp)
@@ -107,6 +102,7 @@ add_test(NAME pathguard_topology_test COMMAND pathguard_topology_test)
 
 add_executable(pathguard_runtime_status_test unit/runtime_status_test.cpp)
 target_link_libraries(pathguard_runtime_status_test PRIVATE pathguard_core)
+target_link_libraries(pathguard_runtime_status_test PRIVATE pathguard_rules_compiler)
 add_test(NAME pathguard_runtime_status_test COMMAND pathguard_runtime_status_test)
 
 add_executable(pathguard_hide_probe_contract_test
@@ -131,133 +127,6 @@ target_include_directories(pathguard_rules_source_test PRIVATE
 )
 target_link_libraries(pathguard_rules_source_test PRIVATE pathguard_rules_compiler)
 add_test(NAME pathguard_rules_source_test COMMAND pathguard_rules_source_test)
-
-add_executable(pathguard_rules_format_probe_test unit/rules_format_probe_test.cpp)
-target_include_directories(pathguard_rules_format_probe_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_link_libraries(pathguard_rules_format_probe_test PRIVATE pathguard_rules_compiler)
-add_test(NAME pathguard_rules_format_probe_test COMMAND pathguard_rules_format_probe_test)
-
-add_executable(pathguard_rules_arrow_scanner_test
-  unit/rules_arrow_scanner_test.cpp
-)
-target_include_directories(pathguard_rules_arrow_scanner_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_link_libraries(pathguard_rules_arrow_scanner_test PRIVATE pathguard_rules_compiler)
-add_test(
-  NAME pathguard_rules_arrow_scanner_test
-  COMMAND pathguard_rules_arrow_scanner_test
-)
-
-add_executable(pathguard_rules_fixture_scanner_test
-  unit/rules_fixture_scanner_test.cpp
-)
-target_include_directories(pathguard_rules_fixture_scanner_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_compile_definitions(pathguard_rules_fixture_scanner_test PRIVATE
-  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-target_link_libraries(pathguard_rules_fixture_scanner_test PRIVATE pathguard_rules_compiler)
-add_test(
-  NAME pathguard_rules_fixture_scanner_test
-  COMMAND pathguard_rules_fixture_scanner_test
-)
-
-add_executable(pathguard_rules_string_fuzz_smoke
-  fuzz/rules_string_fuzz_smoke.cpp
-)
-target_include_directories(pathguard_rules_string_fuzz_smoke PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_compile_definitions(pathguard_rules_string_fuzz_smoke PRIVATE
-  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-target_link_libraries(pathguard_rules_string_fuzz_smoke PRIVATE pathguard_rules_compiler)
-add_test(
-  NAME pathguard_rules_string_fuzz_smoke
-  COMMAND pathguard_rules_string_fuzz_smoke
-)
-
-add_executable(pathguard_rules_candidate_fuzz_smoke
-  fuzz/rules_candidate_fuzz_smoke.cpp
-)
-target_include_directories(pathguard_rules_candidate_fuzz_smoke PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_compile_definitions(pathguard_rules_candidate_fuzz_smoke PRIVATE
-  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-target_link_libraries(pathguard_rules_candidate_fuzz_smoke PRIVATE pathguard_rules_compiler)
-add_test(
-  NAME pathguard_rules_candidate_fuzz_smoke
-  COMMAND pathguard_rules_candidate_fuzz_smoke
-)
-
-add_executable(pathguard_rules_desugarer_test
-  unit/rules_desugarer_test.cpp
-)
-target_include_directories(pathguard_rules_desugarer_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_link_libraries(pathguard_rules_desugarer_test PRIVATE pathguard_rules_compiler)
-add_test(
-  NAME pathguard_rules_desugarer_test
-  COMMAND pathguard_rules_desugarer_test
-)
-
-add_executable(pathguard_rules_desugarer_golden_test
-  unit/rules_desugarer_golden_test.cpp
-)
-target_include_directories(pathguard_rules_desugarer_golden_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_compile_definitions(pathguard_rules_desugarer_golden_test PRIVATE
-  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-target_link_libraries(pathguard_rules_desugarer_golden_test PRIVATE pathguard_rules_compiler)
-add_test(
-  NAME pathguard_rules_desugarer_golden_test
-  COMMAND pathguard_rules_desugarer_golden_test
-)
-
-add_executable(pathguard_rules_desugar_fuzz_smoke
-  fuzz/rules_desugar_fuzz_smoke.cpp
-)
-target_include_directories(pathguard_rules_desugar_fuzz_smoke PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/fuzz
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_compile_definitions(pathguard_rules_desugar_fuzz_smoke PRIVATE
-  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-target_link_libraries(pathguard_rules_desugar_fuzz_smoke PRIVATE pathguard_rules_compiler)
-add_test(
-  NAME pathguard_rules_desugar_fuzz_smoke
-  COMMAND pathguard_rules_desugar_fuzz_smoke
-)
-
-add_executable(pathguard_rules_parser_test
-  unit/rules_parser_test.cpp
-)
-target_include_directories(pathguard_rules_parser_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_link_libraries(pathguard_rules_parser_test PRIVATE pathguard_rules_compiler)
-add_test(NAME pathguard_rules_parser_test COMMAND pathguard_rules_parser_test)
-
-add_executable(pathguard_rules_document_test
-  unit/rules_document_test.cpp
-)
-target_include_directories(pathguard_rules_document_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_link_libraries(pathguard_rules_document_test PRIVATE pathguard_rules_compiler)
-add_test(NAME pathguard_rules_document_test COMMAND pathguard_rules_document_test)
 
 add_executable(pathguard_rules_semantic_test
   unit/rules_semantic_test.cpp
@@ -397,6 +266,14 @@ target_link_libraries(pathguard_auxiliary_adapters_test PRIVATE pathguard_core)
 add_test(NAME pathguard_auxiliary_adapters_test
   COMMAND pathguard_auxiliary_adapters_test)
 
+add_executable(pathguard_export_worker_test
+  unit/export_worker_test.cpp)
+target_include_directories(pathguard_export_worker_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pathguard_export_worker_test PRIVATE pathguard_core)
+add_test(NAME pathguard_export_worker_test
+  COMMAND pathguard_export_worker_test)
+
 add_executable(pathguard_rules_effects_test unit/rules_effects_test.cpp)
 target_include_directories(pathguard_rules_effects_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR})
@@ -417,29 +294,21 @@ target_include_directories(pathguard_rules_conflict_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/unit
 )
 target_link_libraries(pathguard_rules_conflict_test PRIVATE pathguard_rules_compiler)
-
-add_executable(pathguard_rules_pipeline_test
-  unit/rules_pipeline_test.cpp
-)
-target_include_directories(pathguard_rules_pipeline_test PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_compile_definitions(pathguard_rules_pipeline_test PRIVATE
-  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-target_link_libraries(pathguard_rules_pipeline_test PRIVATE pathguard_rules_compiler)
+add_test(NAME pathguard_rules_conflict_test COMMAND pathguard_rules_conflict_test)
 
 add_executable(pathguard_rules_tools_test unit/rules_tools_test.cpp)
 target_include_directories(pathguard_rules_tools_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/unit
 )
 target_link_libraries(pathguard_rules_tools_test PRIVATE pathguard_rules_compiler)
+add_test(NAME pathguard_rules_tools_test COMMAND pathguard_rules_tools_test)
 
 add_executable(pathguard_rules_limits_test unit/rules_limits_test.cpp)
 target_include_directories(pathguard_rules_limits_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/unit
 )
 target_link_libraries(pathguard_rules_limits_test PRIVATE pathguard_rules_compiler)
+add_test(NAME pathguard_rules_limits_test COMMAND pathguard_rules_limits_test)
 
 add_executable(pathguard_rules_compile_fuzz_smoke
   fuzz/rules_compile_fuzz_smoke.cpp
@@ -503,6 +372,8 @@ target_include_directories(pathguard_rules_migration_test PRIVATE
 target_link_libraries(pathguard_rules_migration_test PRIVATE
   pathguard_rules_compiler
 )
+add_test(NAME pathguard_rules_migration_test
+  COMMAND pathguard_rules_migration_test)
 
 add_test(
   NAME pathguard_rules_format_cutover_guard
@@ -568,7 +439,7 @@ if(PATHGUARD_BUILD_FUZZERS)
     -fsanitize=${pathguard_library_sanitizers}
     -fno-omit-frame-pointer
   )
-  foreach(target IN ITEMS string candidate desugar compile)
+  foreach(target IN ITEMS compile)
     add_executable(pathguard_rules_${target}_fuzzer
       fuzz/rules_${target}_fuzzer.cpp
     )
@@ -692,6 +563,25 @@ add_test(NAME pathguard_pattern_benchmark_jsonl
 add_test(NAME pathguard_pattern_benchmark_tsv
   COMMAND pathguard_pattern_benchmark --format=tsv)
 
+add_executable(pathguard_runtime_benchmark
+  perf/runtime_benchmark.cpp)
+target_include_directories(pathguard_runtime_benchmark PRIVATE
+  ${CMAKE_SOURCE_DIR}/core/include
+  ${CMAKE_SOURCE_DIR}/rules/include)
+target_link_libraries(pathguard_runtime_benchmark PRIVATE
+  pathguard_rules_compiler pathguard_core)
+if(WIN32)
+  target_link_libraries(pathguard_runtime_benchmark PRIVATE Psapi)
+endif()
+add_test(NAME pathguard_runtime_benchmark
+  COMMAND pathguard_runtime_benchmark)
+add_test(NAME pathguard_runtime_benchmark_json
+  COMMAND ${CMAKE_COMMAND}
+    "-DBENCHMARK=$<TARGET_FILE:pathguard_runtime_benchmark>"
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/perf/runtime_benchmark_json_test.cmake)
+add_test(NAME pathguard_runtime_soak_smoke
+  COMMAND pathguard_runtime_benchmark --soak-seconds=2)
+
 add_executable(pathguard_policy_benchmark perf/policy_benchmark.cpp)
 target_include_directories(pathguard_policy_benchmark PRIVATE
   ${CMAKE_SOURCE_DIR}/daemon/include
@@ -703,18 +593,6 @@ if(WIN32)
   target_link_libraries(pathguard_policy_benchmark PRIVATE Psapi)
 endif()
 add_test(NAME pathguard_rules_compiler_budget COMMAND pathguard_policy_benchmark)
-
-add_executable(pathguard_cpp_toml_adapter_spike
-  d0/cpp_toml_adapter_spike.cpp
-)
-target_include_directories(pathguard_cpp_toml_adapter_spike PRIVATE
-  ${CMAKE_SOURCE_DIR}/third_party/tomlplusplus
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_compile_definitions(pathguard_cpp_toml_adapter_spike PRIVATE
-  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-target_link_libraries(pathguard_cpp_toml_adapter_spike PRIVATE pathguard_core)
 
 add_executable(pathguard_toml_conformance_subset_test
   d0/toml_conformance_subset_test.cpp
@@ -730,15 +608,6 @@ add_test(
   NAME pathguard_toml_conformance_subset_test
   COMMAND pathguard_toml_conformance_subset_test
 )
-
-add_executable(pathguard_cpp_d0_benchmark
-  d0/cpp_d0_benchmark.cpp
-)
-target_include_directories(pathguard_cpp_d0_benchmark PRIVATE
-  ${CMAKE_SOURCE_DIR}/third_party/tomlplusplus
-  ${CMAKE_CURRENT_SOURCE_DIR}/unit
-)
-target_link_libraries(pathguard_cpp_d0_benchmark PRIVATE pathguard_core)
 
 add_test(
   NAME pathguard_rules_control_plane_integration
@@ -803,6 +672,13 @@ add_test(
   COMMAND ${CMAKE_COMMAND}
     -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
     -P ${CMAKE_CURRENT_SOURCE_DIR}/baseline/policy_v6_guard_test.cmake
+)
+
+add_test(
+  NAME pathguard_legacy_cutover_guard
+  COMMAND ${CMAKE_COMMAND}
+    -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/baseline/pattern-v6/legacy-cutover-guard.cmake
 )
 
 add_test(

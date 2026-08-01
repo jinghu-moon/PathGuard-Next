@@ -100,6 +100,57 @@ redirect_rules = [
     result = policy_action_router::Route(policy, request, capabilities, &scratch);
     assert(result.disposition == policy_action_router::Disposition::kPass);
 
+    // An except only runs after its base pattern matches. The nested path
+    // misses the one-component base, so the except must not be evaluated.
+    Diagnostic base_miss_error;
+    auto base_miss_source = SourceBuffer::Create("base-miss.toml", R"(format = 2
+[apps."com.example.app"]
+users = [0]
+redirect_rules = [
+  { select = { root = "Pictures", glob = "Trips/*", except = ["**"], type = "file" }, to = "Download/never" },
+]
+)", RulesLimits{}, &base_miss_error);
+    assert(base_miss_source.has_value());
+    const RulesBuildResult base_miss_built = CompileRules(
+        *base_miss_source, RulesLimits{});
+    assert(base_miss_built.ok());
+    policy_v6_view::PolicyV6View base_miss_policy;
+    assert(base_miss_policy.Initialize(base_miss_built.blob->bytes.data(),
+                                       base_miss_built.blob->bytes.size()));
+    policy_v6_view::PackageRef base_miss_package;
+    assert(base_miss_policy.FindPackage("com.example.app",
+                                       sizeof("com.example.app") - 1,
+                                       &base_miss_package));
+    policy_action_router::Request base_miss_request{
+        base_miss_package, "Pictures", sizeof("Pictures") - 1,
+        "Trips/a/b.jpg", sizeof("Trips/a/b.jpg") - 1,
+        1, AdmissionDomain::kAppPath, kOperationOpenWrite,
+    };
+    CapabilitySnapshot base_miss_capabilities;
+    base_miss_capabilities.capability_generation = 1;
+    base_miss_capabilities.plan_generation = base_miss_package.plan_generation;
+    base_miss_capabilities.observed_capabilities = kCapabilityAppPathAdapter;
+    base_miss_capabilities.domains[static_cast<unsigned>(AdmissionDomain::kAppPath)] = {
+        AdapterState::kActive, kAppPathOperationsV1, 0};
+    policy_pattern_runtime::MatchScratch base_miss_scratch;
+    const auto base_miss_result = policy_action_router::Route(
+        base_miss_policy, base_miss_request, base_miss_capabilities,
+        &base_miss_scratch);
+    assert(base_miss_result.disposition == policy_action_router::Disposition::kPass);
+    assert(base_miss_result.reason == policy_action_router::Reason::kNoMatch);
+    assert(base_miss_result.matcher_invocations == 1);
+
+    // A full except excludes the base match without creating a negative
+    // action or changing the request's primary disposition.
+    base_miss_request.relative_path = "Trips/a.jpg";
+    base_miss_request.relative_size = sizeof("Trips/a.jpg") - 1;
+    const auto fully_excluded = policy_action_router::Route(
+        base_miss_policy, base_miss_request, base_miss_capabilities,
+        &base_miss_scratch);
+    assert(fully_excluded.disposition == policy_action_router::Disposition::kPass);
+    assert(fully_excluded.reason == policy_action_router::Reason::kNoMatch);
+    assert(fully_excluded.matcher_invocations == 2);
+
     request.relative_path = "Trips/notes.txt";
     request.relative_size = sizeof("Trips/notes.txt") - 1;
     result = policy_action_router::Route(policy, request, capabilities, &scratch);

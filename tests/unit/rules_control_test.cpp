@@ -4,7 +4,6 @@
 #include <string>
 #include <vector>
 
-#include "pathguard/binary.h"
 #include "pathguard/rules_control.h"
 #include "test_assert.h"
 
@@ -140,6 +139,9 @@ int main() {
     state.message = "new configuration was not activated; previous policy remains active";
     const std::string text = RenderControlStatusText(state);
     const std::string json = RenderControlStatusJson(state);
+    assert(json.find("\"schema\":\"pathguard.rules_status.v1\"")
+           != std::string::npos);
+    assert(json.find("\"version\":1") != std::string::npos);
     for (const std::string_view field : {
              "source_digest", "candidate_sequence", "active_content_generation",
              "deployment_epoch", "capability_generation", "topology_generation",

@@ -1,52 +1,62 @@
-#include "pathguard/policy.h"
-#include "pathguard/validation.h"
+#include <string>
+#include <vector>
+
+#include "pathguard/policy_v6.h"
 #include "test_assert.h"
 
+namespace {
+
+bool Encodes(pathguard::PolicyV6 policy) {
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    return pathguard::EncodePolicyV6(policy, &bytes, &error);
+}
+
+pathguard::PolicyV6 ValidPolicy() {
+    using namespace pathguard;
+    PolicyV6 policy;
+    PolicyPackageV6 package;
+    package.package = "com.example.app";
+    package.users = {0};
+    package.selectors.push_back({
+        PolicyMatchKind::kLiteralPrefix,
+        PolicyObjectType::kDirectory,
+        "Pictures",
+    });
+    PolicyActionV6 action;
+    action.selector_index = 0;
+    action.kind = PolicyActionKind::kRedirect;
+    action.domain = PolicyExecutionDomain::kMount;
+    action.target = "Sandbox/Pictures";
+    action.preserve = PolicyPreserveMode::kRelative;
+    action.collision = PolicyCollisionMode::kReject;
+    action.reverse = PolicyReverseMode::kStaticUnique;
+    package.actions.push_back(action);
+    policy.packages.push_back(package);
+    return policy;
+}
+
+}  // namespace
+
 int main() {
-    pathguard::ParseError error;
+    using namespace pathguard;
+    assert(Encodes(ValidPolicy()));
 
-    pathguard::AppPolicy nested;
-    nested.package = "com.example.app";
-    nested.mounts = {
-        {pathguard::MountAction::kDeny, "Pictures/Secret", "", 0, 0, 10},
-        {pathguard::MountAction::kRedirect, "Pictures", "Sandbox/Pictures", 0, 0, 11},
-    };
-    assert(pathguard::ValidatePolicy(&nested, &error));
-    assert(nested.mounts[0].action == pathguard::MountAction::kRedirect);
-    assert(nested.mounts[1].action == pathguard::MountAction::kDeny);
+    PolicyV6 missing_package = ValidPolicy();
+    missing_package.packages.front().package.clear();
+    assert(!Encodes(std::move(missing_package)));
 
-    pathguard::AppPolicy conflict;
-    conflict.package = "com.example.app";
-    conflict.mounts = {
-        {pathguard::MountAction::kDeny, "Pictures", "", 0, 0, 20},
-        {pathguard::MountAction::kRedirect, "Pictures", "Sandbox", 0, 0, 21},
-    };
-    assert(!pathguard::ValidatePolicy(&conflict, &error));
-    assert(error.line == 21);
+    PolicyV6 missing_target = ValidPolicy();
+    missing_target.packages.front().actions.front().target.clear();
+    assert(!Encodes(std::move(missing_target)));
 
-    pathguard::AppPolicy allow_without_isolate;
-    allow_without_isolate.package = "com.example.app";
-    allow_without_isolate.mounts = {
-        {pathguard::MountAction::kRestore, "Download", "Download", 0, 0, 30},
-    };
-    assert(!pathguard::ValidatePolicy(&allow_without_isolate, &error));
-    assert(error.line == 30);
+    PolicyV6 invalid_selector = ValidPolicy();
+    invalid_selector.packages.front().actions.front().selector_index = 2;
+    assert(!Encodes(std::move(invalid_selector)));
 
-    pathguard::AppPolicy recursive_isolate;
-    recursive_isolate.package = "com.example.app";
-    recursive_isolate.mounts = {
-        {pathguard::MountAction::kIsolateRoot, "", "Private/Root", 0, 0, 40},
-        {pathguard::MountAction::kDeny, "Private", "", 0, 0, 41},
-    };
-    assert(!pathguard::ValidatePolicy(&recursive_isolate, &error));
-    assert(error.line == 41);
-
-    pathguard::AppPolicy invalid_placeholder;
-    invalid_placeholder.package = "com.example.app";
-    invalid_placeholder.mounts = {
-        {pathguard::MountAction::kRedirect, "Download", "Path/{unknown}", 0, 0, 50},
-    };
-    assert(!pathguard::ValidatePolicy(&invalid_placeholder, &error));
-    assert(error.line == 50);
+    PolicyV6 invalid_domain = ValidPolicy();
+    invalid_domain.packages.front().actions.front().domain =
+        static_cast<PolicyExecutionDomain>(255);
+    assert(!Encodes(std::move(invalid_domain)));
     return 0;
 }
