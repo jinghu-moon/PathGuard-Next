@@ -1757,6 +1757,196 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
   `build/device-evidence/provider-lsplant-v1/20260802-124446` 均通过。
 - **依赖/时间盒**：I-47；1 小时。
 
+### T-48 [红] 冻结 Provider runtime resolver C ABI
+
+- **任务描述**：定义不携带 JNI ref 或 daemon 句柄的 versioned runtime facts resolver；跨库
+  配置头保持 C ABI，facts 只在 LSPlant bridge 内表达 profile、operation、binding、reverse
+  resolve 和 runtime availability。
+- **验收标准**：C/C++ 均可解析 bridge ABI 头；resolver 缺失/失败保持 pass-through；配置在
+  hook 安装前固定，安装中或安装后修改返回 `EBUSY`；不得启用 bit 17。
+- **执行结果**：完成。证据：
+  `tests/baseline/pattern-v6/p6-provider-runtime-resolver-20260802/T-48-R-48-runtime-resolver-seam-host.md`。
+- **依赖/时间盒**：R-47；2 小时。
+
+### I-48 [绿] 接入 native dispatcher runtime resolver seam
+
+- **任务描述**：让 native dispatcher 通过单一 resolver adapter 调用既有
+  `EvaluateProviderMapping`，无 resolver 时保留 Java backup/pass-through 路径。
+- **验收标准**：Host `82/82`、mapping/bridge/production guards、NDK r27d 双 ABI、NDK 29
+  LSPlant 双 ABI 与 ELF export guard 全部通过；不访问 daemon/store、不创建 Java 返回对象。
+- **执行结果**：完成（Host/ABI/offline scope）。证据同 T-48。
+- **依赖/时间盒**：T-48；2 小时。
+
+### R-48 [重构] 保持真实 Java rewrite 与 capability bit 17 关闭
+
+- **任务描述**：resolver seam 只承载经过验证的 facts；在真实 provenance/binding 和返回
+  对象构造完成前，不把任何 decision 转换为 Java 返回值，也不设置 Provider mapping capability。
+- **验收标准**：当前设备只验证既有 passthrough/restart；真实 mapping、FD identity、Java
+  callback fail-open 和 V-65 完整矩阵继续标记 `unsupported/not_observed`。
+- **执行结果**：完成（可用设备/当前架构范围）；设备边界证据同 T-48。
+- **依赖/时间盒**：I-48；1 小时。
+
+### T-49 [红] 冻结 native-to-Java DispatchResult transport
+
+- **任务描述**：native dispatcher 的返回值必须通过 Hooker Java 层进入既有
+  `DispatchResult`/backup compatibility 流程；null 或错误类型继续 pass-through。
+- **验收标准**：native 返回值不被无条件丢弃；Java backup invocation、异常传播和 primitive/
+  reference compatibility 规则保持不变；不创建真实 Provider 返回对象。
+- **执行结果**：完成。证据：
+  `tests/baseline/pattern-v6/p6-provider-java-result-20260802/T-49-R-49-java-result-transport-host.md`。
+- **依赖/时间盒**：R-48；1 小时。
+
+### I-49 [绿] 接入安全 DispatchResult 归一化
+
+- **任务描述**：`installNativeDispatcher()` 仅接受 `DispatchResult` 实例，否则显式返回
+  `DispatchResult.pass()`。
+- **验收标准**：ProviderHooker Host 测试、production/comparison guards、完整 Host CTest
+  与双 ABI 构建通过。
+- **执行结果**：完成（Host/ABI/offline scope）。证据同 T-49。
+- **依赖/时间盒**：T-49；1 小时。
+
+### R-49 [重构] 保持真实 Provider result rewrite 关闭
+
+- **任务描述**：结果传输桥只提供安全承载，不把任意 native 对象视为可改写结果；真实
+  resolver/binding/Java object factory 仍需单独完成并通过 V-65 矩阵。
+- **验收标准**：当前设备仍只报告 passthrough/restart；bit 17 清零，真实 mapping 保持
+  `unsupported/not_observed`。
+- **执行结果**：完成（可用设备/当前架构范围）。证据同 T-49。
+- **依赖/时间盒**：I-49；1 小时。
+
+### T-50 [红] 冻结 Provider before/after dispatch 生命周期
+
+- **任务描述**：query/insert/document-ID 等依赖原始返回值的映射必须在 backup 正常返回后处理；
+  before 继续支持安全短路，原方法异常不得被 after 吞掉或改写。
+- **验收标准**：顺序固定为 before→backup→after；before/after 异常和不兼容结果 fail-open；
+  原方法异常按原语义传播；默认 after 保持兼容。
+- **执行结果**：完成。证据：
+  `tests/baseline/pattern-v6/p6-provider-after-dispatch-20260802/T-50-R-50-after-dispatch-host.md`。
+- **依赖/时间盒**：R-49；2 小时。
+
+### I-50 [绿] 接入 native after-dispatch JNI seam
+
+- **任务描述**：注册 `nativeAfterDispatch`，复用 frozen request extractor 验证 method/arguments，
+  暂不读取或构造 Android 返回对象。
+- **验收标准**：Java Host、Host `82/82`、production/comparison guards、NDK r27d/29 双 ABI
+  和 ELF guard 全部通过。
+- **执行结果**：完成（Host/ABI/offline scope）。证据同 T-50。
+- **依赖/时间盒**：T-50；2 小时。
+
+### R-50 [重构] 保持 after-dispatch 结果适配关闭
+
+- **任务描述**：在 result-kind-specific adapter 和真实 binding/provenance 完成前，native after
+  固定返回 pass-through，不从 URI 末段、display name、MIME 或返回数量猜测 route。
+- **验收标准**：bit 17 清零；当前设备只验证 passthrough，真实 query/insert/reverse 仍为
+  `unsupported/not_observed`。
+- **执行结果**：完成（Host/ABI/device passthrough scope）；`0.1.38-dev` 证据
+  `build/device-evidence/provider-lsplant-v1/20260802-142638` 显示双 Provider hook group 完整、
+  `provider_bridge_errno=0`、admission active、bit 17 清零。真实 result rewrite 仍为
+  `unsupported/not_observed`。
+- **依赖/时间盒**：I-50；1 小时。
+
+### T-51 [红] 冻结 Provider result-kind observation 合同
+
+- **任务描述**：依据已冻结的方法描述符，分别识别 `File`、`String` document ID、`Cursor`、
+  `Uri`、`ParcelFileDescriptor`、boxed count 和 `void` 的原始返回形状；不得从对象内容推断
+  route、document ID 或 FD identity。
+- **验收标准**：引用类型允许 null 并标记为 compatible-null；count 必须为非空 `Integer`；
+  `void` 必须为 null；错误类型、未知 kind 和 JNI 异常均 fail-open，不改变原始返回值。
+- **执行结果**：完成。证据：
+  `tests/baseline/pattern-v6/p6-provider-result-observation-20260802/T-51-R-51-result-observation-host.md`。
+- **依赖/时间盒**：R-50；2 小时。
+
+### I-51 [绿] 接入 native after-dispatch 结果观察器
+
+- **任务描述**：`nativeAfterDispatch` 先按 `ProviderJavaDispatchSpecV1.result` 验证原始对象，
+  再复用 immutable request extractor；观察器不持有 JNI ref、不读取对象字段、不构造替代对象。
+- **验收标准**：结果种类 Host 矩阵、ProviderHooker Java Host、MSVC Release `82/82`、
+  production guard、NDK r27d/29 双 ABI和 ELF guard 全部通过。
+- **执行结果**：完成（Host/ABI/device passthrough scope）。候选 `0.1.39-dev` 当前设备证据
+  `build/device-evidence/provider-lsplant-v1/20260802-145017`：MediaProvider `2044`、
+  ExternalStorageProvider `3`，两端 `provider_bridge_errno=0`、hook group 完整、admission
+  active，bit 17 清零；采集日志无 Provider/PathGuard/JNI fault。真实 result rewrite 仍为
+  `unsupported/not_observed`。
+- **依赖/时间盒**：T-51；2 小时。
+
+### R-51 [重构] 保持结果观察与结果适配分离
+
+- **任务描述**：观察器只回答形状是否兼容及是否有值；`Cursor` 行、`Uri`/document ID
+  内容、`File` 路径、PFD identity 和 count 语义留给各自 adapter，不因类型兼容启用 rewrite。
+- **验收标准**：native after 固定返回 pass-through，bit 17 清零；真实 mapping/provenance 和
+  V-65 结果矩阵继续为 `unsupported/not_observed`，候选包需当前设备回归。
+- **执行结果**：完成（Host/ABI/device passthrough scope）。证据同 T-51；真实 result rewrite
+  仍为 `unsupported/not_observed`。
+- **依赖/时间盒**：I-51；1 小时。
+
+### T-52 [红] 冻结 Provider resolver request/facts C ABI
+
+- **任务描述**：把跨库 resolver 的 request 和 facts 显式定义为固定容量 C 结构；禁止把
+  `std::string`、`std::vector`、`std::optional`、C++ enum 引用或 `ProviderRouteBindingV1*`
+  作为 ABI 传给 Zygisk `APP_STL=none` 侧。
+- **验收标准**：C17 和 C++ 均可解析 bridge API；request/facts 尺寸和关键字段 offset 固定；
+  identifier/file path 使用 bounded byte arrays；snapshot/binding/reverse 只能以 numeric handle
+  表达，未接 registry 时 fail-open/pass-through。
+- **执行结果**：完成。证据：
+  `tests/baseline/pattern-v6/p6-provider-c-abi-facts-20260802/T-52-R-52-c-abi-facts-host.md`。
+- **依赖/时间盒**：R-51；2 小时。
+
+### I-52 [绿] 接入 C ABI facts adapter
+
+- **任务描述**：LSPlant bridge 在内部把 immutable Java request 转成
+  `PathGuardLsplantMappingRequestV1`，resolver 返回 `PathGuardLsplantMappingFactsV1` 后再转换为
+  既有 evaluator 所需 facts；非零 binding handle 在 registry 未完成前拒绝。
+- **验收标准**：C 头解析测试、Provider LSPlant Host 测试、production guard、MSVC Release、
+  NDK 29 LSPlant 双 ABI 与 ELF guard 全部通过；仍不启用真实 resolver。
+- **执行结果**：完成（Host/ABI/device passthrough scope）。候选 `0.1.40-dev` 当前设备证据
+  `build/device-evidence/provider-lsplant-v1/20260802-152004`：MediaProvider `2044`、
+  ExternalStorageProvider `3`，两端 `provider_bridge_errno=0`、hook group 完整、admission
+  active，bit 17 清零；采集日志无 Provider/PathGuard/JNI fault。真实 resolver 仍为
+  `unsupported/not_observed`。证据同 T-52。
+- **依赖/时间盒**：T-52；2 小时。
+
+### R-52 [重构] 保持 resolver 数据面与真实 snapshot registry 分离
+
+- **任务描述**：当前阶段只建立稳定 ABI 和 adapter；真实 immutable route snapshot registry、
+  provenance reverse handle、trusted caller UID 和 Java object factory 留给后续任务。
+- **验收标准**：Zygisk 仍调用 `configure_mapping(nullptr)`；native dispatcher 无 resolver 时 pass-through，
+  resolver 返回 snapshot binding 时在 registry 未完成前 fail-open；bit 17 清零。
+- **执行结果**：完成（Host/ABI/device passthrough scope）。候选 `0.1.40-dev` 当前设备证据
+  `build/device-evidence/provider-lsplant-v1/20260802-152004` 已验证两端 hook group 完整、
+  `provider_bridge_errno=0`、admission active 且 bit 17 清零。真实 snapshot binding 仍为
+  `unsupported/not_observed`。证据同 T-52。
+- **依赖/时间盒**：I-52；1 小时。
+
+### T-53 [红] 冻结 immutable Provider route snapshot registry 合同
+
+- **任务描述**：为 resolver 返回的 numeric generation/binding/reverse handles 建立进程内不可变
+  registry；binding ID 与 reverse record ID 使用独立命名空间，禁止 callback 热路径访问
+  daemon/store、获取全局锁或复制含 STL 的 route/provenance 对象。
+- **验收标准**：snapshot generation、零/重复 ID、stale/unknown binding 和独立 reverse ID 均有
+  Host 矩阵；任何不一致 fail-open/pass-through，不创建 Java 替代对象、不启用 bit 17。
+- **执行结果**：完成（Host/ABI contract scope）。证据：
+  `tests/baseline/pattern-v6/p6-provider-route-snapshot-20260802/T-53-R-53-route-snapshot-host.md`。
+- **依赖/时间盒**：R-52；2 小时。
+
+### I-53 [绿] 实现只读 generation/binding/reverse lookup
+
+- **任务描述**：构造阶段复制、排序并验证 snapshot entries；运行期使用二分查找返回稳定 const
+  pointer，按 `(snapshot_generation, binding_id, reverse_record_id)` 联合校验。
+- **验收标准**：MSVC Release 专项及相邻 Provider tests、NDK 29 LSPlant 双 ABI、ELF guard 和
+  production guard 全部通过；LSPlant Android 目标显式链接 registry 实现。
+- **执行结果**：完成（Host/ABI contract scope）。证据同 T-53；production resolver 尚未连接。
+- **依赖/时间盒**：T-53；2 小时。
+
+### R-53 [重构] 保持 snapshot lookup 与生产发布分离
+
+- **任务描述**：registry 只负责 immutable handle lookup；snapshot 编码/发布、Zygisk resolver、
+  trusted caller UID、route/provenance 构建和 Java result factory 留给后续任务。
+- **验收标准**：现有 C ABI 不变，`configure_mapping(nullptr)` 仍为生产默认路径，当前设备行为
+  不变且 bit 17 清零。
+- **执行结果**：完成（Host/ABI contract scope）。真实 snapshot 数据和 rewrite 仍为
+  `unsupported/not_observed`。证据同 T-53。
+- **依赖/时间盒**：I-53；1 小时。
+
 ## 参考依据
 
 项目内权威来源：
@@ -1773,8 +1963,11 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 - Android Scoped storage：<https://source.android.com/docs/core/storage/scoped>
 - Android FUSE passthrough：<https://source.android.com/docs/core/storage/fuse-passthrough>
 - Android MediaProvider module：<https://source.android.com/docs/core/media/media-provider>
+- Android ContentProvider API：<https://developer.android.com/reference/android/content/ContentProvider>
 - Android DocumentsProvider API：<https://developer.android.com/reference/android/provider/DocumentsProvider>
 - Android Custom document provider：<https://developer.android.com/guide/topics/providers/create-document-provider>
+- AOSP MediaProvider source：<https://android.googlesource.com/platform/packages/providers/MediaProvider/+/master/src/com/android/providers/media/MediaProvider.java>
+- LSPlant official README：<https://github.com/LSPosed/LSPlant/blob/master/README.md>
 - Linux `openat2(2)`：<https://man7.org/linux/man-pages/man2/openat2.2.html>
 - Linux `fanotify(7)`：<https://man7.org/linux/man-pages/man7/fanotify.7.html>
 - POSIX `fnmatch()`：<https://pubs.opengroup.org/onlinepubs/9799919799.2024edition/functions/fnmatch.html>

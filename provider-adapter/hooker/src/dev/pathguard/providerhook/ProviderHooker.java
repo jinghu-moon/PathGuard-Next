@@ -17,6 +17,11 @@ public final class ProviderHooker {
 
     public interface Dispatcher {
         DispatchResult dispatch(int methodId, Object[] args) throws Throwable;
+
+        default DispatchResult afterDispatch(
+                int methodId, Object[] args, Object originalResult) throws Throwable {
+            return DispatchResult.pass();
+        }
     }
 
     public static final class DispatchResult {
@@ -47,13 +52,30 @@ public final class ProviderHooker {
     }
 
     public static void installNativeDispatcher() {
-        dispatcher = (methodId, args) -> {
-            nativeDispatch(methodId, args);
-            return DispatchResult.pass();
+        dispatcher = new Dispatcher() {
+            @Override
+            public DispatchResult dispatch(int methodId, Object[] args) {
+                return normalizeNativeResult(nativeDispatch(methodId, args));
+            }
+
+            @Override
+            public DispatchResult afterDispatch(
+                    int methodId, Object[] args, Object originalResult) {
+                return normalizeNativeResult(
+                        nativeAfterDispatch(methodId, args, originalResult));
+            }
         };
     }
 
     private static native Object nativeDispatch(int methodId, Object[] args);
+    private static native Object nativeAfterDispatch(
+            int methodId, Object[] args, Object originalResult);
+
+    private static DispatchResult normalizeNativeResult(Object nativeResult) {
+        return nativeResult instanceof DispatchResult
+                ? (DispatchResult) nativeResult
+                : DispatchResult.pass();
+    }
 
     public ProviderHooker(int methodId, Method target) {
         this.methodId = methodId;
@@ -81,10 +103,31 @@ public final class ProviderHooker {
         Object receiver = targetStatic ? null : args[0];
         Object[] parameters = targetStatic ? args : Arrays.copyOfRange(args, 1, args.length);
         Dispatcher current = dispatcher;
+        Object[] dispatchArguments = null;
         if (current != null) {
+            dispatchArguments = Arrays.copyOf(args, args.length);
             try {
                 DispatchResult decision = current.dispatch(
-                        methodId, Arrays.copyOf(args, args.length));
+                        methodId, dispatchArguments);
+                if (decision != null && decision.rewrite
+                        && isCompatibleReturn(decision.value)) {
+                    return decision.value;
+                }
+            } catch (Throwable error) {
+                logDispatchFailure(error);
+                current = null;
+            }
+        }
+        Object originalResult;
+        try {
+            originalResult = original.invoke(receiver, parameters);
+        } catch (InvocationTargetException error) {
+            throw error.getCause();
+        }
+        if (current != null) {
+            try {
+                DispatchResult decision = current.afterDispatch(
+                        methodId, dispatchArguments, originalResult);
                 if (decision != null && decision.rewrite
                         && isCompatibleReturn(decision.value)) {
                     return decision.value;
@@ -93,11 +136,7 @@ public final class ProviderHooker {
                 logDispatchFailure(error);
             }
         }
-        try {
-            return original.invoke(receiver, parameters);
-        } catch (InvocationTargetException error) {
-            throw error.getCause();
-        }
+        return originalResult;
     }
 
     private boolean isCompatibleReturn(Object value) {

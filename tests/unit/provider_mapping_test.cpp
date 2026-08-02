@@ -71,6 +71,34 @@ pathguard::ProviderJavaDispatchRequestV1 JavaRequest(
     return request;
 }
 
+bool CompleteFactsResolver(
+        const pathguard::ProviderJavaDispatchRequestV1&,
+        pathguard::ProviderMappingRuntimeFactsV1* facts,
+        void* user_data) noexcept {
+    if (facts == nullptr || user_data == nullptr) return false;
+    auto* binding = static_cast<pathguard::ProviderRouteBindingV1*>(user_data);
+    facts->profile_match = {
+        0x616c696f74682d6d,
+        pathguard::ProviderAdapterProfileReason::kMatched,
+    };
+    facts->supported_operations = pathguard::kProviderCompositeOperationsV1;
+    facts->binding = binding;
+    facts->reverse = {
+        pathguard::provenance::ResolveStatus::kUnique,
+        pathguard::provenance::Error::kNone,
+        binding->reverse_record,
+    };
+    facts->runtime_available = true;
+    return true;
+}
+
+bool FailingFactsResolver(
+        const pathguard::ProviderJavaDispatchRequestV1&,
+        pathguard::ProviderMappingRuntimeFactsV1*,
+        void*) noexcept {
+    return false;
+}
+
 }  // namespace
 
 int main() {
@@ -241,6 +269,16 @@ int main() {
         CompleteRequest(&binding).reverse, true);
     decision = EvaluateProviderMapping(request);
     assert(decision.rewrite());
+
+    const auto resolved = EvaluateProviderMappingWithResolver(
+        java_request, CompleteFactsResolver, &binding);
+    assert(resolved.rewrite());
+    const auto no_resolver = EvaluateProviderMappingWithResolver(
+        java_request, nullptr, &binding);
+    assert(no_resolver.disposition == ProviderMappingDisposition::kPass);
+    const auto failed_resolver = EvaluateProviderMappingWithResolver(
+        java_request, FailingFactsResolver, &binding);
+    assert(failed_resolver.disposition == ProviderMappingDisposition::kPass);
 
     java_request.identifier.bytes[10] = 'x';
     request = BuildProviderMappingRequest(

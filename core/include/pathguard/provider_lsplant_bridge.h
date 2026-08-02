@@ -50,6 +50,61 @@ enum class ProviderJavaResultKind : std::uint8_t {
     kVoid,
 };
 
+enum class ProviderJavaResultObservationState : std::uint8_t {
+    kCompatibleValue,
+    kCompatibleNull,
+    kTypeMismatch,
+    kInvalidKind,
+};
+
+struct ProviderJavaResultObservationV1 {
+    ProviderJavaResultKind expected = ProviderJavaResultKind::kVoid;
+    ProviderJavaResultObservationState state =
+        ProviderJavaResultObservationState::kInvalidKind;
+
+    constexpr bool compatible() const noexcept {
+        return state == ProviderJavaResultObservationState::kCompatibleValue
+            || state == ProviderJavaResultObservationState::kCompatibleNull;
+    }
+
+    constexpr bool has_value() const noexcept {
+        return state == ProviderJavaResultObservationState::kCompatibleValue;
+    }
+};
+
+constexpr ProviderJavaResultObservationV1 ObserveProviderJavaResult(
+        ProviderJavaResultKind expected, bool is_null,
+        bool matches_expected_type) noexcept {
+    ProviderJavaResultObservationV1 output;
+    output.expected = expected;
+    switch (expected) {
+        case ProviderJavaResultKind::kFile:
+        case ProviderJavaResultKind::kDocumentId:
+        case ProviderJavaResultKind::kCursor:
+        case ProviderJavaResultKind::kUri:
+        case ProviderJavaResultKind::kParcelFileDescriptor:
+            output.state = is_null
+                ? ProviderJavaResultObservationState::kCompatibleNull
+                : matches_expected_type
+                    ? ProviderJavaResultObservationState::kCompatibleValue
+                    : ProviderJavaResultObservationState::kTypeMismatch;
+            break;
+        case ProviderJavaResultKind::kCount:
+            output.state = !is_null && matches_expected_type
+                ? ProviderJavaResultObservationState::kCompatibleValue
+                : ProviderJavaResultObservationState::kTypeMismatch;
+            break;
+        case ProviderJavaResultKind::kVoid:
+            output.state = is_null
+                ? ProviderJavaResultObservationState::kCompatibleNull
+                : ProviderJavaResultObservationState::kTypeMismatch;
+            break;
+        default:
+            break;
+    }
+    return output;
+}
+
 enum class ProviderJavaIdentifierKind : std::uint8_t {
     kNone,
     kContentUri,

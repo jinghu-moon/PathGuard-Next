@@ -247,4 +247,20 @@ ProviderMappingRequestV1 BuildProviderMappingRequest(
     return output;
 }
 
+ProviderMappingDecisionV1 EvaluateProviderMappingWithResolver(
+        const ProviderJavaDispatchRequestV1& request,
+        ProviderMappingRuntimeResolverV1 resolver,
+        void* user_data) noexcept {
+    if (resolver == nullptr) {
+        return {};
+    }
+    ProviderMappingRuntimeFactsV1 facts;
+    if (!resolver(request, &facts, user_data)) {
+        return {};
+    }
+    return EvaluateProviderMapping(BuildProviderMappingRequest(
+        request, facts.profile_match, facts.supported_operations,
+        facts.binding, facts.reverse, facts.runtime_available));
+}
+
 }  // namespace pathguard

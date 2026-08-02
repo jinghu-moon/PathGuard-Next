@@ -29,6 +29,16 @@ constexpr char kHookerClass[] = "dev.pathguard.providerhook.ProviderHooker";
 constexpr std::uint32_t kApplicationLoaderPollCount = 350;
 constexpr useconds_t kApplicationLoaderPollUs = 10000;
 
+static_assert(static_cast<unsigned>(
+    pathguard::ProviderJavaDispatchRole::kDelete)
+    == PATHGUARD_LSPLANT_MAPPING_ROLE_DELETE);
+static_assert(static_cast<unsigned>(
+    pathguard::ProviderJavaResultKind::kVoid)
+    == PATHGUARD_LSPLANT_MAPPING_RESULT_VOID);
+static_assert(static_cast<unsigned>(
+    pathguard::ProviderJavaIdentifierKind::kFilePath)
+    == PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_FILE_PATH);
+
 #define PG_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kLogTag, __VA_ARGS__)
 #define PG_LOGI(...) __android_log_print(ANDROID_LOG_INFO, kLogTag, __VA_ARGS__)
 
@@ -52,8 +62,96 @@ struct HookState {
 };
 
 HookState g_state;
+PathGuardLsplantMappingResolverV1 g_mapping_resolver = nullptr;
+void* g_mapping_user_data = nullptr;
+
+bool ResolveMappingRuntimeFacts(
+        const pathguard::ProviderJavaDispatchRequestV1& request,
+        pathguard::ProviderMappingRuntimeFactsV1* facts,
+        void* user_data) noexcept {
+    if (g_mapping_resolver == nullptr || facts == nullptr
+        || request.identifier.size
+            >= PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_CAPACITY
+        || request.file_path.size
+            >= PATHGUARD_LSPLANT_MAPPING_FILE_PATH_CAPACITY) {
+        return false;
+    }
+    PathGuardLsplantMappingRequestV1 abi_request{};
+    abi_request.version = PATHGUARD_LSPLANT_BRIDGE_API_VERSION;
+    abi_request.size = sizeof(abi_request);
+    abi_request.method_id = static_cast<std::uint8_t>(request.method_id);
+    abi_request.role = static_cast<std::uint8_t>(request.role);
+    abi_request.result_kind = static_cast<std::uint8_t>(request.result);
+    abi_request.identifier_kind =
+        static_cast<std::uint8_t>(request.identifier.kind);
+    abi_request.operations = request.operations;
+    abi_request.identifier_size = request.identifier.size;
+    abi_request.file_path_size = request.file_path.size;
+    std::memcpy(abi_request.identifier, request.identifier.bytes.data(),
+                request.identifier.size);
+    std::memcpy(abi_request.file_path, request.file_path.bytes.data(),
+                request.file_path.size);
+
+    PathGuardLsplantMappingFactsV1 abi_facts{};
+    abi_facts.version = PATHGUARD_LSPLANT_BRIDGE_API_VERSION;
+    abi_facts.size = sizeof(abi_facts);
+    if (g_mapping_resolver(&abi_request, &abi_facts, user_data) == 0
+        || abi_facts.version != PATHGUARD_LSPLANT_BRIDGE_API_VERSION
+        || abi_facts.size != sizeof(abi_facts)
+        || abi_facts.profile_matched > 1
+        || abi_facts.runtime_available > 1
+        || abi_facts.binding_state != PATHGUARD_LSPLANT_MAPPING_BINDING_NONE
+        || abi_facts.snapshot_generation != 0
+        || abi_facts.binding_id != 0
+        || abi_facts.reverse_record_id != 0
+        || (abi_facts.supported_operations
+            & ~pathguard::kProviderCompositeOperationsV1) != 0
+        || (abi_facts.profile_matched != 0 && abi_facts.profile_id == 0)) {
+        return false;
+    }
+    facts->profile_match = {
+        abi_facts.profile_id,
+        abi_facts.profile_matched != 0
+            ? pathguard::ProviderAdapterProfileReason::kMatched
+            : pathguard::ProviderAdapterProfileReason::kNoMatchingProfile,
+    };
+    facts->supported_operations = abi_facts.supported_operations;
+    facts->runtime_available = abi_facts.runtime_available != 0;
+    return true;
+}
 
 bool IsJavaInstance(JNIEnv* env, jobject value, const char* class_name);
+
+const char* ProviderJavaResultClassName(
+        pathguard::ProviderJavaResultKind kind) noexcept {
+    switch (kind) {
+        case pathguard::ProviderJavaResultKind::kFile:
+            return "java/io/File";
+        case pathguard::ProviderJavaResultKind::kDocumentId:
+            return "java/lang/String";
+        case pathguard::ProviderJavaResultKind::kCursor:
+            return "android/database/Cursor";
+        case pathguard::ProviderJavaResultKind::kUri:
+            return "android/net/Uri";
+        case pathguard::ProviderJavaResultKind::kParcelFileDescriptor:
+            return "android/os/ParcelFileDescriptor";
+        case pathguard::ProviderJavaResultKind::kCount:
+            return "java/lang/Integer";
+        case pathguard::ProviderJavaResultKind::kVoid:
+            return nullptr;
+    }
+    return nullptr;
+}
+
+pathguard::ProviderJavaResultObservationV1 ObserveNativeProviderResult(
+        JNIEnv* env, pathguard::ProviderJavaResultKind expected,
+        jobject original_result) {
+    const bool is_null = original_result == nullptr;
+    const char* expected_class = ProviderJavaResultClassName(expected);
+    const bool matches = !is_null && expected_class != nullptr
+        && IsJavaInstance(env, original_result, expected_class);
+    return pathguard::ObserveProviderJavaResult(expected, is_null, matches);
+}
 
 pathguard::OperationMask ReadOpenMode(
         JNIEnv* env, jobjectArray arguments, std::uint8_t argument_index) {
@@ -273,37 +371,36 @@ bool ReadProviderIdentifier(
 
 jobject DispatchProviderRequest(
         JNIEnv*, const pathguard::ProviderJavaDispatchRequestV1& request) {
-    // A validated request is available, but route/provenance wiring and Java
-    // result construction remain disabled until their contracts are complete.
-    const auto mapping_request = pathguard::BuildProviderMappingRequest(
-        request, {}, 0, nullptr, {}, false);
-    const auto decision = pathguard::EvaluateProviderMapping(mapping_request);
+    // Resolver configuration is immutable after hook installation. A missing
+    // resolver intentionally keeps the callback on the Java backup path.
+    const auto decision = pathguard::EvaluateProviderMappingWithResolver(
+        request, g_mapping_resolver == nullptr ? nullptr : ResolveMappingRuntimeFacts,
+        g_mapping_user_data);
     if (decision.disposition != pathguard::ProviderMappingDisposition::kPass) {
         return nullptr;
     }
     return nullptr;
 }
 
-jobject NativeDispatch(
-        JNIEnv* env, jclass, jint method_id, jobjectArray arguments) {
-    // The native seam is deliberately pass-through until a validated route
-    // binding and provenance response are available for this callback.
-    if (method_id < 0 || arguments == nullptr) return nullptr;
+bool ReadNativeDispatchRequest(
+        JNIEnv* env, jint method_id, jobjectArray arguments,
+        pathguard::ProviderJavaDispatchRequestV1* output) {
+    if (method_id < 0 || arguments == nullptr || output == nullptr) return false;
     const auto* dispatch = pathguard::ProviderJavaDispatchSpec(
         static_cast<pathguard::ProviderJavaMethodId>(method_id));
-    if (dispatch == nullptr) return nullptr;
+    if (dispatch == nullptr) return false;
     const jsize argument_count = env->GetArrayLength(arguments);
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
-        return nullptr;
+        return false;
     }
     if (argument_count
-        != static_cast<jsize>(dispatch->callback_argument_count)) return nullptr;
+        != static_cast<jsize>(dispatch->callback_argument_count)) return false;
     pathguard::ProviderJavaIdentifierV1 identifier;
     pathguard::ProviderJavaFilePathV1 file_path;
     if (!ReadProviderIdentifier(
             env, arguments, *dispatch, &identifier, &file_path)) {
-        return nullptr;
+        return false;
     }
     pathguard::OperationMask operations = dispatch->minimum_operations;
     bool dynamic_operations_ready = !dispatch->arguments_determine_operation;
@@ -326,8 +423,42 @@ jobject NativeDispatch(
     }
     const auto request = pathguard::BuildProviderJavaDispatchRequest(
         *dispatch, operations, dynamic_operations_ready, identifier, file_path);
-    if (!request.ready()) return nullptr;
-    return DispatchProviderRequest(env, request.request);
+    if (!request.ready()) return false;
+    *output = request.request;
+    return true;
+}
+
+jobject NativeDispatch(
+        JNIEnv* env, jclass, jint method_id, jobjectArray arguments) {
+    // The native seam is deliberately pass-through until a validated route
+    // binding and provenance response are available for this callback.
+    pathguard::ProviderJavaDispatchRequestV1 request;
+    return ReadNativeDispatchRequest(env, method_id, arguments, &request)
+        ? DispatchProviderRequest(env, request) : nullptr;
+}
+
+jobject NativeAfterDispatch(
+        JNIEnv* env, jclass, jint method_id, jobjectArray arguments,
+        jobject original_result) {
+    if (method_id < 0) return nullptr;
+    const auto* dispatch = pathguard::ProviderJavaDispatchSpec(
+        static_cast<pathguard::ProviderJavaMethodId>(method_id));
+    if (dispatch == nullptr) return nullptr;
+    const auto observation = ObserveNativeProviderResult(
+        env, dispatch->result, original_result);
+    if (!observation.compatible()) {
+        PG_LOGE("Provider result observation rejected: method=%d kind=%u state=%u",
+                method_id, static_cast<unsigned>(dispatch->result),
+                static_cast<unsigned>(observation.state));
+        return nullptr;
+    }
+    pathguard::ProviderJavaDispatchRequestV1 request;
+    if (!ReadNativeDispatchRequest(env, method_id, arguments, &request)) {
+        return nullptr;
+    }
+    // Observation never takes ownership of the original local reference. A
+    // replacement remains disabled until route provenance is available.
+    return nullptr;
 }
 
 bool RegisterHookerNatives(JNIEnv* env) {
@@ -336,6 +467,12 @@ bool RegisterHookerNatives(JNIEnv* env) {
             const_cast<char*>("nativeDispatch"),
             const_cast<char*>("(I[Ljava/lang/Object;)Ljava/lang/Object;"),
             reinterpret_cast<void*>(NativeDispatch),
+        },
+        {
+            const_cast<char*>("nativeAfterDispatch"),
+            const_cast<char*>(
+                "(I[Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"),
+            reinterpret_cast<void*>(NativeAfterDispatch),
         },
     };
     return env->RegisterNatives(
@@ -737,6 +874,29 @@ pathguard_lsplant_initialize_v1(
     result->bridge_errno = g_state.initialized ? 0 : ENOTSUP;
     PG_LOGI("initialize result=%d", g_state.initialized ? 1 : 0);
     return result->bridge_errno;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+pathguard_lsplant_configure_mapping_v1(
+        const PathGuardLsplantMappingRuntimeV1* config) {
+    std::lock_guard lock(g_state.mutex);
+    if (g_state.installed_kind != PATHGUARD_LSPLANT_PROVIDER_UNKNOWN
+        || g_state.install_pending) {
+        return EBUSY;
+    }
+    if (config == nullptr) {
+        g_mapping_resolver = nullptr;
+        g_mapping_user_data = nullptr;
+        return 0;
+    }
+    if (config->version != PATHGUARD_LSPLANT_BRIDGE_API_VERSION
+        || config->size < sizeof(PathGuardLsplantMappingRuntimeV1)
+        || config->resolver == nullptr) {
+        return EINVAL;
+    }
+    g_mapping_resolver = config->resolver;
+    g_mapping_user_data = config->user_data;
+    return 0;
 }
 
 extern "C" __attribute__((visibility("default"))) int

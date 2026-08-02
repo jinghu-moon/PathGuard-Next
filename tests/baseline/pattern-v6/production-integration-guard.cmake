@@ -9,6 +9,10 @@ file(READ "${SOURCE_DIR}/daemon/src/main.cpp" daemon)
 file(READ "${SOURCE_DIR}/scripts/package.ps1" package)
 file(READ "${SOURCE_DIR}/scripts/verify-provider-lsplant-elf.cmake" lsplant_elf)
 file(READ "${SOURCE_DIR}/provider-adapter/native/src/provider_lsplant_bridge.cpp" lsplant_bridge)
+file(READ "${SOURCE_DIR}/provider-adapter/native/CMakeLists.txt" lsplant_cmake)
+file(READ "${SOURCE_DIR}/core/src/provider_mapping.cpp" provider_mapping)
+file(READ "${SOURCE_DIR}/core/include/pathguard/provider_route_snapshot_registry.h" provider_registry_header)
+file(READ "${SOURCE_DIR}/core/src/provider_route_snapshot_registry.cpp" provider_registry)
 file(READ "${SOURCE_DIR}/provider-adapter/hooker/src/dev/pathguard/providerhook/ProviderHooker.java" lsplant_hooker)
 file(READ "${SOURCE_DIR}/tests/baseline/pattern-v6/run-provider-hooker-dispatcher-host-test.ps1" hooker_dispatcher_test)
 foreach(contract IN ITEMS
@@ -91,6 +95,7 @@ foreach(contract IN ITEMS
     "pathguard_lsplant_initialize_v1"
     "pathguard_lsplant_install_passthrough_v1"
     "pathguard_lsplant_wait_passthrough_v1"
+    "pathguard_lsplant_configure_mapping_v1"
     "StartProviderBridgeWait"
     "provider_bridge_self_tested_hooks"
     "status\.provider_bridge"
@@ -121,6 +126,7 @@ foreach(contract IN ITEMS
     "instance receiver unavailable"
     "Dispatcher"
     "DispatchResult"
+    "afterDispatch"
     "clearDispatcher"
     "isCompatibleReturn"
     "dispatcher failed")
@@ -131,19 +137,30 @@ endforeach()
 foreach(contract IN ITEMS
     "installNativeDispatcher"
     "nativeDispatch"
+    "nativeAfterDispatch"
+    "nativeResult"
     "RegisterHookerNatives"
     "ProviderJavaDispatchSpec"
     "ReadProviderIdentifier"
     "ReadJavaFilePathString"
+    "ObserveNativeProviderResult"
+    "ObserveProviderJavaResult"
     "EncodeProviderJavaIdentifierUtf16"
     "EncodeProviderJavaFilePathUtf16"
     "BuildProviderJavaDispatchRequest"
     "DispatchProviderRequest"
     "BuildProviderMappingRequest"
     "EvaluateProviderMapping"
+    "EvaluateProviderMappingWithResolver"
+    "ProviderMappingRuntimeFactsV1"
+    "PathGuardLsplantMappingRequestV1"
+    "PathGuardLsplantMappingFactsV1"
+    "PATHGUARD_LSPLANT_MAPPING_BINDING_NONE"
+    "pathguard_lsplant_configure_mapping_v1"
     "Provider native dispatcher installed as pass-through")
-  if(NOT lsplant_hooker MATCHES "${contract}" AND
-     NOT lsplant_bridge MATCHES "${contract}")
+   if(NOT lsplant_hooker MATCHES "${contract}" AND
+      NOT lsplant_bridge MATCHES "${contract}" AND
+      NOT provider_mapping MATCHES "${contract}")
     message(FATAL_ERROR "native Provider dispatcher contract misses ${contract}")
   endif()
 endforeach()
@@ -165,6 +182,19 @@ if(NOT android_mk MATCHES "provider-adapter/native/include" OR
    NOT package MATCHES "libpathguard_lsplant\.so")
   message(FATAL_ERROR "LSPlant production package wiring is incomplete")
 endif()
+if(NOT lsplant_cmake MATCHES "provider_route_snapshot_registry\.cpp")
+  message(FATAL_ERROR "Provider route snapshot registry is not linked into LSPlant")
+endif()
+foreach(contract IN ITEMS
+    "ProviderRouteSnapshotRegistryV1"
+    "ProviderRouteSnapshotLookupV1"
+    "generation != generation_"
+    "std::lower_bound")
+  if(NOT provider_registry_header MATCHES "${contract}" AND
+     NOT provider_registry MATCHES "${contract}")
+    message(FATAL_ERROR "Provider route snapshot registry misses ${contract}")
+  endif()
+endforeach()
 foreach(contract IN ITEMS
     "pathguard_lsplant_initialize_v1"
     "pathguard_lsplant_install_passthrough_v1"

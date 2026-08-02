@@ -71,6 +71,22 @@ struct ProviderMappingDecisionV1 {
     }
 };
 
+struct ProviderMappingRuntimeFactsV1 {
+    ProviderAdapterProfileMatchV1 profile_match;
+    OperationMask supported_operations = 0;
+    const ProviderRouteBindingV1* binding = nullptr;
+    provenance::ResolveResult reverse;
+    bool runtime_available = false;
+};
+
+#ifndef PATHGUARD_PROVIDER_MAPPING_RUNTIME_RESOLVER_V1_DEFINED
+#define PATHGUARD_PROVIDER_MAPPING_RUNTIME_RESOLVER_V1_DEFINED 1
+using ProviderMappingRuntimeResolverV1 = bool (*) (
+    const ProviderJavaDispatchRequestV1& request,
+    ProviderMappingRuntimeFactsV1* facts,
+    void* user_data) noexcept;
+#endif
+
 OperationMask ProviderMappingOperationMask(
     ProviderMappingOperation operation) noexcept;
 
@@ -91,5 +107,10 @@ ProviderMappingRequestV1 BuildProviderMappingRequest(
     const ProviderRouteBindingV1* binding,
     const provenance::ResolveResult& reverse,
     bool runtime_available) noexcept;
+
+ProviderMappingDecisionV1 EvaluateProviderMappingWithResolver(
+    const ProviderJavaDispatchRequestV1& request,
+    ProviderMappingRuntimeResolverV1 resolver,
+    void* user_data) noexcept;
 
 }  // namespace pathguard

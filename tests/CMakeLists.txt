@@ -1,3 +1,5 @@
+enable_language(C)
+
 add_executable(pathguard_core_smoke
   unit/core_smoke_test.cpp
 )
@@ -278,10 +280,20 @@ target_include_directories(pathguard_provider_mapping_test PRIVATE
 target_link_libraries(pathguard_provider_mapping_test PRIVATE pathguard_core)
 add_test(NAME pathguard_provider_mapping_test
   COMMAND pathguard_provider_mapping_test)
-add_executable(pathguard_provider_lsplant_bridge_test
-  unit/provider_lsplant_bridge_test.cpp)
-target_include_directories(pathguard_provider_lsplant_bridge_test PRIVATE
+add_executable(pathguard_provider_route_snapshot_registry_test
+  unit/provider_route_snapshot_registry_test.cpp)
+target_include_directories(pathguard_provider_route_snapshot_registry_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/unit)
+target_link_libraries(pathguard_provider_route_snapshot_registry_test PRIVATE pathguard_core)
+add_test(NAME pathguard_provider_route_snapshot_registry_test
+  COMMAND pathguard_provider_route_snapshot_registry_test)
+add_executable(pathguard_provider_lsplant_bridge_test
+  unit/provider_lsplant_bridge_test.cpp
+  unit/provider_lsplant_bridge_api_c_test.c)
+target_include_directories(pathguard_provider_lsplant_bridge_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+  ${CMAKE_SOURCE_DIR}/provider-adapter/native/include)
+target_compile_features(pathguard_provider_lsplant_bridge_test PRIVATE c_std_17)
 target_link_libraries(pathguard_provider_lsplant_bridge_test PRIVATE pathguard_core)
 add_test(NAME pathguard_provider_lsplant_bridge_test
   COMMAND pathguard_provider_lsplant_bridge_test)

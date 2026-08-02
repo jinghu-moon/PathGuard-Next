@@ -73,6 +73,12 @@
 | `p6-provider-delete-target-20260802` | V-67 delete target feasibility boundary | not_observed（当前设备/ABI 不支持，按 fail-open 跳过） | `p6-provider-delete-target-20260802/V-67-delete-target-boundary.md` |
 | `p6-provider-mapping-adapter-20260802` | T-46～R-46 native mapping decision adapter seam | complete（Host/ABI；device passthrough） | `p6-provider-mapping-adapter-20260802/T-46-R-46-mapping-adapter-host.md` |
 | `p6-provider-forward-binding-20260802` | T-47～R-47 operation-specific binding validation | complete（Host/ABI/device passthrough） | `p6-provider-forward-binding-20260802/T-47-R-47-forward-binding-host.md` |
+| `p6-provider-runtime-resolver-20260802` | T-48～R-48 runtime resolver C ABI/native seam | complete（Host/ABI/device passthrough；真实 mapping unsupported/not_observed） | `p6-provider-runtime-resolver-20260802/T-48-R-48-runtime-resolver-seam-host.md` |
+| `p6-provider-java-result-20260802` | T-49～R-49 native-to-Java DispatchResult transport | complete（Host/ABI/device passthrough；真实 rewrite unsupported/not_observed） | `p6-provider-java-result-20260802/T-49-R-49-java-result-transport-host.md` |
+| `p6-provider-after-dispatch-20260802` | T-50～R-50 before/backup/after lifecycle | complete（Host/ABI/device passthrough；真实 rewrite unsupported/not_observed） | `p6-provider-after-dispatch-20260802/T-50-R-50-after-dispatch-host.md` |
+| `p6-provider-result-observation-20260802` | T-51～R-51 result-kind observation | complete（Host/ABI/device passthrough；真实 rewrite unsupported/not_observed） | `p6-provider-result-observation-20260802/T-51-R-51-result-observation-host.md` |
+| `p6-provider-c-abi-facts-20260802` | T-52～R-52 resolver request/facts C ABI | complete（Host/ABI/device passthrough；真实 resolver unsupported/not_observed） | `p6-provider-c-abi-facts-20260802/T-52-R-52-c-abi-facts-host.md` |
+| `p6-provider-route-snapshot-20260802` | T-53～R-53 immutable route snapshot registry | complete（Host/ABI contract；production resolver wiring pending） | `p6-provider-route-snapshot-20260802/T-53-R-53-route-snapshot-host.md` |
 
 `p6-auxiliary-20260730/V-31-provider-early-start-before.md` 是上述 Provider 生命周期修复的 before 证据；
 原文件曾误标为 V-40，已按任务清单更正为 V-31，避免与 ADR-0015 决策门冲突。

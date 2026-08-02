@@ -45,7 +45,7 @@ for ($attempt = 0; $attempt -lt 12; ++$attempt) {
 }
 $status | Set-Content -LiteralPath (Join-Path $output 'provider-status.txt') -Encoding utf8
 $logcat = (& $adb logcat -d -v threadtime -t $logStart 2>&1 | Out-String)
-($logcat -split '\r?\n') |
+$filteredLogcat = (($logcat -split '\r?\n') |
     Select-String -Pattern @(
         'PathGuard',
         'PathGuardLsplant',
@@ -57,8 +57,9 @@ $logcat = (& $adb logcat -d -v threadtime -t $logStart 2>&1 | Out-String)
         'Process: com.android.providers.media.module',
         'null receiver',
         'JNI WARNING: DeleteLocalRef'
-    ) |
-    Set-Content -LiteralPath (Join-Path $output 'logcat.txt') -Encoding utf8
+    ) | ForEach-Object { $_.Line }) -join [Environment]::NewLine
+Set-Content -LiteralPath (Join-Path $output 'logcat.txt') `
+    -Value $filteredLogcat -Encoding utf8 -NoNewline
 
 $required = @(
     'process=com.android.externalstorage',

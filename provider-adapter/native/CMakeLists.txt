@@ -47,6 +47,7 @@ add_subdirectory("${PATHGUARD_THIRD_PARTY}/lsplant/src" lsplant)
 add_library(pathguard_lsplant SHARED
     src/provider_lsplant_bridge.cpp
     "${PATHGUARD_ROOT}/core/src/provider_mapping.cpp"
+    "${PATHGUARD_ROOT}/core/src/provider_route_snapshot_registry.cpp"
     "${PATHGUARD_ROOT}/core/src/route_provenance.cpp")
 target_include_directories(pathguard_lsplant PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"

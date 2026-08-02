@@ -4,6 +4,8 @@
 #include "pathguard/provider_lsplant_bridge.h"
 #include "test_assert.h"
 
+extern "C" int pathguard_provider_lsplant_bridge_api_c_test(void);
+
 namespace {
 
 pathguard::ProviderJavaBridgeProbeV1 CompleteProbe(
@@ -48,6 +50,39 @@ int main() {
     static_assert(kProviderJavaMethodCountV1 == 11);
     static_assert(ValidateProviderJavaMethodSpecsV1());
     static_assert(ValidateProviderJavaDispatchSpecsV1());
+    assert(pathguard_provider_lsplant_bridge_api_c_test() == 0);
+
+    constexpr std::array reference_results{
+        ProviderJavaResultKind::kFile,
+        ProviderJavaResultKind::kDocumentId,
+        ProviderJavaResultKind::kCursor,
+        ProviderJavaResultKind::kUri,
+        ProviderJavaResultKind::kParcelFileDescriptor,
+    };
+    for (const auto kind : reference_results) {
+        auto result = ObserveProviderJavaResult(kind, false, true);
+        assert(result.compatible() && result.has_value());
+        result = ObserveProviderJavaResult(kind, true, false);
+        assert(result.compatible() && !result.has_value());
+        result = ObserveProviderJavaResult(kind, false, false);
+        assert(!result.compatible());
+        assert(result.state == ProviderJavaResultObservationState::kTypeMismatch);
+    }
+    auto result = ObserveProviderJavaResult(
+        ProviderJavaResultKind::kCount, false, true);
+    assert(result.compatible() && result.has_value());
+    result = ObserveProviderJavaResult(
+        ProviderJavaResultKind::kCount, true, false);
+    assert(!result.compatible());
+    result = ObserveProviderJavaResult(
+        ProviderJavaResultKind::kVoid, true, false);
+    assert(result.compatible() && !result.has_value());
+    result = ObserveProviderJavaResult(
+        ProviderJavaResultKind::kVoid, false, true);
+    assert(!result.compatible());
+    result = ObserveProviderJavaResult(
+        static_cast<ProviderJavaResultKind>(UINT8_MAX), true, false);
+    assert(result.state == ProviderJavaResultObservationState::kInvalidKind);
 
     AssertMethod(
         kDocumentsProviderJavaMethodsV1[0],

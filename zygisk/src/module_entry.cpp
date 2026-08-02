@@ -280,9 +280,11 @@ bool PrepareProviderLsplant(
         void** handle, PathGuardLsplantInitializeV1* initialize,
         PathGuardLsplantInstallPassthroughV1* install,
         PathGuardLsplantWaitPassthroughV1* wait,
+        PathGuardLsplantConfigureMappingV1* configure,
         ModuleBytes* dex) {
     if (module_dir < 0 || probe == nullptr || handle == nullptr
         || initialize == nullptr || install == nullptr || wait == nullptr
+        || configure == nullptr
         || dex == nullptr) {
         return false;
     }
@@ -314,11 +316,15 @@ bool PrepareProviderLsplant(
         dlsym(library, "pathguard_lsplant_install_passthrough_v1"));
     auto wait_for_hook = reinterpret_cast<PathGuardLsplantWaitPassthroughV1>(
         dlsym(library, "pathguard_lsplant_wait_passthrough_v1"));
+    auto configure_mapping = reinterpret_cast<PathGuardLsplantConfigureMappingV1>(
+        dlsym(library, "pathguard_lsplant_configure_mapping_v1"));
     if (init == nullptr || hook == nullptr || wait_for_hook == nullptr
+        || configure_mapping == nullptr
         || !ReadModuleFile(module_dir, "provider/provider-hooker.dex", dex)) {
         dlclose(library); return false;
     }
     *handle = library; *initialize = init; *install = hook; *wait = wait_for_hook;
+    *configure = configure_mapping;
     probe->library_loaded = true;
     return true;
 }
@@ -2879,11 +2885,18 @@ public:
                 module_dir, media_provider, &provider_bridge_probe_,
                 &provider_lsplant_handle_, &provider_lsplant_initialize_,
                 &provider_lsplant_install_, &provider_lsplant_wait_,
+                &provider_lsplant_configure_,
                 &provider_hooker_dex_);
             if (provider_lsplant_ready_) {
+                const int configure_result = provider_lsplant_configure_(nullptr);
+                if (configure_result != 0) {
+                    provider_bridge_probe_.bridge_errno = configure_result;
+                    provider_lsplant_ready_ = false;
+                }
                 PathGuardLsplantBridgeResultV1 bridge_result{};
-                const int init_result = provider_lsplant_initialize_(
-                    env_, &bridge_result);
+                const int init_result = provider_lsplant_ready_
+                    ? provider_lsplant_initialize_(env_, &bridge_result)
+                    : provider_bridge_probe_.bridge_errno;
                 provider_bridge_probe_.lsplant_initialized =
                     init_result == 0 && bridge_result.lsplant_initialized != 0;
                 provider_bridge_probe_.bridge_errno = init_result;
@@ -3284,6 +3297,7 @@ private:
     PathGuardLsplantInitializeV1 provider_lsplant_initialize_ = nullptr;
     PathGuardLsplantInstallPassthroughV1 provider_lsplant_install_ = nullptr;
     PathGuardLsplantWaitPassthroughV1 provider_lsplant_wait_ = nullptr;
+    PathGuardLsplantConfigureMappingV1 provider_lsplant_configure_ = nullptr;
     ModuleBytes provider_hooker_dex_;
     pathguard::ProviderJavaBridgeStatusV1 provider_bridge_probe_;
 };
