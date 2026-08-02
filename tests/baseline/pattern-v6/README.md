@@ -62,6 +62,7 @@
 | `p6-provider-mapping-20260802` | T-37～R-37 Provider mapping decision Host 合同 | complete（Host）；Java/native mapping wiring pending | `p6-provider-mapping-20260802/T-37-R-37-provider-mapping-host.md` |
 | `p6-provider-v65-20260802` | V-65 当前设备 passthrough 与真实映射边界 | partial（passthrough observed；真实映射 unsupported/not_observed） | `p6-provider-v65-20260802/V-65-current-device-passthrough-and-mapping-boundary.json` |
 | `p6-provider-v66-20260802` | V-66 当前设备 Provider restart/republication | partial（restart observed；Mainline/provenance recovery unsupported/not_observed） | `p6-provider-v66-20260802/V-66-current-device-restart.json` |
+| `p6-provider-callback-20260802` | T-38～R-38 Provider callback safety boundary | complete（dispatcher seam；真实 provenance wiring pending） | `p6-provider-callback-20260802/T-38-R-38-provider-callback-boundary.md` |
 
 `p6-auxiliary-20260730/V-31-provider-early-start-before.md` 是上述 Provider 生命周期修复的 before 证据；
 原文件曾误标为 V-40，已按任务清单更正为 V-31，避免与 ADR-0015 决策门冲突。

@@ -1282,6 +1282,7 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 | T-35～R-35 | complete | 精确 APK SHA-256/build identity deployment pair gate、完整 check/operation mask、virtual source/target/URI/document-ID/strong FD/provenance binding conformance；MSVC Release 80/80 |
 | T-36～R-36 | complete（Host/production wiring） | 独立 LSPlant C ABI bridge、最小 Java Hooker、精确 alioth APK SHA-256 gate、Zygisk pre/post lifecycle、双 ABI/ELF/许可证/状态观测；MSVC Release 81/81 |
 | T-37～R-37 | complete（Host decision contract） | profile/operation/binding/committed reverse 的纯决策层；pass/rewrite/unsupported/ambiguous/fail-open 负矩阵；MSVC Release 82/82 |
+| T-38～R-38 | complete（callback safety boundary） | Java dispatcher 默认关闭；异常/类型不匹配 fail-open 到 backup；Java/guard/双 ABI/CTest 通过；真实 provenance wiring pending |
 | V-65 | pending（当前设备 partial） | `0.1.29-dev` 两组 passthrough/fault gate 复采通过；真实 virtual query/create/open/rename/delete/reverse、FD identity、Java callback fail-open 矩阵当前设备无法构造，记为 unsupported/not_observed；bit 17 不置位 |
 | V-66 | pending（当前设备 partial） | 当前设备 Provider restart/republication 已通过；Mainline build identity 变化、provenance recovery、真实 virtual mapping 和 adapter 冷启动回归仍 unsupported/not_observed |
 
@@ -1449,6 +1450,36 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 - **证据**：
   `tests/baseline/pattern-v6/p6-provider-v66-20260802/V-66-current-device-restart.json`
 - **结论**：V-66 总状态保持 `pending`，bit 17 不置位。
+
+### T-38 [红] 冻结 Java callback dispatcher 安全边界
+
+- **任务描述**：ProviderHooker 在调用 LSPlant backup 前增加可关闭 dispatcher；dispatcher 只
+  能返回显式 pass/rewrite 结果，异常、缺失、结果类型不匹配均必须回到原始 backup。
+- **验收标准**：目标返回类型在 hook 前冻结；reference/primitive 返回值做类型检查；默认无
+  dispatcher 时行为与 passthrough 相同；不得在该任务中设置 bit 17。
+- **依赖/时间盒**：R-37；2 小时。
+
+### I-38 [绿] 实现 callback dispatcher fail-open seam
+
+- **任务描述**：实现 `Dispatcher`/`DispatchResult` Java seam，保留原 receiver/backup 处理；
+  不接入 daemon/store，不在 callback 中执行阻塞 I/O。
+- **验收标准**：Java 11 编译、production integration guard、NDK 29 双 ABI 和 MSVC Release
+  全部通过；dispatcher 未设置时两组 Provider 继续 passthrough。
+- **依赖/时间盒**：T-38；2 小时。
+
+### R-38 [重构] 固化真实映射接线前的类型和失败边界
+
+- **任务描述**：把未来 `ProviderMappingDecisionV1` 的 rewrite 结果限制在 Java 目标返回类型
+  可兼容范围内，禁止 malformed result 破坏 Provider 进程。
+- **验收标准**：当前实现只提供安全 seam，不宣称 URI/document ID/FD/reverse 完成；V-65 和
+  bit 17 保持 pending/unsupported。
+- **执行结果**：Java 编译、production integration guard、LSPlant 双 ABI 和 MSVC Release
+  `82/82` 通过。证据：
+  `tests/baseline/pattern-v6/p6-provider-callback-20260802/T-38-R-38-provider-callback-boundary.md`。
+- **当前设备复采**：`build/device-evidence/provider-lsplant-v1/20260802-103041` 通过；
+  两端方法组、errno、两条 active admission 与 bit 17 清零保持不变。该轮仍只证明
+  passthrough 回归，不证明 dispatcher rewrite。
+- **依赖/时间盒**：I-38；1 小时。
 
 ## 参考依据
 

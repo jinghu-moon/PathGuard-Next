@@ -10,6 +10,7 @@ file(READ "${SOURCE_DIR}/scripts/package.ps1" package)
 file(READ "${SOURCE_DIR}/scripts/verify-provider-lsplant-elf.cmake" lsplant_elf)
 file(READ "${SOURCE_DIR}/provider-adapter/native/src/provider_lsplant_bridge.cpp" lsplant_bridge)
 file(READ "${SOURCE_DIR}/provider-adapter/hooker/src/dev/pathguard/providerhook/ProviderHooker.java" lsplant_hooker)
+file(READ "${SOURCE_DIR}/tests/baseline/pattern-v6/run-provider-hooker-dispatcher-host-test.ps1" hooker_dispatcher_test)
 foreach(contract IN ITEMS
     "PolicySnapshotDomain"
     "snapshot_guard"
@@ -20,6 +21,9 @@ foreach(contract IN ITEMS
     message(FATAL_ERROR "production hook misses ${contract}")
   endif()
 endforeach()
+if(NOT hooker_dispatcher_test MATCHES "ProviderHookerDispatcherTest")
+  message(FATAL_ERROR "ProviderHooker dispatcher host test is missing")
+endif()
 string(FIND "${hook}" "PlanCanonicalPath(rewrite)" canonical_plan_at)
 string(FIND "${hook}" "g_realpath(pinned_path, canonical)" pinned_realpath_at)
 if(canonical_plan_at EQUAL -1 OR pinned_realpath_at EQUAL -1)
@@ -114,7 +118,12 @@ endif()
 foreach(contract IN ITEMS
     "targetStatic"
     "Modifier\.isStatic"
-    "instance receiver unavailable")
+    "instance receiver unavailable"
+    "Dispatcher"
+    "DispatchResult"
+    "clearDispatcher"
+    "isCompatibleReturn"
+    "dispatcher failed")
   if(NOT lsplant_hooker MATCHES "${contract}")
     message(FATAL_ERROR "LSPlant Hooker target semantics miss ${contract}")
   endif()

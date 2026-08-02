@@ -9,14 +9,48 @@ import java.util.Objects;
 
 public final class ProviderHooker {
     private static final String TAG = "PathGuardLsplant";
+    private static volatile Dispatcher dispatcher;
     private final int methodId;
     private final boolean targetStatic;
+    private final Class<?> returnType;
     private volatile Method backup;
+
+    public interface Dispatcher {
+        DispatchResult dispatch(int methodId, Object[] args) throws Throwable;
+    }
+
+    public static final class DispatchResult {
+        private static final DispatchResult PASS = new DispatchResult(false, null);
+        private final boolean rewrite;
+        private final Object value;
+
+        private DispatchResult(boolean rewrite, Object value) {
+            this.rewrite = rewrite;
+            this.value = value;
+        }
+
+        public static DispatchResult pass() {
+            return PASS;
+        }
+
+        public static DispatchResult rewrite(Object value) {
+            return new DispatchResult(true, value);
+        }
+    }
+
+    public static void setDispatcher(Dispatcher value) {
+        dispatcher = value;
+    }
+
+    public static void clearDispatcher() {
+        dispatcher = null;
+    }
 
     public ProviderHooker(int methodId, Method target) {
         this.methodId = methodId;
-        this.targetStatic = Modifier.isStatic(
-                Objects.requireNonNull(target, "target").getModifiers());
+        Method checkedTarget = Objects.requireNonNull(target, "target");
+        this.targetStatic = Modifier.isStatic(checkedTarget.getModifiers());
+        this.returnType = checkedTarget.getReturnType();
     }
 
     public void setBackup(Method backup) {
@@ -24,6 +58,10 @@ public final class ProviderHooker {
     }
 
     public Object callback(Object[] args) throws Throwable {
+        if (args == null) {
+            throw new IllegalArgumentException("callback arguments unavailable for method "
+                    + methodId);
+        }
         Method original = backup;
         if (original == null) {
             throw new IllegalStateException("backup unavailable for method " + methodId);
@@ -33,10 +71,51 @@ public final class ProviderHooker {
         }
         Object receiver = targetStatic ? null : args[0];
         Object[] parameters = targetStatic ? args : Arrays.copyOfRange(args, 1, args.length);
+        Dispatcher current = dispatcher;
+        if (current != null) {
+            try {
+                DispatchResult decision = current.dispatch(
+                        methodId, Arrays.copyOf(args, args.length));
+                if (decision != null && decision.rewrite
+                        && isCompatibleReturn(decision.value)) {
+                    return decision.value;
+                }
+            } catch (Throwable error) {
+                logDispatchFailure(error);
+            }
+        }
         try {
             return original.invoke(receiver, parameters);
         } catch (InvocationTargetException error) {
             throw error.getCause();
+        }
+    }
+
+    private boolean isCompatibleReturn(Object value) {
+        if (!returnType.isPrimitive()) {
+            return value == null || returnType.isInstance(value);
+        }
+        if (value == null) return false;
+        if (returnType == boolean.class) return value instanceof Boolean;
+        if (returnType == byte.class) return value instanceof Byte;
+        if (returnType == char.class) return value instanceof Character;
+        if (returnType == short.class) return value instanceof Short;
+        if (returnType == int.class) return value instanceof Integer;
+        if (returnType == long.class) return value instanceof Long;
+        if (returnType == float.class) return value instanceof Float;
+        if (returnType == double.class) return value instanceof Double;
+        return false;
+    }
+
+    private void logDispatchFailure(Throwable error) {
+        String message = "dispatcher failed for method " + methodId;
+        try {
+            Class<?> log = Class.forName("android.util.Log");
+            Method logError = log.getMethod(
+                    "e", String.class, String.class, Throwable.class);
+            logError.invoke(null, TAG, message, error);
+        } catch (ReflectiveOperationException | LinkageError ignored) {
+            System.err.println(TAG + ": " + message + ": " + error);
         }
     }
 
