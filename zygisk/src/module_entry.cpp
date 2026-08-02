@@ -1,4 +1,5 @@
 #include <android/log.h>
+#include <dlfcn.h>
 
 #include <errno.h>
 #include <stddef.h>
@@ -11,6 +12,7 @@
 #include <linux/futex.h>
 #include <linux/memfd.h>
 #include <limits.h>
+#include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -25,6 +27,8 @@
 #include <unistd.h>
 
 #include "pathguard/provider_redirect_hook.hpp"
+#include "pathguard/provider_bridge_status.h"
+#include "pathguard/provider_lsplant_bridge_api.h"
 #include "pathguard/media_query_hook.hpp"
 #include "pathguard/mount_backend.h"
 #include "pathguard/mount_executor.h"
@@ -65,6 +69,7 @@ constexpr size_t kMaxProcessNameBytes = 256;
 constexpr int kProcessReadyTimeoutMs = 5000;
 constexpr int kCompanionIoTimeoutMs = 5000;
 constexpr int kRuntimeStatusTimeoutMs = 5000;
+constexpr uint32_t kProviderBridgeWaitTimeoutMs = 4500;
 constexpr int kAppResultTimeoutMs = 300;
 constexpr int kPreflightCompletionGraceMs = 500;
 constexpr int kApplyingCompletionGraceMs = 500;
@@ -80,6 +85,19 @@ constexpr char kDenyAnchorRelativePath[] = "run/deny-anchor";
 constexpr char kDiagnosticPackage[] = "org.localsend.localsend_app";
 constexpr char kExternalStorageProviderProcess[] = "com.android.externalstorage";
 constexpr char kMainlineMediaProviderProcess[] = "com.android.providers.media.module";
+constexpr char kExternalStorageProviderApk[] =
+    "/system/priv-app/ExternalStorageProvider/ExternalStorageProvider.apk";
+constexpr char kMediaProviderApk[] =
+    "/apex/com.android.mediaprovider/priv-app/MediaProvider@TKQ1.220829.002/MediaProvider.apk";
+constexpr uint64_t kAliothDeploymentProfileId = UINT64_C(0x616c696f74682d31);
+constexpr uint64_t kAliothDocumentsProfileId = UINT64_C(0x616c696f74682d64);
+constexpr uint64_t kAliothMediaProfileId = UINT64_C(0x616c696f74682d6d);
+constexpr uint8_t kAliothDocumentsSha256[32] = {
+    0x44,0xa4,0x2e,0xee,0xf3,0x64,0xa1,0xbd,0x53,0x8e,0x75,0xc3,0x55,0x3e,0x45,0xc9,
+    0xad,0xfb,0xd0,0x4a,0x4b,0x7a,0xf2,0xdc,0xfa,0xa3,0xf7,0x6b,0xb4,0x48,0x85,0x6e};
+constexpr uint8_t kAliothMediaSha256[32] = {
+    0xf8,0xf7,0x1e,0xae,0xdd,0x78,0xa1,0xbb,0x0c,0x3b,0xb3,0xd8,0x14,0x05,0xf2,0x52,
+    0x92,0x21,0xfe,0x63,0x58,0xca,0x5f,0xe4,0xce,0x74,0xa5,0xc3,0x85,0x3c,0xa9,0xed};
 #ifndef PATHGUARD_TEST_MOUNT_DELAY_MS
 #define PATHGUARD_TEST_MOUNT_DELAY_MS 0
 #endif
@@ -139,6 +157,171 @@ struct PathInstallTelemetry {
     uint32_t flags = 0;
     uint32_t reserved = 0;
 };
+
+struct Sha256State {
+    uint32_t h[8] = {0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,
+                     0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u};
+    uint64_t bits = 0;
+    uint8_t block[64]{};
+    size_t used = 0;
+};
+
+uint32_t Sha256Rotate(uint32_t value, uint32_t count) {
+    return (value >> count) | (value << (32u - count));
+}
+
+void Sha256Compress(Sha256State* state, const uint8_t* block) {
+    static constexpr uint32_t k[64] = {
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+    uint32_t w[64]{};
+    for (size_t i = 0; i < 16; ++i) {
+        w[i] = (static_cast<uint32_t>(block[i*4]) << 24)
+            | (static_cast<uint32_t>(block[i*4+1]) << 16)
+            | (static_cast<uint32_t>(block[i*4+2]) << 8)
+            | static_cast<uint32_t>(block[i*4+3]);
+    }
+    for (size_t i = 16; i < 64; ++i) {
+        const uint32_t s0 = Sha256Rotate(w[i-15],7) ^ Sha256Rotate(w[i-15],18) ^ (w[i-15] >> 3);
+        const uint32_t s1 = Sha256Rotate(w[i-2],17) ^ Sha256Rotate(w[i-2],19) ^ (w[i-2] >> 10);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
+    }
+    uint32_t a=state->h[0], b=state->h[1], c=state->h[2], d=state->h[3],
+             e=state->h[4], f=state->h[5], g=state->h[6], h=state->h[7];
+    for (size_t i = 0; i < 64; ++i) {
+        const uint32_t s1 = Sha256Rotate(e,6) ^ Sha256Rotate(e,11) ^ Sha256Rotate(e,25);
+        const uint32_t ch = (e & f) ^ (~e & g);
+        const uint32_t t1 = h + s1 + ch + k[i] + w[i];
+        const uint32_t s0 = Sha256Rotate(a,2) ^ Sha256Rotate(a,13) ^ Sha256Rotate(a,22);
+        const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        const uint32_t t2 = s0 + maj;
+        h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
+    }
+    state->h[0]+=a; state->h[1]+=b; state->h[2]+=c; state->h[3]+=d;
+    state->h[4]+=e; state->h[5]+=f; state->h[6]+=g; state->h[7]+=h;
+}
+
+bool Sha256File(const char* path, uint8_t output[32]) {
+    if (path == nullptr || output == nullptr) return false;
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    Sha256State state;
+    uint8_t input[8192]{};
+    bool ok = true;
+    for (;;) {
+        const ssize_t count = read(fd, input, sizeof(input));
+        if (count < 0) { ok = false; break; }
+        if (count == 0) break;
+        state.bits += static_cast<uint64_t>(count) * 8u;
+        size_t offset = 0;
+        while (offset < static_cast<size_t>(count)) {
+            const size_t available = sizeof(state.block) - state.used;
+            const size_t remaining = static_cast<size_t>(count) - offset;
+            const size_t take = available < remaining ? available : remaining;
+            memcpy(state.block + state.used, input + offset, take);
+            state.used += take; offset += take;
+            if (state.used == sizeof(state.block)) {
+                Sha256Compress(&state, state.block); state.used = 0;
+            }
+        }
+    }
+    close(fd);
+    if (!ok || state.used >= sizeof(state.block)) return false;
+    state.block[state.used++] = 0x80;
+    if (state.used > 56) { memset(state.block + state.used, 0, 64 - state.used); Sha256Compress(&state, state.block); state.used = 0; }
+    memset(state.block + state.used, 0, 56 - state.used);
+    for (size_t i = 0; i < 8; ++i) state.block[56 + i] = static_cast<uint8_t>(state.bits >> (56 - i*8));
+    Sha256Compress(&state, state.block);
+    for (size_t i = 0; i < 8; ++i) { output[i*4] = static_cast<uint8_t>(state.h[i] >> 24); output[i*4+1] = static_cast<uint8_t>(state.h[i] >> 16); output[i*4+2] = static_cast<uint8_t>(state.h[i] >> 8); output[i*4+3] = static_cast<uint8_t>(state.h[i]); }
+    return true;
+}
+
+struct ModuleBytes { uint8_t* data = nullptr; size_t size = 0; };
+
+void ReleaseModuleBytes(ModuleBytes* bytes) {
+    if (bytes == nullptr) return;
+    free(bytes->data); bytes->data = nullptr; bytes->size = 0;
+}
+
+bool ReadModuleFile(int module_dir, const char* relative, ModuleBytes* output) {
+    if (module_dir < 0 || relative == nullptr || output == nullptr) return false;
+    const int fd = openat(module_dir, relative, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    ReleaseModuleBytes(output);
+    output->data = static_cast<uint8_t*>(malloc(1024 * 1024));
+    if (output->data == nullptr) { close(fd); return false; }
+    bool ok = true;
+    for (;;) {
+        const ssize_t count = read(fd, output->data + output->size,
+                                   1024 * 1024 - output->size);
+        if (count < 0) { ok = false; break; }
+        if (count == 0) break;
+        output->size += static_cast<size_t>(count);
+        if (output->size == 1024 * 1024) { ok = false; break; }
+    }
+    close(fd);
+    if (!ok || output->size == 0) { ReleaseModuleBytes(output); return false; }
+    return true;
+}
+
+bool SameDigest(const uint8_t* left, const uint8_t* right) {
+    return left != nullptr && right != nullptr
+        && memcmp(left, right, 32) == 0;
+}
+
+bool PrepareProviderLsplant(
+        int module_dir, bool media, pathguard::ProviderJavaBridgeStatusV1* probe,
+        void** handle, PathGuardLsplantInitializeV1* initialize,
+        PathGuardLsplantInstallPassthroughV1* install,
+        PathGuardLsplantWaitPassthroughV1* wait,
+        ModuleBytes* dex) {
+    if (module_dir < 0 || probe == nullptr || handle == nullptr
+        || initialize == nullptr || install == nullptr || wait == nullptr
+        || dex == nullptr) {
+        return false;
+    }
+    *probe = {};
+    probe->kind = media ? 2 : 1;
+    probe->deployment_profile_id = kAliothDeploymentProfileId;
+    probe->provider_profile_id = media ? kAliothMediaProfileId
+                                       : kAliothDocumentsProfileId;
+    const char* apk = media ? kMediaProviderApk : kExternalStorageProviderApk;
+    uint8_t digest[32]{};
+    const bool hashed = Sha256File(apk, digest);
+    const bool hash_match = hashed && SameDigest(
+        digest, media ? kAliothMediaSha256 : kAliothDocumentsSha256);
+    if (!hash_match) return false;
+    probe->build_matched = true;
+    char fd_path[128]{};
+#if defined(__LP64__)
+    constexpr const char* kProviderAbi = "arm64-v8a";
+#else
+    constexpr const char* kProviderAbi = "armeabi-v7a";
+#endif
+    if (snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d/provider/%s/libpathguard_lsplant.so",
+                 module_dir, kProviderAbi) <= 0) return false;
+    void* library = dlopen(fd_path, RTLD_NOW | RTLD_LOCAL);
+    if (library == nullptr) return false;
+    auto init = reinterpret_cast<PathGuardLsplantInitializeV1>(
+        dlsym(library, "pathguard_lsplant_initialize_v1"));
+    auto hook = reinterpret_cast<PathGuardLsplantInstallPassthroughV1>(
+        dlsym(library, "pathguard_lsplant_install_passthrough_v1"));
+    auto wait_for_hook = reinterpret_cast<PathGuardLsplantWaitPassthroughV1>(
+        dlsym(library, "pathguard_lsplant_wait_passthrough_v1"));
+    if (init == nullptr || hook == nullptr || wait_for_hook == nullptr
+        || !ReadModuleFile(module_dir, "provider/provider-hooker.dex", dex)) {
+        dlclose(library); return false;
+    }
+    *handle = library; *initialize = init; *install = hook; *wait = wait_for_hook;
+    probe->library_loaded = true;
+    return true;
+}
 
 constexpr uint32_t kPathInstallAvailable = 1u << 0;
 constexpr uint32_t kPathInstallAttempted = 1u << 1;
@@ -1198,6 +1381,12 @@ bool FormatRuntimeStatusRecord(
         "snapshot_reload_rejected_retire_limit_total=%llu\n"
         "retired_snapshot_count_high_watermark=%u\n"
         "retired_snapshot_bytes_high_watermark=%llu\n"
+        "provider_bridge_kind=%u\nprovider_bridge_deployment_profile=%llu\n"
+        "provider_bridge_profile=%llu\nprovider_bridge_build_matched=%s\n"
+        "provider_bridge_library_loaded=%s\nprovider_bridge_lsplant_initialized=%s\n"
+        "provider_bridge_hooker_dex_loaded=%s\nprovider_bridge_resolved_methods=%llu\n"
+        "provider_bridge_installed_hooks=%llu\nprovider_bridge_backup_methods=%llu\n"
+        "provider_bridge_self_tested_hooks=%llu\nprovider_bridge_errno=%d\n"
         "event_overflow_total=%llu\ndiagnostic_drop_total=%llu\n",
         status.version, status.pid, status.uid,
         static_cast<unsigned long long>(status.process_start_time), process_name,
@@ -1220,6 +1409,18 @@ bool FormatRuntimeStatusRecord(
         status.counters.retired_snapshot_count_high_watermark,
         static_cast<unsigned long long>(
             status.counters.retired_snapshot_bytes_high_watermark),
+        static_cast<unsigned>(status.provider_bridge.kind),
+        static_cast<unsigned long long>(status.provider_bridge.deployment_profile_id),
+        static_cast<unsigned long long>(status.provider_bridge.provider_profile_id),
+        status.provider_bridge.build_matched ? "true" : "false",
+        status.provider_bridge.library_loaded ? "true" : "false",
+        status.provider_bridge.lsplant_initialized ? "true" : "false",
+        status.provider_bridge.hooker_dex_loaded ? "true" : "false",
+        static_cast<unsigned long long>(status.provider_bridge.resolved_methods),
+        static_cast<unsigned long long>(status.provider_bridge.installed_hooks),
+        static_cast<unsigned long long>(status.provider_bridge.backup_methods),
+        static_cast<unsigned long long>(status.provider_bridge.self_tested_hooks),
+        status.provider_bridge.bridge_errno,
         static_cast<unsigned long long>(status.counters.event_overflow_total),
         static_cast<unsigned long long>(status.counters.diagnostic_drop_total));
     bool formatted = length > 0 && static_cast<size_t>(length) < capacity;
@@ -2674,6 +2875,26 @@ public:
                 return;
             }
             path_policy_ = provider_policy;
+            provider_lsplant_ready_ = PrepareProviderLsplant(
+                module_dir, media_provider, &provider_bridge_probe_,
+                &provider_lsplant_handle_, &provider_lsplant_initialize_,
+                &provider_lsplant_install_, &provider_lsplant_wait_,
+                &provider_hooker_dex_);
+            if (provider_lsplant_ready_) {
+                PathGuardLsplantBridgeResultV1 bridge_result{};
+                const int init_result = provider_lsplant_initialize_(
+                    env_, &bridge_result);
+                provider_bridge_probe_.lsplant_initialized =
+                    init_result == 0 && bridge_result.lsplant_initialized != 0;
+                provider_bridge_probe_.bridge_errno = init_result;
+                provider_lsplant_ready_ =
+                    provider_bridge_probe_.lsplant_initialized;
+                if (!provider_lsplant_ready_) {
+                    ReleaseModuleBytes(&provider_hooker_dex_);
+                    dlclose(provider_lsplant_handle_);
+                    provider_lsplant_handle_ = nullptr;
+                }
+            }
             PrepareProviderRuntimeStatus(module_dir, provider_uid_);
             if (module_dir >= 0) close(module_dir);
             LOGI("provider redirect prepared: process=%s scopes=%u caller_scope=binder_uid",
@@ -2810,7 +3031,26 @@ public:
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs*) override {
         if (provider_process_) {
+            bool bridge_deferred = false;
+            if (provider_lsplant_ready_) {
+                PathGuardLsplantBridgeResultV1 bridge_result{};
+                const int hook_result = provider_lsplant_install_(
+                    env_, provider_media_process_
+                        ? PATHGUARD_LSPLANT_PROVIDER_MEDIA
+                        : PATHGUARD_LSPLANT_PROVIDER_DOCUMENTS,
+                    provider_hooker_dex_.data, provider_hooker_dex_.size,
+                    &bridge_result);
+                bridge_deferred = hook_result == EINPROGRESS;
+                ApplyProviderBridgeResult(bridge_result, hook_result);
+                ReleaseModuleBytes(&provider_hooker_dex_);
+            }
             InstallPreparedProviderHooks();
+            if (bridge_deferred) {
+                const int thread_result = StartProviderBridgeWait();
+                if (thread_result == 0) return;
+                provider_bridge_probe_.bridge_errno = thread_result;
+            }
+            PublishPreparedProviderStatus();
             if (!provider_redirect_installed_
                 && !provider_redirect_module_retained_) Unload();
             return;
@@ -2900,6 +3140,42 @@ public:
     void preServerSpecialize(zygisk::ServerSpecializeArgs*) override { Unload(); }
 
 private:
+    void ApplyProviderBridgeResult(
+            const PathGuardLsplantBridgeResultV1& result,
+            int operation_result) {
+        provider_bridge_probe_.hooker_dex_loaded =
+            result.hooker_dex_loaded != 0;
+        provider_bridge_probe_.resolved_methods = result.resolved_methods;
+        provider_bridge_probe_.installed_hooks = result.installed_hooks;
+        provider_bridge_probe_.backup_methods = result.backup_methods;
+        provider_bridge_probe_.self_tested_hooks = result.self_tested_hooks;
+        provider_bridge_probe_.bridge_errno = operation_result == 0
+            ? result.bridge_errno : operation_result;
+    }
+
+    static void* ProviderBridgeWaitMain(void* context) {
+        auto* module = static_cast<PathGuardModule*>(context);
+        PathGuardLsplantBridgeResultV1 result{};
+        const int wait_result = module->provider_lsplant_wait_(
+            kProviderBridgeWaitTimeoutMs, &result);
+        module->ApplyProviderBridgeResult(result, wait_result);
+        module->PublishPreparedProviderStatus();
+        LOGI("Provider LSPlant deferred result: process=%s errno=%d methods=%llx",
+             module->provider_media_process_ ? "media" : "external_storage",
+             module->provider_bridge_probe_.bridge_errno,
+             static_cast<unsigned long long>(
+                 module->provider_bridge_probe_.self_tested_hooks));
+        return nullptr;
+    }
+
+    int StartProviderBridgeWait() {
+        pthread_t thread{};
+        const int result = pthread_create(
+            &thread, nullptr, ProviderBridgeWaitMain, this);
+        if (result == 0) pthread_detach(thread);
+        return result;
+    }
+
     void PrepareProviderRuntimeStatus(int module_dir, uid_t uid) {
         if (module_dir < 0) return;
         const int companion = api_->connectCompanion();
@@ -2938,17 +3214,35 @@ private:
             pathguard::AdmissionDomain::kProvider,
             pathguard::provider_redirect::IdentityMode::kBinderCallerUid,
         };
-        const pathguard::provider_redirect::InstallResult install_result =
-            pathguard::provider_redirect::Install(api_, env_, config);
-        provider_redirect_installed_ = install_result.virtualization_active;
+        provider_install_result_ = pathguard::provider_redirect::Install(
+            api_, env_, config);
+        provider_redirect_installed_ =
+            provider_install_result_.virtualization_active;
         provider_redirect_module_retained_ =
-            pathguard::provider_redirect::MustRetainModule(install_result);
+            pathguard::provider_redirect::MustRetainModule(
+                provider_install_result_);
+        LOGI("provider redirect post-specialize: process=%s scopes=%u caller_scope=binder_uid attempted=%d committed=%d installed=%d capabilities=%llx operations=%llx",
+             provider_media_process_ ? "media" : "external_storage",
+             config.scope_count,
+             provider_install_result_.hook_registration_attempted ? 1 : 0,
+             provider_install_result_.hooks_committed ? 1 : 0,
+             provider_redirect_installed_ ? 1 : 0,
+             static_cast<unsigned long long>(
+                 provider_install_result_.observed_capabilities),
+             static_cast<unsigned long long>(
+                 provider_install_result_.observed_operations));
+    }
+
+    void PublishPreparedProviderStatus() {
         const char* process_name = provider_media_process_
             ? kMainlineMediaProviderProcess : kExternalStorageProviderProcess;
         pathguard::RuntimeStatusRecord status;
         const bool status_built = BuildPathRuntimeStatus(
             getpid(), provider_uid_, path_policy_,
-            pathguard::AdmissionDomain::kProvider, install_result, &status);
+            pathguard::AdmissionDomain::kProvider,
+            provider_install_result_, &status);
+        status.provider_bridge = provider_bridge_probe_;
+        status.observed_capabilities &= ~pathguard::kCapabilityProviderQueryInsertMapping;
         const bool status_published = status_built
             && PublishRuntimeStatusRecord(
                 provider_status_shared_, process_name, status);
@@ -2964,14 +3258,6 @@ private:
         if (!provider_redirect_module_retained_) {
             ReleasePathPolicy(&path_policy_);
         }
-        LOGI("provider redirect post-specialize: process=%s scopes=%u caller_scope=binder_uid attempted=%d committed=%d installed=%d capabilities=%llx operations=%llx",
-             provider_media_process_ ? "media" : "external_storage",
-             config.scope_count,
-             install_result.hook_registration_attempted ? 1 : 0,
-             install_result.hooks_committed ? 1 : 0,
-             provider_redirect_installed_ ? 1 : 0,
-             static_cast<unsigned long long>(install_result.observed_capabilities),
-             static_cast<unsigned long long>(install_result.observed_operations));
     }
 
     void Unload() { api_->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY); }
@@ -2992,6 +3278,14 @@ private:
     ProcessPlan media_plan_;
     jint media_uid_ = 0;
     PathPolicyMapping path_policy_;
+    pathguard::provider_redirect::InstallResult provider_install_result_;
+    bool provider_lsplant_ready_ = false;
+    void* provider_lsplant_handle_ = nullptr;
+    PathGuardLsplantInitializeV1 provider_lsplant_initialize_ = nullptr;
+    PathGuardLsplantInstallPassthroughV1 provider_lsplant_install_ = nullptr;
+    PathGuardLsplantWaitPassthroughV1 provider_lsplant_wait_ = nullptr;
+    ModuleBytes provider_hooker_dex_;
+    pathguard::ProviderJavaBridgeStatusV1 provider_bridge_probe_;
 };
 
 bool ForwardProvenanceRequest(int client) {

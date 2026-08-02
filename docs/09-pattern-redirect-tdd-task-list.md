@@ -1,7 +1,7 @@
 # PathGuard Next Pattern Redirect TDD 执行清单
 
 > 状态：原 pattern v6 当前设备范围已闭环；2026-08-01 根据用户决策启动 Provider contract
-> adapter（方案 B）后续工作，T-34～R-35 Host 合同及 V-64 alioth/Android 13 公共操作基线已完成，
+> adapter（方案 B）后续工作，T-34～R-36 Host/bridge wiring 及 V-64 alioth/Android 13 公共操作基线已完成，
 > bit 17 在真实 adapter profile、虚拟映射、FD identity、reverse 和 restart 全部通过前保持
 > `unsupported`。原 V-46 `adapter-only` 决策形成合法阻断，fanotify/Export
 > 因当前设备 `CONFIG_FANOTIFY` disabled 按用户授权跳过并保持 unsupported/not_observed。第二部分已有单设备
@@ -1280,7 +1280,8 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 | T-34～R-34 | complete | `ProviderContractProbeV1`、Documents/MediaStore pair gate、缺 profile/check/operation/failure 矩阵；Host 红绿证据已归档 |
 | V-64 | complete（alioth public-contract scope） | Android 13/alioth 上 12 个必需公开操作全部通过且临时对象残留为 0；Provider APK/APEX 身份和 SHA-256 已归档，myron/Android 16 本轮未观察 |
 | T-35～R-35 | complete | 精确 APK SHA-256/build identity deployment pair gate、完整 check/operation mask、virtual source/target/URI/document-ID/strong FD/provenance binding conformance；MSVC Release 80/80 |
-| V-65 | pending | 真机验证 virtual query/create/open/rename/delete/reverse、FD identity 和 fail-open；全部通过前 bit 17 不置位 |
+| T-36～R-36 | complete（Host/production wiring） | 独立 LSPlant C ABI bridge、最小 Java Hooker、精确 alioth APK SHA-256 gate、Zygisk pre/post lifecycle、双 ABI/ELF/许可证/状态观测；MSVC Release 81/81 |
+| V-65 | pending（需要真机） | 先验证两组 passthrough Hook 与未知 profile fail-open；随后验证 virtual query/create/open/rename/delete/reverse、FD identity；全部通过前 bit 17 不置位 |
 | V-66 | pending | Provider restart、Mainline build identity 变化、provenance recovery、冷启动和实际应用回归 |
 
 ### T-34 [红] 冻结 Provider contract pair gate
@@ -1349,6 +1350,48 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 - **执行结果**：红测为缺少 `pathguard/provider_adapter_profile.h`；实现后两个 Provider 专项测试
   2/2、MSVC Release 80/80、comparison report validator 与 `git diff --check` 通过。
 - **依赖/时间盒**：I-35；2 小时。
+
+### T-36 [红] 冻结 LSPlant Java method bridge 合同
+
+- **任务描述**：冻结 alioth ExternalStorageProvider、MediaProvider 和 MediaDocumentsProvider 的
+  11 个 Java 方法描述符；profile、library、LSPlant init、DEX、resolve、hook、backup、自检任一缺失
+  都必须整体 inactive。
+- **验收标准**：Documents 两方法和 Media 九方法分别成组通过；两端 deployment pair 未同时 active
+  时不得设置 bit 17。
+- **依赖/时间盒**：R-35；2 小时。
+
+### I-36 [绿] 接入独立 LSPlant bridge 与 Zygisk 生命周期
+
+- **任务描述**：以独立 `libpathguard_lsplant.so` 和最小 Java Hooker DEX 接入 Zygisk；未知 APK
+  在 SHA-256 gate 前不得 `dlopen`；匹配 profile 在 pre-specialize 初始化 LSPlant，在 post-specialize
+  加载 DEX 并成组安装 passthrough Hook，失败时整体 unhook/fail-open。
+- **验收标准**：Zygisk 保持 `APP_STL=none`/ELF isolation；bridge 双 ABI 无 `libc++_shared.so`、
+  仅导出版本化 C ABI、16 KiB page compatible；runtime status 输出完整 bridge 观测且 bit 17 清零。
+- **依赖/时间盒**：T-36；4 小时。
+
+### R-36 [重构] 固化依赖、打包与真机证据边界
+
+- **任务描述**：固定 LSPlant/DexBuilder/parallel-hashmap/xDL/Dobby 版本与许可证；统一构建、ELF
+  检查、ZIP 内容和真机状态采集入口，不把 passthrough 自检写成虚拟映射完成。
+- **验收标准**：MSVC Release 81/81、NDK r27d Zygisk 双 ABI、NDK 29 bridge 双 ABI、ELF guards、
+  ZIP 许可证/产物检查全部通过；V-65 仍明确需要真机。
+- **执行结果**：Host 与双 ABI 门已通过。`0.1.27-dev` 真机证据确认 post-specialize
+  仍处于 Zygote 调用栈，Provider APK ClassLoader 尚未创建；已改为 worker 等待
+  `ActivityThread.currentApplication().getClassLoader()` 后再安装 Hook，并异步发布状态。
+  生成 `0.1.28-dev` 真机候选；`build/device-evidence/provider-lsplant-v1/20260802-085431`
+  曾通过旧采集脚本的安装状态断言：ExternalStorageProvider 3/3/3/3、MediaProvider
+  2044/2044/2044/2044（resolved/installed/backup/self-tested），两端 errno=0，
+  deferred hook active/result 均出现，bit 17 仍清零；但完整 logcat 复核发现
+  ExternalStorageProvider `null receiver` fatal 和 MediaProvider query NPE，该结果是假阳性。
+  `0.1.29-dev` 已冻结 hook 前目标 Method 属性、修正 LSPlant global ref 生命周期，并增强
+  采集脚本 runtime fault gate；该脚本已在仍运行 `0.1.28-dev` 的设备上按预期红测，证据为
+  `build/device-evidence/provider-lsplant-v1/20260802-090813`。MSVC Release 81/81、NDK r27d
+  Zygisk 双 ABI、NDK 29 bridge 双 ABI/DEX/ELF、production integration guard 和打包均通过；
+  `0.1.29-dev` 真机复测证据 `build/device-evidence/provider-lsplant-v1/20260802-092822` 已通过：
+  两个 Provider 的方法组分别为 3/3/3/3 与 2044/2044/2044/2044，errno=0，runtime fault gate
+  无异常，bit 17 仍清零。真实 URI/document ID/route/FD/reverse 映射及真机失败注入仍未完成，
+  V-65 继续保持 pending。
+- **依赖/时间盒**：I-36；3 小时。
 
 ## 参考依据
 

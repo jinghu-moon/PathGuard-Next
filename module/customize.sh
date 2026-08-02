@@ -15,6 +15,7 @@ fi
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
 set_perm_recursive "$MODPATH/config" 0 0 0755 0644
+set_perm_recursive "$MODPATH/provider" 0 0 0755 0644
 mkdir -p "$MODPATH/run"
 set_perm_recursive "$MODPATH/run" 0 0 0755 0644
 mkdir -p "$MODPATH/run/deny-anchor"
@@ -32,15 +33,22 @@ case "$ARCH" in
   *) abort "! Unsupported ABI: $ARCH" ;;
 esac
 
+[ -f "$MODPATH/provider/provider-hooker.dex" ] || abort "! Missing Provider Hooker DEX"
+[ -f "$MODPATH/provider/$ABI/libpathguard_lsplant.so" ] || abort "! Missing LSPlant bridge for $ABI"
+
 if [ "$IS64BIT" = true ]; then
   case "$ARCH" in
     arm64)
       [ -f "$MODPATH/zygisk/arm64-v8a.so" ] || abort "! Missing arm64 Zygisk library"
       [ -f "$MODPATH/zygisk/armeabi-v7a.so" ] || abort "! Missing arm32 Zygisk library"
+      [ -f "$MODPATH/provider/arm64-v8a/libpathguard_lsplant.so" ] || abort "! Missing arm64 LSPlant bridge"
+      [ -f "$MODPATH/provider/armeabi-v7a/libpathguard_lsplant.so" ] || abort "! Missing arm32 LSPlant bridge"
       ;;
     x64)
       [ -f "$MODPATH/zygisk/x86_64.so" ] || abort "! Missing x64 Zygisk library"
       [ -f "$MODPATH/zygisk/x86.so" ] || abort "! Missing x86 Zygisk library"
+      [ -f "$MODPATH/provider/x86_64/libpathguard_lsplant.so" ] || abort "! Missing x64 LSPlant bridge"
+      [ -f "$MODPATH/provider/x86/libpathguard_lsplant.so" ] || abort "! Missing x86 LSPlant bridge"
       ;;
   esac
 fi

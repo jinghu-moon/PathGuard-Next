@@ -6,6 +6,10 @@ file(READ "${SOURCE_DIR}/zygisk/include/pathguard/policy_snapshot_domain.hpp" sn
 file(READ "${SOURCE_DIR}/native/Android.mk" android_mk)
 file(READ "${SOURCE_DIR}/zygisk/src/module_entry.cpp" entry)
 file(READ "${SOURCE_DIR}/daemon/src/main.cpp" daemon)
+file(READ "${SOURCE_DIR}/scripts/package.ps1" package)
+file(READ "${SOURCE_DIR}/scripts/verify-provider-lsplant-elf.cmake" lsplant_elf)
+file(READ "${SOURCE_DIR}/provider-adapter/native/src/provider_lsplant_bridge.cpp" lsplant_bridge)
+file(READ "${SOURCE_DIR}/provider-adapter/hooker/src/dev/pathguard/providerhook/ProviderHooker.java" lsplant_hooker)
 foreach(contract IN ITEMS
     "PolicySnapshotDomain"
     "snapshot_guard"
@@ -77,3 +81,68 @@ endforeach()
 if(entry MATCHES "exemptFd")
   message(FATAL_ERROR "Provider runtime status must not depend on optional Zygisk FD exemption")
 endif()
+foreach(contract IN ITEMS
+    "PrepareProviderLsplant"
+    "Sha256File"
+    "pathguard_lsplant_initialize_v1"
+    "pathguard_lsplant_install_passthrough_v1"
+    "pathguard_lsplant_wait_passthrough_v1"
+    "StartProviderBridgeWait"
+    "provider_bridge_self_tested_hooks"
+    "status\.provider_bridge"
+    "kCapabilityProviderQueryInsertMapping")
+  if(NOT entry MATCHES "${contract}")
+    message(FATAL_ERROR "LSPlant Provider integration misses ${contract}")
+  endif()
+endforeach()
+foreach(contract IN ITEMS
+    "currentApplication"
+    "ApplicationClassLoader"
+    "EINPROGRESS"
+    "InstallWorker")
+  if(NOT lsplant_bridge MATCHES "${contract}")
+    message(FATAL_ERROR "deferred LSPlant bridge misses ${contract}")
+  endif()
+endforeach()
+string(FIND "${lsplant_bridge}" "(ILjava/lang/reflect/Method;)V" hooker_constructor_at)
+if(hooker_constructor_at EQUAL -1)
+  message(FATAL_ERROR "deferred LSPlant bridge misses target Method constructor")
+endif()
+if(lsplant_bridge MATCHES "DeleteLocalRef\(backup\)")
+  message(FATAL_ERROR "LSPlant global backup reference must not be deleted as a local reference")
+endif()
+foreach(contract IN ITEMS
+    "targetStatic"
+    "Modifier\.isStatic"
+    "instance receiver unavailable")
+  if(NOT lsplant_hooker MATCHES "${contract}")
+    message(FATAL_ERROR "LSPlant Hooker target semantics miss ${contract}")
+  endif()
+endforeach()
+string(FIND "${lsplant_hooker}" "ProviderHooker(int methodId, Method target)" hooker_target_at)
+if(hooker_target_at EQUAL -1)
+  message(FATAL_ERROR "LSPlant Hooker must capture target Method before hooking")
+endif()
+string(FIND "${entry}" "if (!hash_match) return false;" lsplant_gate_at)
+string(FIND "${entry}" "void* library = dlopen" lsplant_load_at)
+if(lsplant_gate_at EQUAL -1 OR lsplant_load_at EQUAL -1 OR
+   lsplant_gate_at GREATER lsplant_load_at)
+  message(FATAL_ERROR "LSPlant library load must be guarded by exact APK identity")
+endif()
+if(NOT entry MATCHES "status\.observed_capabilities &= ~pathguard::kCapabilityProviderQueryInsertMapping")
+  message(FATAL_ERROR "passthrough LSPlant bridge must not enable Provider bit 17")
+endif()
+if(NOT android_mk MATCHES "provider-adapter/native/include" OR
+   NOT package MATCHES "provider/provider-hooker\.dex" OR
+   NOT package MATCHES "libpathguard_lsplant\.so")
+  message(FATAL_ERROR "LSPlant production package wiring is incomplete")
+endif()
+foreach(contract IN ITEMS
+    "pathguard_lsplant_initialize_v1"
+    "pathguard_lsplant_install_passthrough_v1"
+    "pathguard_lsplant_wait_passthrough_v1"
+    "libc\\+\\+_shared\.so")
+  if(NOT lsplant_elf MATCHES "${contract}")
+    message(FATAL_ERROR "LSPlant ELF guard misses ${contract}")
+  endif()
+endforeach()

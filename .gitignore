@@ -23,4 +23,6 @@
 /native/libs/
 /native/obj/
 /module/zygisk/*.so
+/module/provider/**/*.so
+/module/provider/provider-hooker.dex
 /build-release/

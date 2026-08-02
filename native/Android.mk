@@ -129,7 +129,8 @@ LOCAL_SRC_FILES := \
     secure_path_resolver.cpp \
     $(MOUNT_INFO_SNAPSHOT_SOURCE) \
     $(MOUNT_EXECUTOR_SOURCE)
-LOCAL_C_INCLUDES := $(ROOT_PATH)/zygisk/include $(ROOT_PATH)/core/include $(ROOT_PATH)/native/include
+LOCAL_C_INCLUDES := $(ROOT_PATH)/zygisk/include $(ROOT_PATH)/core/include $(ROOT_PATH)/native/include \
+    $(ROOT_PATH)/provider-adapter/native/include
 LOCAL_CPPFLAGS := -fno-threadsafe-statics \
     -Wframe-larger-than=786432 -Werror=frame-larger-than
 LOCAL_LDFLAGS := -Wl,-Map,$(LOCAL_PATH)/obj/local/$(TARGET_ARCH_ABI)/pathguard_zygisk.map

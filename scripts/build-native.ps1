@@ -92,6 +92,9 @@ foreach ($item in $Abi) {
     if ($LASTEXITCODE -ne 0) { throw "Zygisk ELF isolation failed for $item" }
 }
 
+& (Join-Path $root 'scripts/build-provider-lsplant.ps1') -Abi $Abi
+if ($LASTEXITCODE -ne 0) { throw 'Provider LSPlant bridge build failed' }
+
 if ($HostParityProbe) {
     & (Join-Path $root 'scripts/verify-rules-compiler-android.ps1') `
         -HostProbe $HostParityProbe `

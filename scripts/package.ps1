@@ -51,6 +51,18 @@ try {
         Add-File $archive (Join-Path $module "zygisk/$item.so") "zygisk/$item.so"
         Add-File $archive (Join-Path $module "bin/$item/pathguardd") "bin/$item/pathguardd"
         Add-File $archive (Join-Path $module "bin/$item/pathguardctl") "bin/$item/pathguardctl"
+        Add-File $archive (Join-Path $module "provider/$item/libpathguard_lsplant.so") `
+            "provider/$item/libpathguard_lsplant.so"
     }
+    Add-File $archive (Join-Path $module 'provider/provider-hooker.dex') `
+        'provider/provider-hooker.dex'
+    Add-File $archive (Join-Path $module 'THIRD_PARTY_NOTICES.md') `
+        'THIRD_PARTY_NOTICES.md'
+    Add-File $archive (Join-Path $root 'third_party/lsplant/LICENSE') `
+        'licenses/LSPlant-LGPL-3.0.txt'
+    Add-File $archive (Join-Path $root 'third_party/dobby/LICENSE') `
+        'licenses/Dobby-Apache-2.0.txt'
+    Add-File $archive (Join-Path $root 'third_party/xdl/LICENSE') `
+        'licenses/xDL-MIT.txt'
 } finally { $archive.Dispose() }
 Write-Host "Created: $zip"

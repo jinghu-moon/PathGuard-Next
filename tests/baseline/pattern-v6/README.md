@@ -58,6 +58,7 @@
 | `p6-provider-contract-20260801` | T-34～R-34 Provider contract Host 合同 | complete | `p6-provider-contract-20260801/T-34-R-34-provider-contract-host.md` |
 | `p6-provider-contract-20260801` | V-64 Provider 公共操作与模块身份基线 | complete（alioth public-contract scope） | `p6-provider-contract-20260801/V-64-provider-public-contract-alioth.json` |
 | `p6-provider-contract-20260801` | T-35～R-35 version-pinned profile 与 mapping Host 合同 | complete | `p6-provider-contract-20260801/T-35-R-35-provider-adapter-profile-host.md` |
+| `p6-provider-lsplant-20260802` | T-36～R-36 LSPlant bridge 与 production lifecycle wiring | complete（Host/offline）；V-65 passthrough observed，完整 V-65 pending | `p6-provider-lsplant-20260802/T-36-R-36-lsplant-wiring-host.md` |
 
 `p6-auxiliary-20260730/V-31-provider-early-start-before.md` 是上述 Provider 生命周期修复的 before 证据；
 原文件曾误标为 V-40，已按任务清单更正为 V-31，避免与 ADR-0015 决策门冲突。

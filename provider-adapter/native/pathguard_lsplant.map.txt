@@ -1,0 +1,8 @@
+PATHGUARD_LSPLANT_1.0 {
+  global:
+    pathguard_lsplant_initialize_v1;
+    pathguard_lsplant_install_passthrough_v1;
+    pathguard_lsplant_wait_passthrough_v1;
+  local:
+    *;
+};

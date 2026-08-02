@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "pathguard/action_admission.h"
+#include "pathguard/provider_bridge_status.h"
 
 namespace pathguard {
 
@@ -94,6 +95,7 @@ struct RuntimeStatusRecord {
     uint32_t action_total = 0;
     bool actions_truncated = false;
     RuntimeStatusCounters counters;
+    ProviderJavaBridgeStatusV1 provider_bridge;
     RuntimeActionStatus actions[kMaxRuntimeActionStatus]{};
 };
 
