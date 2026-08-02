@@ -1281,8 +1281,9 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 | V-64 | complete（alioth public-contract scope） | Android 13/alioth 上 12 个必需公开操作全部通过且临时对象残留为 0；Provider APK/APEX 身份和 SHA-256 已归档，myron/Android 16 本轮未观察 |
 | T-35～R-35 | complete | 精确 APK SHA-256/build identity deployment pair gate、完整 check/operation mask、virtual source/target/URI/document-ID/strong FD/provenance binding conformance；MSVC Release 80/80 |
 | T-36～R-36 | complete（Host/production wiring） | 独立 LSPlant C ABI bridge、最小 Java Hooker、精确 alioth APK SHA-256 gate、Zygisk pre/post lifecycle、双 ABI/ELF/许可证/状态观测；MSVC Release 81/81 |
-| V-65 | pending（需要真机） | 先验证两组 passthrough Hook 与未知 profile fail-open；随后验证 virtual query/create/open/rename/delete/reverse、FD identity；全部通过前 bit 17 不置位 |
-| V-66 | pending | Provider restart、Mainline build identity 变化、provenance recovery、冷启动和实际应用回归 |
+| T-37～R-37 | complete（Host decision contract） | profile/operation/binding/committed reverse 的纯决策层；pass/rewrite/unsupported/ambiguous/fail-open 负矩阵；MSVC Release 82/82 |
+| V-65 | pending（当前设备 partial） | `0.1.29-dev` 两组 passthrough/fault gate 复采通过；真实 virtual query/create/open/rename/delete/reverse、FD identity、Java callback fail-open 矩阵当前设备无法构造，记为 unsupported/not_observed；bit 17 不置位 |
+| V-66 | pending（当前设备 partial） | 当前设备 Provider restart/republication 已通过；Mainline build identity 变化、provenance recovery、真实 virtual mapping 和 adapter 冷启动回归仍 unsupported/not_observed |
 
 ### T-34 [红] 冻结 Provider contract pair gate
 
@@ -1392,6 +1393,62 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
   无异常，bit 17 仍清零。真实 URI/document ID/route/FD/reverse 映射及真机失败注入仍未完成，
   V-65 继续保持 pending。
 - **依赖/时间盒**：I-36；3 小时。
+
+### T-37 [红] 冻结 Provider mapping 改写决策合同
+
+- **任务描述**：在 Java/native 参数改写前，冻结 profile、operation、route binding 与 committed
+  reverse 的联合准入；区分无 route 透传、未知 profile/operation unsupported、ambiguous reverse
+  和 runtime/binding fail-open。
+- **验收标准**：测试先因 `pathguard/provider_mapping.h` 缺失而编译失败；URI/document ID 缺失、
+  source/target 同址、弱 FD identity、reverse mismatch、ambiguous reverse 和 profile mismatch
+  均不得返回 rewrite。
+- **依赖/时间盒**：R-36；2 小时。
+
+### I-37 [绿] 实现无 JNI/I/O 的 mapping evaluator
+
+- **任务描述**：实现版本化 `ProviderMappingRequestV1`/`ProviderMappingDecisionV1`；只消费既有
+  adapter profile、route binding 和 provenance resolve 结果，不直接读取 daemon/store，不修改
+  Java 对象，不发布 capability。
+- **验收标准**：只有 profile/operation/binding/unique reverse 全部一致时返回 rewrite；无 route
+  pass，缺能力 unsupported，歧义 reverse 明确返回 ambiguous，其余错误 fail-open。
+- **依赖/时间盒**：T-37；2 小时。
+
+### R-37 [重构] 固化 operation mask 与 provenance 单一来源
+
+- **任务描述**：Provider query/create/open/rename/delete/media scan/reverse 统一映射到既有
+  `OperationMask`；reverse 比对复用 `RouteRecord`，不创建 Provider-only identity 模型。
+- **验收标准**：专项测试 1/1、MSVC Release 82/82；Java/native callback 和 bit 17 保持不变，
+  V-65 不因 Host evaluator 完成而提前关闭。
+- **执行结果**：红测唯一失败点为缺少 `provider_mapping.h`；实现及完整 Host 回归通过。证据：
+  `tests/baseline/pattern-v6/p6-provider-mapping-20260802/T-37-R-37-provider-mapping-host.md`。
+- **依赖/时间盒**：I-37；1 小时。
+
+### V-65 [验证] 当前设备 LSPlant passthrough 与真实映射边界
+
+- **执行结果**：增强 collector 于 `20260802-095957` 复采通过；ExternalStorageProvider
+  `3/3/3/3`、MediaProvider `2044/2044/2044/2044`，两端 `errno=0`，runtime status
+  `action_total=2` 且两条 admission active，`observed_capabilities=65536`，bit 17 清零。
+- **设备边界**：当前公开 Provider probe 无法向生产 Provider callback 注入统一
+  `RouteRecord`/FD identity，因此 virtual query/create/document-ID/FD/rename/delete/reverse
+  和 Java callback fail-open 注入均为 `unsupported/not_observed`，不计入通过。
+- **证据**：
+  `tests/baseline/pattern-v6/p6-provider-v65-20260802/V-65-current-device-passthrough-and-mapping-boundary.json`
+- **结论**：V-65 总状态保持 `pending`；只有真实 composite mapping 矩阵可构造并全部通过后，
+  才允许改变 bit 17。
+
+### V-66 [验证] 当前设备 Provider restart/republication
+
+- **执行结果**：force-stop 两个 Provider 后触发公开 query；ExternalStorageProvider PID
+  `12240 -> 16784`，MediaProvider PID `4779 -> 16667`。两端重新发布 status，方法组分别为
+  `3/3/3/3` 与 `2044/2044/2044/2044`，`errno=0`，两条 admission active，bit 17 仍清零。
+- **增强 fault gate**：最终 collector 证据 `build/device-evidence/provider-lsplant-v1/20260802-100337`
+  通过，无 Provider fatal/null receiver/JNI ref 告警。
+- **设备边界**：当前设备未更换 Mainline Provider artifact，无法构造版本身份变化；
+  provenance journal recovery、真实 virtual mapping 和 adapter 冷启动回归仍为
+  `unsupported/not_observed`。
+- **证据**：
+  `tests/baseline/pattern-v6/p6-provider-v66-20260802/V-66-current-device-restart.json`
+- **结论**：V-66 总状态保持 `pending`，bit 17 不置位。
 
 ## 参考依据
 

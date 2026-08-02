@@ -5,6 +5,7 @@ add_library(pathguard_core STATIC
   src/pattern.cpp
   src/pattern_runtime.cpp
   src/policy_v6.cpp
+  src/provider_mapping.cpp
   src/route_provenance.cpp
   src/provenance_broker.cpp
   src/topology.cpp

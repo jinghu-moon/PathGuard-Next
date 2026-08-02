@@ -1,0 +1,37 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-provider-v65-20260802",
+  "before_commit": "b78e8612a6374b3ba231da64403a937ed37558df",
+  "after_commit": "working_tree",
+  "environment": {
+    "device": "Xiaomi M2012K11AC (alioth)",
+    "android": "13 / API 33 / MIUI V14.0.8.0.TKHCNXM",
+    "abi": "arm64-v8a",
+    "module": "0.1.29-dev"
+  },
+  "rules_source_hash": "not_applicable: Provider bridge boundary probe does not load PathGuard rules",
+  "policy_hash": "not_applicable: Provider bridge boundary probe does not load a PathGuard policy",
+  "module_abi_hashes": {
+    "module": "0.1.29-dev",
+    "provider_status": "build/device-evidence/provider-lsplant-v1/20260802-095957/provider-status.txt"
+  },
+  "scenario_id": "V-65-current-device-passthrough-and-mapping-boundary",
+  "steps": [
+    "Run the enhanced LSPlant Provider status collector",
+    "Verify both Provider method groups, profile/build gate and bridge errno",
+    "Verify runtime status action admissions and capability bit 17",
+    "Assess whether the current public probe can inject production route provenance"
+  ],
+  "expected_result": "Passthrough is fault-free; real virtual mapping is only active when query/insert/FD/reverse evidence is constructible and complete",
+  "before_actual": "LSPlant bridge was passthrough-only and no production route binding could be injected by the current public probe",
+  "after_actual": "Passthrough gates passed for both Providers; real virtual mapping matrix is unsupported/not_observed because the current probe cannot inject a production route binding",
+  "classification": "not_observed",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-provider-v65-20260802/V-65-current-device-passthrough-and-mapping-boundary.md",
+    "build/device-evidence/provider-lsplant-v1/20260802-095957/provider-status.txt",
+    "build/device-evidence/provider-lsplant-v1/20260802-095957/trigger-documents-download.txt",
+    "build/device-evidence/provider-lsplant-v1/20260802-095957/trigger-documents-root.txt",
+    "build/device-evidence/provider-lsplant-v1/20260802-095957/trigger-media.txt"
+  ],
+  "reviewer_conclusion": "The current device re-confirms the LSPlant passthrough sub-gate without enabling provider_query_insert_mapping. V-65 remains pending; the real mapping matrix is unsupported/not_observed rather than passed."
+}

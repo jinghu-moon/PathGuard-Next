@@ -270,6 +270,14 @@ target_include_directories(pathguard_provider_adapter_profile_test PRIVATE
 target_link_libraries(pathguard_provider_adapter_profile_test PRIVATE pathguard_core)
 add_test(NAME pathguard_provider_adapter_profile_test
   COMMAND pathguard_provider_adapter_profile_test)
+
+add_executable(pathguard_provider_mapping_test
+  unit/provider_mapping_test.cpp)
+target_include_directories(pathguard_provider_mapping_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit)
+target_link_libraries(pathguard_provider_mapping_test PRIVATE pathguard_core)
+add_test(NAME pathguard_provider_mapping_test
+  COMMAND pathguard_provider_mapping_test)
 add_executable(pathguard_provider_lsplant_bridge_test
   unit/provider_lsplant_bridge_test.cpp)
 target_include_directories(pathguard_provider_lsplant_bridge_test PRIVATE
