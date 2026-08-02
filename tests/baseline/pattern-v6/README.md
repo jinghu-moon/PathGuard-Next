@@ -72,6 +72,7 @@
 | `p6-provider-content-values-20260802` | T-45～R-45 ContentValues dynamic operation extractor | complete（Host/ABI/device passthrough） | `p6-provider-content-values-20260802/T-45-R-45-content-values-host.md` |
 | `p6-provider-delete-target-20260802` | V-67 delete target feasibility boundary | not_observed（当前设备/ABI 不支持，按 fail-open 跳过） | `p6-provider-delete-target-20260802/V-67-delete-target-boundary.md` |
 | `p6-provider-mapping-adapter-20260802` | T-46～R-46 native mapping decision adapter seam | complete（Host/ABI；device passthrough） | `p6-provider-mapping-adapter-20260802/T-46-R-46-mapping-adapter-host.md` |
+| `p6-provider-forward-binding-20260802` | T-47～R-47 operation-specific binding validation | complete（Host/ABI/device passthrough） | `p6-provider-forward-binding-20260802/T-47-R-47-forward-binding-host.md` |
 
 `p6-auxiliary-20260730/V-31-provider-early-start-before.md` 是上述 Provider 生命周期修复的 before 证据；
 原文件曾误标为 V-40，已按任务清单更正为 V-31，避免与 ADR-0015 决策门冲突。

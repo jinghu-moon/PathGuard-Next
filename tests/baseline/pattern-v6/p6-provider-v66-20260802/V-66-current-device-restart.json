@@ -1,18 +1,18 @@
 {
   "comparison_report_format": 1,
   "change_id": "p6-provider-v66-20260802",
-  "before_commit": "b78e8612a6374b3ba231da64403a937ed37558df",
+  "before_commit": "e88e6e3",
   "after_commit": "working_tree",
   "environment": {
     "device": "Xiaomi M2012K11AC (alioth)",
     "android": "13 / API 33 / MIUI V14.0.8.0.TKHCNXM",
-    "module": "0.1.29-dev"
+    "module": "0.1.36-dev"
   },
   "rules_source_hash": "not_applicable: Provider restart probe does not load PathGuard rules",
   "policy_hash": "not_applicable: Provider restart probe does not load a PathGuard policy",
   "module_abi_hashes": {
-    "module": "0.1.29-dev",
-    "provider_status": "build/device-evidence/provider-lsplant-v1/20260802-100337/provider-status.txt"
+    "module": "0.1.36-dev",
+    "provider_status": "build/device-evidence/provider-lsplant-v1/20260802-124446/provider-status.txt"
   },
   "scenario_id": "V-66-current-device-provider-restart-republication",
   "steps": [
@@ -22,15 +22,15 @@
     "Run enhanced LSPlant status collector and fault gate"
   ],
   "expected_result": "Provider restart republishes status and re-installs passthrough hooks without crash; unsupported mapping remains fail-open",
-  "before_actual": "Both Providers had active 0.1.29-dev passthrough status before force-stop",
-  "after_actual": "Both Provider PIDs rotated and status was republished; method groups and errno remained valid; collector passed and bit 17 stayed clear",
+  "before_actual": "Both Providers had active 0.1.36-dev passthrough status before force-stop (ExternalStorageProvider PID 7611; MediaProvider PID 5085)",
+  "after_actual": "Both Provider PIDs rotated (ExternalStorageProvider 7611 -> 11434; MediaProvider 5085 -> 11302) and status was republished; method groups and errno remained valid; collector passed and bit 17 stayed clear",
   "classification": "not_observed",
   "evidence_paths": [
     "tests/baseline/pattern-v6/p6-provider-v66-20260802/V-66-current-device-restart.md",
-    "build/device-evidence/provider-lsplant-v1/20260802-100337/provider-status.txt",
-    "build/device-evidence/provider-lsplant-v1/20260802-100337/trigger-documents-download.txt",
-    "build/device-evidence/provider-lsplant-v1/20260802-100337/trigger-documents-root.txt",
-    "build/device-evidence/provider-lsplant-v1/20260802-100337/trigger-media.txt"
+    "build/device-evidence/provider-lsplant-v1/20260802-124446/provider-status.txt",
+    "build/device-evidence/provider-lsplant-v1/20260802-124446/trigger-documents-download.txt",
+    "build/device-evidence/provider-lsplant-v1/20260802-124446/trigger-documents-root.txt",
+    "build/device-evidence/provider-lsplant-v1/20260802-124446/trigger-media.txt"
   ],
   "reviewer_conclusion": "The current device closes the Provider restart and LSPlant passthrough republication sub-gate. V-66 remains pending for Mainline identity changes, provenance recovery and real virtual mapping."
 }

@@ -1291,9 +1291,10 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 | T-44～R-44 | complete（immutable request Host/ABI） | 按值 dispatch request seam；精确 open operation；update/delete 动态事实缺失时 incomplete；真机回归 pending |
 | T-45～R-45 | complete（Host/ABI/device passthrough） | 非空 metadata 与 `_display_name` rename operation 提取；空/错误/JNI 异常 incomplete；`20260802-120913` 回归通过，delete target unsupported |
 | T-46～R-46 | complete（Host/ABI；device passthrough） | dispatch request 映射为既有 `ProviderMappingOperation`，binding/profile/reverse 不匹配均保持 fail-open/pass-through；真实 route resolver wiring 仍 pending |
+| T-47～R-47 | complete（Host/ABI/device passthrough） | operation-specific binding validation：前向 Provider 操作不要求 committed reverse；reverse lookup 继续要求 strong identity 与 unique committed record；`0.1.36-dev` 回归通过 |
 | V-67 | not_observed（当前设备/ABI 不支持） | pinned `MediaProvider.delete(Uri,Bundle)` 无可信 file/directory target 输入；禁止 URI/MIME 猜测，保持 delete request incomplete |
-| V-65 | pending（当前设备 partial） | `0.1.29-dev` 两组 passthrough/fault gate 复采通过；真实 virtual query/create/open/rename/delete/reverse、FD identity、Java callback fail-open 矩阵当前设备无法构造，记为 unsupported/not_observed；bit 17 不置位 |
-| V-66 | pending（当前设备 partial） | 当前设备 Provider restart/republication 已通过；Mainline build identity 变化、provenance recovery、真实 virtual mapping 和 adapter 冷启动回归仍 unsupported/not_observed |
+| V-65 | pending（当前设备 partial） | `0.1.36-dev` 两组 passthrough/fault gate 复采通过；真实 virtual query/create/open/rename/delete/reverse、FD identity、Java callback fail-open 矩阵当前设备无法构造，记为 unsupported/not_observed；bit 17 不置位 |
+| V-66 | pending（当前设备 partial） | `0.1.36-dev` Provider restart/republication 已通过（PID 轮换、hook 重装、状态重发）；Mainline build identity 变化、provenance recovery、真实 virtual mapping 仍 unsupported/not_observed |
 
 ### T-34 [红] 冻结 Provider contract pair gate
 
@@ -1442,22 +1443,28 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
   `RouteRecord`/FD identity，因此 virtual query/create/document-ID/FD/rename/delete/reverse
   和 Java callback fail-open 注入均为 `unsupported/not_observed`，不计入通过。
 - **证据**：
-  `tests/baseline/pattern-v6/p6-provider-v65-20260802/V-65-current-device-passthrough-and-mapping-boundary.json`
+  `tests/baseline/pattern-v6/p6-provider-v65-20260802/V-65-current-device-passthrough-and-mapping-boundary.json`；
+  `0.1.36-dev` 最新证据为 `build/device-evidence/provider-lsplant-v1/20260802-124319`。
 - **结论**：V-65 总状态保持 `pending`；只有真实 composite mapping 矩阵可构造并全部通过后，
   才允许改变 bit 17。
 
 ### V-66 [验证] 当前设备 Provider restart/republication
 
-- **执行结果**：force-stop 两个 Provider 后触发公开 query；ExternalStorageProvider PID
-  `12240 -> 16784`，MediaProvider PID `4779 -> 16667`。两端重新发布 status，方法组分别为
-  `3/3/3/3` 与 `2044/2044/2044/2044`，`errno=0`，两条 admission active，bit 17 仍清零。
-- **增强 fault gate**：最终 collector 证据 `build/device-evidence/provider-lsplant-v1/20260802-100337`
-  通过，无 Provider fatal/null receiver/JNI ref 告警。
+- **执行结果**：在 `0.1.36-dev` 上 force-stop 两个 Provider 后触发公开 query；
+  ExternalStorageProvider PID `7611 -> 11434`，MediaProvider PID `5085 -> 11302`。两端重新
+  发布 status，方法组分别为 `3/3/3/3` 与 `2044/2044/2044/2044`，`errno=0`，两条 admission
+  active，bit 17 仍清零。
+- **增强 fault gate**：最终 collector 证据
+  `build/device-evidence/provider-lsplant-v1/20260802-124446` 通过，无 Provider fatal/null
+  receiver/JNI ref 告警。MediaProvider 在 volume attach 前触发的 `VolumeNotFoundException`
+  来自原始 query/其他 LSPosed hook 透传路径，不是 PathGuard dispatcher failure。
 - **设备边界**：当前设备未更换 Mainline Provider artifact，无法构造版本身份变化；
   provenance journal recovery、真实 virtual mapping 和 adapter 冷启动回归仍为
   `unsupported/not_observed`。
 - **证据**：
-  `tests/baseline/pattern-v6/p6-provider-v66-20260802/V-66-current-device-restart.json`
+  `tests/baseline/pattern-v6/p6-provider-v66-20260802/V-66-current-device-restart.json`；
+  `0.1.36-dev` 最新证据为 `build/device-evidence/provider-lsplant-v1/20260802-124446`，
+  PID 轮换为 ExternalStorageProvider `7611 -> 11434`、MediaProvider `5085 -> 11302`。
 - **结论**：V-66 总状态保持 `pending`，bit 17 不置位。
 
 ### T-38 [红] 冻结 Java callback dispatcher 安全边界
@@ -1716,6 +1723,39 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
   `provider_bridge_errno=0`、admission active、bit 17 清零；该证据仅覆盖 passthrough
   回归。
 - **依赖/时间盒**：I-46；1 小时。
+
+### T-47 [红] 冻结 operation-specific binding validation 合同
+
+- **任务描述**：区分前向 Provider 操作与 reverse lookup 的 binding 要求；query/create/open/
+  metadata/rename/delete 只能要求 context、source/target path 和外部标识一致，不得因为尚未产生
+  committed reverse record 就 fail-open。
+- **验收标准**：前向 operation 在缺 reverse resolve 时仍可进入 rewrite 决策；reverse lookup
+  继续要求 strong FD identity、unique committed record 和 generation/rule/scope 一致；未知
+  operation、profile mismatch、runtime unavailable、binding path 不合法仍保持原失败分类。
+- **依赖/时间盒**：R-46；2 小时。
+
+### I-47 [绿] 实现前向/反向分离的 mapping evaluator
+
+- **任务描述**：在 `EvaluateProviderMapping` 内使用 operation-specific validator；正向矩阵覆盖
+  query、directory query、create、open read/write/read-write、metadata、rename、delete file/
+  directory，reverse 负矩阵保留 ambiguous/missing/mismatch/error。
+- **验收标准**：`pathguard_provider_mapping_test` 覆盖完整矩阵；MSVC Release `82/82`、
+  production integration guard、NDK 27d 双 ABI、NDK 29 LSPlant 双 ABI 与 `git diff --check`
+  通过。
+- **依赖/时间盒**：T-47；2 小时。
+
+### R-47 [重构] 保持真实 rewrite 关闭直到 resolver/provenance 注入完成
+
+- **任务描述**：本阶段只修正 evaluator 合同，不启用 bit 17，不创建 Java 返回对象，不连接真实
+  route resolver；设备验证仍只作为 LSPlant passthrough 与重启安全回归。
+- **验收标准**：`0.1.36-dev` 安装后两端 Provider hook group 完整、admission active、
+  `provider_bridge_errno=0`，bit 17 清零；不可构造的真实 mapping 继续标记
+  `unsupported/not_observed`。
+- **执行结果**：Host/ABI 全量回归通过；`dist/pathguard-next-v0.1.36-dev-universal.zip`
+  SHA-256 为 `0883eee7b3199600e7efd50a5980713d9dcdd117f9c3059c8803cfe3596c0286`。
+  当前设备证据 `build/device-evidence/provider-lsplant-v1/20260802-124319` 与重启证据
+  `build/device-evidence/provider-lsplant-v1/20260802-124446` 均通过。
+- **依赖/时间盒**：I-47；1 小时。
 
 ## 参考依据
 

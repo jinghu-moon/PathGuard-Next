@@ -4,9 +4,9 @@
 
 - Device: Xiaomi M2012K11AC (alioth), Android 13/API 33, MIUI
   `V14.0.8.0.TKHCNXM`
-- Module: installed `0.1.29-dev` LSPlant bridge
+- Module: installed `0.1.36-dev` LSPlant bridge
 - Collection: `tests/device/provider-contract/collect_lsplant_bridge_status.ps1`
-- Evidence: `build/device-evidence/provider-lsplant-v1/20260802-095957`
+- Evidence: `build/device-evidence/provider-lsplant-v1/20260802-124319`
 
 ## Observed passthrough sub-gate
 
