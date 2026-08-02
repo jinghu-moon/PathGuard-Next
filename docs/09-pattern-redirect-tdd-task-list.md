@@ -1283,6 +1283,15 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 | T-36～R-36 | complete（Host/production wiring） | 独立 LSPlant C ABI bridge、最小 Java Hooker、精确 alioth APK SHA-256 gate、Zygisk pre/post lifecycle、双 ABI/ELF/许可证/状态观测；MSVC Release 81/81 |
 | T-37～R-37 | complete（Host decision contract） | profile/operation/binding/committed reverse 的纯决策层；pass/rewrite/unsupported/ambiguous/fail-open 负矩阵；MSVC Release 82/82 |
 | T-38～R-38 | complete（callback safety boundary） | Java dispatcher 默认关闭；异常/类型不匹配 fail-open 到 backup；Java/guard/双 ABI/CTest 通过；真实 provenance wiring pending |
+| T-39～R-39 | complete（native dispatcher seam） | Java/native `nativeDispatch` 注册入口；当前实现固定 pass-through；Host/双 ABI 与 `20260802-104458` 真机回归通过；bit 17 不变 |
+| T-40～R-40 | complete（dispatch spec） | 11 方法的 role/operation mask/dynamic argument/result kind 完整表；native method-ID gate；对象提取 pending |
+| T-41～R-41 | complete（Host/ABI/device passthrough） | `r/w/wt/wa/rw/rwt` 有界解析；参数数量/类型/JNI 异常 fail-open；`20260802-110216` 真机回归通过，其他对象提取 pending |
+| T-42～R-42 | complete（Host/ABI/device passthrough） | 5 个 URI、5 个 document ID 方法显式类型/索引；固定 1024 字节 UTF-8 缓冲与 fail-open；`20260802-113334` 回归通过，File reverse pending |
+| T-43～R-43 | complete（Host/ABI/device passthrough） | `getDocIdForFile(File)` 显式 File 类型与索引；固定 4096 字节绝对路径缓冲；`20260802-114618` 回归通过，真实 reverse mapping pending |
+| T-44～R-44 | complete（immutable request Host/ABI） | 按值 dispatch request seam；精确 open operation；update/delete 动态事实缺失时 incomplete；真机回归 pending |
+| T-45～R-45 | complete（Host/ABI/device passthrough） | 非空 metadata 与 `_display_name` rename operation 提取；空/错误/JNI 异常 incomplete；`20260802-120913` 回归通过，delete target unsupported |
+| T-46～R-46 | complete（Host/ABI；device passthrough） | dispatch request 映射为既有 `ProviderMappingOperation`，binding/profile/reverse 不匹配均保持 fail-open/pass-through；真实 route resolver wiring 仍 pending |
+| V-67 | not_observed（当前设备/ABI 不支持） | pinned `MediaProvider.delete(Uri,Bundle)` 无可信 file/directory target 输入；禁止 URI/MIME 猜测，保持 delete request incomplete |
 | V-65 | pending（当前设备 partial） | `0.1.29-dev` 两组 passthrough/fault gate 复采通过；真实 virtual query/create/open/rename/delete/reverse、FD identity、Java callback fail-open 矩阵当前设备无法构造，记为 unsupported/not_observed；bit 17 不置位 |
 | V-66 | pending（当前设备 partial） | 当前设备 Provider restart/republication 已通过；Mainline build identity 变化、provenance recovery、真实 virtual mapping 和 adapter 冷启动回归仍 unsupported/not_observed |
 
@@ -1480,6 +1489,233 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
   两端方法组、errno、两条 active admission 与 bit 17 清零保持不变。该轮仍只证明
   passthrough 回归，不证明 dispatcher rewrite。
 - **依赖/时间盒**：I-38；1 小时。
+
+### T-39 [红] 冻结 Java/native dispatcher 注册合同
+
+- **任务描述**：为 ProviderHooker 注册 native `nativeDispatch(int,Object[])`，确保 callback
+  进入统一 native 决策入口；native 返回空决策时必须保持 Java `DispatchResult.pass()`。
+- **验收标准**：JNI 方法签名、注册时机和异常边界固定；未有 route binding 时不得改写任何
+  Provider 对象，不得设置 bit 17。
+- **依赖/时间盒**：R-38；2 小时。
+
+### I-39 [绿] 接入 native dispatcher pass-through seam
+
+- **任务描述**：在 Hooker DEX 加载后注册 native 方法并启用 dispatcher；native 实现暂时只
+  返回 pass-through，不访问 daemon/store、不执行阻塞 I/O。
+- **验收标准**：Host dispatcher test、production guard、NDK 29 双 ABI、MSVC Release 全部
+  通过；当前设备安装后 fault gate 无回归。
+- **依赖/时间盒**：T-39；2 小时。
+
+### R-39 [重构] 保持真实 provenance 接入单一来源
+
+- **任务描述**：未来 native dispatcher 只能消费既有 `ProviderMappingDecisionV1` 和
+  `provenance_protocol`，禁止在 Java Hooker 内建立第二套 route/identity 模型。
+- **验收标准**：本任务只交付 pass-through 接线；V-65 仍 pending，bit 17 仍 unsupported。
+- **执行结果**：Host CTest `82/82`、production integration guard、JDK dispatcher test 与
+  LSPlant 双 ABI 构建通过。证据：
+  `tests/baseline/pattern-v6/p6-provider-native-dispatch-20260802/T-39-R-39-native-dispatch-seam.md`。
+- **当前设备复采**：`build/device-evidence/provider-lsplant-v1/20260802-104458` 已确认
+  `Provider native dispatcher installed as pass-through`，两端方法组和 fault gate 通过，
+  `observed_capabilities=65536` 且 bit 17 清零。该结果只关闭 native seam 的回归风险，
+  不关闭真实 mapping。
+- **依赖/时间盒**：I-39；1 小时。
+
+### T-40 [红] 冻结 11 方法 dispatch 语义表
+
+- **任务描述**：为每个 version-pinned Java Hook 冻结 dispatch role、最低 operation mask、
+  是否需要 mode/ContentValues 动态判定及 Java 返回对象类型。
+- **验收标准**：11 个 method ID 完整且顺序唯一；unknown ID、空参数保持 pass-through；
+  open/update/delete 不得用静态 method ID 猜测最终 operation。
+- **依赖/时间盒**：R-39；2 小时。
+
+### I-40 [绿] 实现 dispatch spec 与 native method-ID gate
+
+- **任务描述**：实现 constexpr `ProviderJavaDispatchSpecV1` 表和完整性 validator；native
+  dispatcher 只接受表中 method ID 与非空参数数组。
+- **验收标准**：专项 Host 测试、production integration guard 和 LSPlant 双 ABI 构建通过；
+  dispatcher 仍固定 pass-through。
+- **依赖/时间盒**：T-40；2 小时。
+
+### R-40 [重构] 分离静态方法角色与动态参数决策
+
+- **任务描述**：静态表只声明最小能力边界；open mode、update ContentValues、delete target
+  类型留给后续有界 extractor，不在方法名层猜测。
+- **验收标准**：无 JNI 对象改写、无 provenance I/O、bit 17 不变；V-65 继续 pending。
+- **执行结果**：专项测试、NDK 29 双 ABI、production integration guard 通过。证据：
+  `tests/baseline/pattern-v6/p6-provider-dispatch-spec-20260802/T-40-R-40-dispatch-spec-host.md`。
+- **依赖/时间盒**：I-40；1 小时。
+
+### T-41 [红] 冻结 Provider open mode 有界解析合同
+
+- **任务描述**：为 MediaProvider `openFile` 与 MediaDocumentsProvider `openDocument` 冻结
+  Android mode 到 operation mask 的映射；未知、空值、过长或错误类型必须 fail-open。
+- **验收标准**：`r` 仅映射 open-read；`w/wt/wa` 仅映射 open-write；`rw/rwt` 同时映射
+  open-read/open-write；其他输入返回 0，dispatcher 不改写结果。
+- **依赖/时间盒**：R-40；1 小时。
+
+### I-41 [绿] 实现无分配 JNI open mode extractor
+
+- **任务描述**：从冻结 callback 参数索引读取 mode；先校验参数数量和 `java.lang.String`
+  类型，再用最多 3 个 UTF-16 code unit 的栈缓冲解析 ASCII mode。
+- **验收标准**：callback 热路径无阻塞 I/O、无堆分配；JNI 查找、数组读取、类型检查或字符串
+  读取异常均清理并 pass-through；专项测试与 NDK 29 双 ABI构建通过。
+- **依赖/时间盒**：T-41；2 小时。
+
+### R-41 [重构] 保持 extractor 与 mapping 决策解耦
+
+- **任务描述**：本阶段只提取 operation mask，不访问 daemon/store，不创建 Java 对象，不连接
+  provenance，也不改变 backup 调用和返回值。
+- **验收标准**：MSVC Release `82/82`、production integration guard、双 ABI 与
+  `git diff --check` 通过；bit 17 保持清零。URI/document ID/ContentValues 与真实 route binding
+  留给后续任务。
+- **执行结果**：Host/ABI 与 `0.1.30-dev` 当前设备 passthrough 回归均通过；设备证据
+  `build/device-evidence/provider-lsplant-v1/20260802-110216` 显示两端 `provider_bridge_errno=0`、
+  方法集合完整、admission active 且 bit 17 清零。证据：
+  `tests/baseline/pattern-v6/p6-provider-open-mode-20260802/T-41-R-41-open-mode-host.md`。
+- **依赖/时间盒**：I-41；1 小时。
+
+### T-42 [红] 冻结 Provider URI/document ID 参数合同
+
+- **任务描述**：为 11 个 Hook 显式声明主标识参数类型和索引；5 个 MediaProvider 方法使用
+  `android.net.Uri`，ExternalStorageProvider 正向方法和 4 个 MediaDocumentsProvider 方法使用
+  document ID；`getDocIdForFile(File)` 本阶段保持无标识 extractor。
+- **验收标准**：10 个已支持方法均为 callback 索引 1；File reverse 不得被错误转换为 String；
+  null、错误类型与非 `content://` URI 必须 pass-through。
+- **依赖/时间盒**：R-41；2 小时。
+
+### I-42 [绿] 实现固定容量 UTF-8 identifier extractor
+
+- **任务描述**：从 Java String 或 Uri `toString()` 读取最多 1023 字节的标准 UTF-8；正确处理
+  UTF-16 surrogate pair，并拒绝孤立 surrogate、NUL、控制字符和容量溢出。
+- **验收标准**：中文、补充平面字符、非法 surrogate、控制字符、超长输入及 URI scheme 矩阵
+  通过；JNI 查找/调用/数组/字符串异常均清理并 pass-through。
+- **依赖/时间盒**：T-42；3 小时。
+
+### R-42 [重构] 保持标识提取与 route/provenance 分离
+
+- **任务描述**：只产出 version-pinned、固定容量的输入事实；不构造
+  `ProviderRouteBindingV1`，不访问 daemon/store，不创建改写结果。
+- **验收标准**：MSVC Release `82/82`、production integration guard、NDK 29 双 ABI 与
+  `git diff --check` 通过；bit 17 清零，V-65 继续 pending。
+- **执行结果**：Host/ABI 已通过；设备候选包待安装。证据：
+  `tests/baseline/pattern-v6/p6-provider-identifier-20260802/T-42-R-42-identifier-host.md`。
+- **依赖/时间盒**：I-42；1 小时。
+
+### T-43 [红] 冻结 File reverse 参数合同
+
+- **任务描述**：为 ExternalStorageProvider `getDocIdForFile(File)` 声明 File 主参数和 callback
+  索引 1；不把 File 当作 document ID 或 URI 处理。
+- **验收标准**：错误类型、null、相对路径、空路径和超长路径均 pass-through；文件路径不进入
+  `ProviderRouteBindingV1` 或 provenance。
+- **依赖/时间盒**：R-42；1 小时。
+
+### I-43 [绿] 实现固定容量 File path extractor
+
+- **任务描述**：校验 `java.io.File`，调用冻结的 `getPath()`，以最多 4095 字节标准 UTF-8
+  写入栈上路径缓冲，并要求绝对路径格式。
+- **验收标准**：Unicode/代理项、路径边界、错误 Java 类型和 JNI 异常矩阵通过；无 native 堆
+  分配、阻塞 I/O 或 Java 返回值改写。
+- **依赖/时间盒**：T-43；2 小时。
+
+### R-43 [重构] 保持 reverse extractor 只产出事实
+
+- **任务描述**：File path 仅作为后续 reverse lookup 的输入事实；本阶段不扫描目录、不生成
+  document ID、不调用 daemon/store。
+- **验收标准**：MSVC Release `82/82`、production integration guard、NDK 29 双 ABI 与
+  `git diff --check` 通过；bit 17 清零。真实 reverse mapping 留待后续任务。
+- **执行结果**：Host/ABI 与 `0.1.32-dev` 当前设备 passthrough 回归通过；设备证据
+  `build/device-evidence/provider-lsplant-v1/20260802-114618` 显示完整方法组、
+  `provider_bridge_errno=0`、admission active 且 bit 17 清零。证据：
+  `tests/baseline/pattern-v6/p6-provider-file-reverse-20260802/T-43-R-43-file-reverse-host.md`。
+- **依赖/时间盒**：I-43；1 小时。
+
+### T-44 [红] 冻结 immutable Provider dispatch request
+
+- **任务描述**：把 method role/result、精确 operation mask、URI/document ID/File path 事实复制为
+  versioned 按值请求；请求不得携带 `JNIEnv*`、Java ref 或借用指针。
+- **验收标准**：静态 operation 必须精确匹配；open 使用 mode 提取结果；update/delete 在动态
+  ContentValues/target 未解析时返回 incomplete，不得用最低 mask 猜测。
+- **依赖/时间盒**：R-43；2 小时。
+
+### I-44 [绿] 接入 native request pass-through seam
+
+- **任务描述**：native dispatcher 构建 ready request 后同步交给单一 `DispatchProviderRequest`
+  入口；该入口暂时固定返回 pass-through。
+- **验收标准**：请求构建器纯 Host 矩阵、production guard、MSVC Release、NDK 29 双 ABI 通过；
+  请求不触发 daemon/store、Java 对象创建或结果改写。
+- **依赖/时间盒**：T-44；2 小时。
+
+### R-44 [重构] 保持请求生命周期与 mapping 决策解耦
+
+- **任务描述**：请求只表达已验证事实；后续 mapping 层消费 `const` 请求并复用既有
+  `ProviderMappingDecisionV1`，禁止在 dispatcher 内复制 route/provenance 模型。
+- **验收标准**：MSVC Release `82/82`、production integration guard、双 ABI 与
+  `git diff --check` 通过；bit 17 清零，真实 rewrite 仍关闭。
+- **执行结果**：Host/ABI 已通过；设备候选包待安装。证据：
+  `tests/baseline/pattern-v6/p6-provider-request-20260802/T-44-R-44-request-host.md`。
+- **依赖/时间盒**：I-44；1 小时。
+
+### T-45 [红] 冻结 ContentValues 动态 operation 合同
+
+- **任务描述**：为 MediaProvider `update(Uri,ContentValues,Bundle)` 声明 ContentValues 参数索引
+  2；非空 values 至少产生 metadata mutation，存在 `_display_name` 时额外产生 rename。
+- **验收标准**：null、空集合、错误类型、JNI 异常均 incomplete；不得读取未冻结的任意 key，
+  不得从 method ID 静态猜测 rename。
+- **依赖/时间盒**：R-44；1 小时。
+
+### I-45 [绿] 实现 ContentValues bounded operation extractor
+
+- **任务描述**：仅调用冻结的 `size()` 与 `containsKey("_display_name")`，把结果转换为既有
+  operation mask；临时 Java refs 在 native 边界释放。
+- **验收标准**：Host dynamic matrix、production guard、MSVC Release、NDK 29 双 ABI 通过；不
+  创建 route binding、不访问 daemon/store、不改变 Java 返回值。
+- **依赖/时间盒**：T-45；2 小时。
+
+### R-45 [重构] 保持 ContentValues 与 delete target 分离
+
+- **任务描述**：ContentValues extractor 只负责 update；MediaProvider delete 的 file/directory
+  target 类型单独等待可信事实，不能复用 `_display_name` 或 URI 形状。
+- **验收标准**：MSVC Release `82/82`、production integration guard、双 ABI 与
+  `git diff --check` 通过；delete target 仍 incomplete，bit 17 清零。
+- **执行结果**：Host/ABI 与 `0.1.34-dev` 当前设备 passthrough 回归通过；设备证据
+  `build/device-evidence/provider-lsplant-v1/20260802-120913` 显示完整方法组、
+  `provider_bridge_errno=0`、admission active 且 bit 17 清零。证据：
+  `tests/baseline/pattern-v6/p6-provider-content-values-20260802/T-45-R-45-content-values-host.md`。
+- **依赖/时间盒**：I-45；1 小时。
+
+### T-46 [红] 冻结 Provider mapping adapter seam
+
+- **任务描述**：将已验证的 Java dispatch request 映射为既有 `ProviderMappingOperation`，并通过
+  `BuildProviderMappingRequest` 交给统一 `EvaluateProviderMapping`；不得在 dispatcher 内复制
+  route/provenance 模型。
+- **验收标准**：query、directory query、create、open read/write、metadata、rename、delete
+  file/directory 和 reverse operation 映射矩阵完整；未知版本/operation、identifier 与 binding
+  不一致、缺 profile/binding/runtime/reverse 时均保持 pass-through 或明确 fail-open；不创建
+  Java 返回对象，不访问 daemon/store，不设置 bit 17。
+- **依赖/时间盒**：R-45；2 小时。
+
+### I-46 [绿] 接入 native mapping decision adapter
+
+- **任务描述**：在 `DispatchProviderRequest` 中构造按值 mapping request，复用现有 profile、
+  route binding 和 provenance 决策 API；当前无 resolver/binding 注入时固定返回 pass-through。
+- **验收标准**：`pathguard_provider_mapping_test`、LSPlant bridge 专项测试、MSVC Release、
+  production integration guard、NDK 29 双 ABI 与 `git diff --check` 全部通过。
+- **依赖/时间盒**：T-46；2 小时。
+
+### R-46 [重构] 保持 adapter 与真实 resolver wiring 解耦
+
+- **任务描述**：adapter 只负责请求类型转换和既有决策调用；真实 route resolver、provenance
+  store、Java 返回对象构造和 bit 17 enable 继续留给后续任务。
+- **验收标准**：无 binding/profile/resolver 时不改写 Provider 行为；delete target 未解析时不
+  猜测 unlink/rmdir；设备回归只证明 LSPlant passthrough 稳定，不宣称真实 mapping 已启用。
+- **执行结果**：Host CTest `82/82`、`pathguard_provider_mapping_test`、LSPlant bridge 专项
+  测试、production integration guard、NDK 29 `arm64-v8a`/`armeabi-v7a` 与 `git diff --check`
+  均通过。`0.1.35-dev` 真机证据
+  `build/device-evidence/provider-lsplant-v1/20260802-122500` 显示 MediaProvider
+  `2044/2044/2044/2044`、ExternalStorageProvider `3/3/3/3`，两端
+  `provider_bridge_errno=0`、admission active、bit 17 清零；该证据仅覆盖 passthrough
+  回归。
+- **依赖/时间盒**：I-46；1 小时。
 
 ## 参考依据
 

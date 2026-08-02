@@ -63,6 +63,15 @@
 | `p6-provider-v65-20260802` | V-65 当前设备 passthrough 与真实映射边界 | partial（passthrough observed；真实映射 unsupported/not_observed） | `p6-provider-v65-20260802/V-65-current-device-passthrough-and-mapping-boundary.json` |
 | `p6-provider-v66-20260802` | V-66 当前设备 Provider restart/republication | partial（restart observed；Mainline/provenance recovery unsupported/not_observed） | `p6-provider-v66-20260802/V-66-current-device-restart.json` |
 | `p6-provider-callback-20260802` | T-38～R-38 Provider callback safety boundary | complete（dispatcher seam；真实 provenance wiring pending） | `p6-provider-callback-20260802/T-38-R-38-provider-callback-boundary.md` |
+| `p6-provider-native-dispatch-20260802` | T-39～R-39 native dispatcher pass-through seam | complete（Host/ABI/device passthrough） | `p6-provider-native-dispatch-20260802/T-39-R-39-native-dispatch-seam.md` |
+| `p6-provider-dispatch-spec-20260802` | T-40～R-40 Provider Java dispatch spec | complete（Host/ABI；对象提取 pending） | `p6-provider-dispatch-spec-20260802/T-40-R-40-dispatch-spec-host.md` |
+| `p6-provider-open-mode-20260802` | T-41～R-41 Provider open mode bounded extractor | complete（Host/ABI/device passthrough） | `p6-provider-open-mode-20260802/T-41-R-41-open-mode-host.md` |
+| `p6-provider-identifier-20260802` | T-42～R-42 Provider URI/document ID extractor | complete（Host/ABI/device passthrough） | `p6-provider-identifier-20260802/T-42-R-42-identifier-host.md` |
+| `p6-provider-file-reverse-20260802` | T-43～R-43 Provider File reverse extractor | complete（Host/ABI/device passthrough） | `p6-provider-file-reverse-20260802/T-43-R-43-file-reverse-host.md` |
+| `p6-provider-request-20260802` | T-44～R-44 immutable Provider dispatch request | complete（Host/ABI；候选包待真机回归） | `p6-provider-request-20260802/T-44-R-44-request-host.md` |
+| `p6-provider-content-values-20260802` | T-45～R-45 ContentValues dynamic operation extractor | complete（Host/ABI/device passthrough） | `p6-provider-content-values-20260802/T-45-R-45-content-values-host.md` |
+| `p6-provider-delete-target-20260802` | V-67 delete target feasibility boundary | not_observed（当前设备/ABI 不支持，按 fail-open 跳过） | `p6-provider-delete-target-20260802/V-67-delete-target-boundary.md` |
+| `p6-provider-mapping-adapter-20260802` | T-46～R-46 native mapping decision adapter seam | complete（Host/ABI；device passthrough） | `p6-provider-mapping-adapter-20260802/T-46-R-46-mapping-adapter-host.md` |
 
 `p6-auxiliary-20260730/V-31-provider-early-start-before.md` 是上述 Provider 生命周期修复的 before 证据；
 原文件曾误标为 V-40，已按任务清单更正为 V-31，避免与 ADR-0015 决策门冲突。
