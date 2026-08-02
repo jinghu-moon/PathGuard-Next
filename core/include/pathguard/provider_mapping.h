@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "pathguard/provider_adapter_profile.h"
+#include "pathguard/provider_lsplant_bridge.h"
 
 namespace pathguard {
 
@@ -19,6 +20,11 @@ enum class ProviderMappingOperation : std::uint8_t {
     kDirectoryQuery,
     kMediaScan,
     kReverseLookup,
+    kOpenReadWrite,
+    kMetadataMutation,
+    kMetadataRename,
+    kDeleteFile,
+    kDeleteDirectory,
 };
 
 enum class ProviderMappingDisposition : std::uint8_t {
@@ -70,5 +76,20 @@ OperationMask ProviderMappingOperationMask(
 
 ProviderMappingDecisionV1 EvaluateProviderMapping(
     const ProviderMappingRequestV1& request) noexcept;
+
+ProviderMappingOperation ProviderJavaDispatchMappingOperation(
+    const ProviderJavaDispatchRequestV1& request) noexcept;
+
+bool ProviderJavaDispatchMatchesBinding(
+    const ProviderJavaDispatchRequestV1& request,
+    const ProviderRouteBindingV1& binding) noexcept;
+
+ProviderMappingRequestV1 BuildProviderMappingRequest(
+    const ProviderJavaDispatchRequestV1& request,
+    const ProviderAdapterProfileMatchV1& profile_match,
+    OperationMask supported_operations,
+    const ProviderRouteBindingV1* binding,
+    const provenance::ResolveResult& reverse,
+    bool runtime_available) noexcept;
 
 }  // namespace pathguard

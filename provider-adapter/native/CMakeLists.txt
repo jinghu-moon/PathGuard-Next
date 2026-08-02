@@ -44,7 +44,10 @@ set(LSPLANT_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(DEBUG_SYMBOLS_PATH "${CMAKE_BINARY_DIR}/symbols")
 add_subdirectory("${PATHGUARD_THIRD_PARTY}/lsplant/src" lsplant)
 
-add_library(pathguard_lsplant SHARED src/provider_lsplant_bridge.cpp)
+add_library(pathguard_lsplant SHARED
+    src/provider_lsplant_bridge.cpp
+    "${PATHGUARD_ROOT}/core/src/provider_mapping.cpp"
+    "${PATHGUARD_ROOT}/core/src/route_provenance.cpp")
 target_include_directories(pathguard_lsplant PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${PATHGUARD_ROOT}/core/include"

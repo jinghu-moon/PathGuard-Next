@@ -20,6 +20,7 @@
 
 #include "lsplant.hpp"
 #include "pathguard/provider_lsplant_bridge.h"
+#include "pathguard/provider_mapping.h"
 
 namespace {
 
@@ -51,6 +52,296 @@ struct HookState {
 };
 
 HookState g_state;
+
+bool IsJavaInstance(JNIEnv* env, jobject value, const char* class_name);
+
+pathguard::OperationMask ReadOpenMode(
+        JNIEnv* env, jobjectArray arguments, std::uint8_t argument_index) {
+    jobject value = env->GetObjectArrayElement(arguments, argument_index);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return 0;
+    }
+    if (value == nullptr) return 0;
+    jclass string_class = env->FindClass("java/lang/String");
+    if (string_class == nullptr || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(value);
+        return 0;
+    }
+    const bool is_string = env->IsInstanceOf(value, string_class) == JNI_TRUE;
+    env->DeleteLocalRef(string_class);
+    if (env->ExceptionCheck() || !is_string) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(value);
+        return 0;
+    }
+    auto mode = static_cast<jstring>(value);
+    const jsize length = env->GetStringLength(mode);
+    if (env->ExceptionCheck() || length <= 0 || length > 3) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(value);
+        return 0;
+    }
+    jchar utf16[3]{};
+    env->GetStringRegion(mode, 0, length, utf16);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(value);
+        return 0;
+    }
+    char ascii[3]{};
+    for (jsize index = 0; index < length; ++index) {
+        if (utf16[index] > 0x7f) {
+            env->DeleteLocalRef(value);
+            return 0;
+        }
+        ascii[index] = static_cast<char>(utf16[index]);
+    }
+    env->DeleteLocalRef(value);
+    return pathguard::ProviderOpenModeOperations(
+        std::string_view(ascii, static_cast<std::size_t>(length)));
+}
+
+pathguard::OperationMask ReadContentValuesOperations(
+        JNIEnv* env, jobjectArray arguments, std::uint8_t argument_index) {
+    jobject values = env->GetObjectArrayElement(arguments, argument_index);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return 0;
+    }
+    if (values == nullptr
+        || !IsJavaInstance(env, values, "android/content/ContentValues")) {
+        env->DeleteLocalRef(values);
+        return 0;
+    }
+    jclass values_class = env->FindClass("android/content/ContentValues");
+    const jmethodID size_method = values_class == nullptr ? nullptr
+        : env->GetMethodID(values_class, "size", "()I");
+    const jmethodID contains_key = values_class == nullptr ? nullptr
+        : env->GetMethodID(
+            values_class, "containsKey", "(Ljava/lang/String;)Z");
+    jstring display_name = env->NewStringUTF("_display_name");
+    if (env->ExceptionCheck() || size_method == nullptr
+        || contains_key == nullptr || display_name == nullptr) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(display_name);
+        env->DeleteLocalRef(values_class);
+        env->DeleteLocalRef(values);
+        return 0;
+    }
+    const jint size = env->CallIntMethod(values, size_method);
+    const jboolean has_display_name = size <= 0 ? JNI_FALSE
+        : env->CallBooleanMethod(values, contains_key, display_name);
+    const bool failed = env->ExceptionCheck();
+    if (failed) env->ExceptionClear();
+    env->DeleteLocalRef(display_name);
+    env->DeleteLocalRef(values_class);
+    env->DeleteLocalRef(values);
+    if (failed) return 0;
+    return pathguard::ProviderContentValuesOperations(
+        size > 0, has_display_name == JNI_TRUE);
+}
+
+bool IsJavaInstance(JNIEnv* env, jobject value, const char* class_name) {
+    jclass expected = env->FindClass(class_name);
+    if (expected == nullptr || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    const bool matches = env->IsInstanceOf(value, expected) == JNI_TRUE;
+    env->DeleteLocalRef(expected);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return matches;
+}
+
+bool ReadJavaIdentifierString(
+        JNIEnv* env, jstring value,
+        pathguard::ProviderJavaIdentifierKind kind,
+        pathguard::ProviderJavaIdentifierV1* output) {
+    const jsize length = env->GetStringLength(value);
+    if (env->ExceptionCheck() || length <= 0
+        || static_cast<std::size_t>(length)
+            >= pathguard::kProviderJavaIdentifierCapacityV1) {
+        env->ExceptionClear();
+        return false;
+    }
+    jchar utf16[pathguard::kProviderJavaIdentifierCapacityV1]{};
+    env->GetStringRegion(value, 0, length, utf16);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return pathguard::EncodeProviderJavaIdentifierUtf16(
+        kind, utf16, static_cast<std::size_t>(length), output);
+}
+
+bool ReadJavaFilePathString(
+        JNIEnv* env, jstring value,
+        pathguard::ProviderJavaFilePathV1* output) {
+    const jsize length = env->GetStringLength(value);
+    if (env->ExceptionCheck() || length <= 0
+        || static_cast<std::size_t>(length)
+            >= pathguard::kProviderJavaFilePathCapacityV1) {
+        env->ExceptionClear();
+        return false;
+    }
+    jchar utf16[pathguard::kProviderJavaFilePathCapacityV1]{};
+    env->GetStringRegion(value, 0, length, utf16);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return pathguard::EncodeProviderJavaFilePathUtf16(
+        utf16, static_cast<std::size_t>(length), output);
+}
+
+bool ReadProviderIdentifier(
+        JNIEnv* env, jobjectArray arguments,
+        const pathguard::ProviderJavaDispatchSpecV1& dispatch,
+        pathguard::ProviderJavaIdentifierV1* output,
+        pathguard::ProviderJavaFilePathV1* file_path) {
+    if (dispatch.identifier_kind
+        == pathguard::ProviderJavaIdentifierKind::kNone) return true;
+    jobject value = env->GetObjectArrayElement(
+        arguments, dispatch.identifier_argument_index);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    if (value == nullptr) return false;
+
+    jstring text = nullptr;
+    if (dispatch.identifier_kind == pathguard::ProviderJavaIdentifierKind::kFilePath
+        && IsJavaInstance(env, value, "java/io/File")) {
+        jclass file_class = env->FindClass("java/io/File");
+        const jmethodID get_path = file_class == nullptr ? nullptr
+            : env->GetMethodID(file_class, "getPath", "()Ljava/lang/String;");
+        if (get_path != nullptr && !env->ExceptionCheck()) {
+            text = static_cast<jstring>(
+                env->CallObjectMethod(value, get_path));
+        }
+        env->DeleteLocalRef(file_class);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            text = nullptr;
+        }
+        if (text != nullptr
+            && !IsJavaInstance(env, text, "java/lang/String")) {
+            env->DeleteLocalRef(text);
+            text = nullptr;
+        }
+    } else if (dispatch.identifier_kind
+               == pathguard::ProviderJavaIdentifierKind::kDocumentId) {
+        if (IsJavaInstance(env, value, "java/lang/String")) {
+            text = static_cast<jstring>(value);
+        }
+    } else if (dispatch.identifier_kind
+               == pathguard::ProviderJavaIdentifierKind::kContentUri
+               && IsJavaInstance(env, value, "android/net/Uri")) {
+        jclass uri_class = env->FindClass("android/net/Uri");
+        const jmethodID to_string = uri_class == nullptr ? nullptr
+            : env->GetMethodID(uri_class, "toString", "()Ljava/lang/String;");
+        if (to_string != nullptr && !env->ExceptionCheck()) {
+            text = static_cast<jstring>(
+                env->CallObjectMethod(value, to_string));
+        }
+        env->DeleteLocalRef(uri_class);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            text = nullptr;
+        }
+        if (text != nullptr
+            && !IsJavaInstance(env, text, "java/lang/String")) {
+            env->DeleteLocalRef(text);
+            text = nullptr;
+        }
+    }
+
+    const bool borrowed = text == value;
+    const bool valid = text != nullptr && (dispatch.identifier_kind
+        == pathguard::ProviderJavaIdentifierKind::kFilePath
+            ? ReadJavaFilePathString(env, text, file_path)
+            : ReadJavaIdentifierString(env, text, dispatch.identifier_kind, output));
+    if (!borrowed) env->DeleteLocalRef(text);
+    env->DeleteLocalRef(value);
+    return valid;
+}
+
+jobject DispatchProviderRequest(
+        JNIEnv*, const pathguard::ProviderJavaDispatchRequestV1& request) {
+    // A validated request is available, but route/provenance wiring and Java
+    // result construction remain disabled until their contracts are complete.
+    const auto mapping_request = pathguard::BuildProviderMappingRequest(
+        request, {}, 0, nullptr, {}, false);
+    const auto decision = pathguard::EvaluateProviderMapping(mapping_request);
+    if (decision.disposition != pathguard::ProviderMappingDisposition::kPass) {
+        return nullptr;
+    }
+    return nullptr;
+}
+
+jobject NativeDispatch(
+        JNIEnv* env, jclass, jint method_id, jobjectArray arguments) {
+    // The native seam is deliberately pass-through until a validated route
+    // binding and provenance response are available for this callback.
+    if (method_id < 0 || arguments == nullptr) return nullptr;
+    const auto* dispatch = pathguard::ProviderJavaDispatchSpec(
+        static_cast<pathguard::ProviderJavaMethodId>(method_id));
+    if (dispatch == nullptr) return nullptr;
+    const jsize argument_count = env->GetArrayLength(arguments);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return nullptr;
+    }
+    if (argument_count
+        != static_cast<jsize>(dispatch->callback_argument_count)) return nullptr;
+    pathguard::ProviderJavaIdentifierV1 identifier;
+    pathguard::ProviderJavaFilePathV1 file_path;
+    if (!ReadProviderIdentifier(
+            env, arguments, *dispatch, &identifier, &file_path)) {
+        return nullptr;
+    }
+    pathguard::OperationMask operations = dispatch->minimum_operations;
+    bool dynamic_operations_ready = !dispatch->arguments_determine_operation;
+    switch (dispatch->dynamic_kind) {
+        case pathguard::ProviderJavaDynamicKind::kOpenMode:
+            operations = ReadOpenMode(
+                env, arguments, dispatch->dynamic_argument_index);
+            dynamic_operations_ready = operations != 0;
+            break;
+        case pathguard::ProviderJavaDynamicKind::kContentValues:
+            operations = ReadContentValuesOperations(
+                env, arguments, dispatch->dynamic_argument_index);
+            dynamic_operations_ready = operations != 0;
+            break;
+        case pathguard::ProviderJavaDynamicKind::kDeleteTarget:
+            dynamic_operations_ready = false;
+            break;
+        case pathguard::ProviderJavaDynamicKind::kNone:
+            break;
+    }
+    const auto request = pathguard::BuildProviderJavaDispatchRequest(
+        *dispatch, operations, dynamic_operations_ready, identifier, file_path);
+    if (!request.ready()) return nullptr;
+    return DispatchProviderRequest(env, request.request);
+}
+
+bool RegisterHookerNatives(JNIEnv* env) {
+    static const JNINativeMethod methods[] = {
+        {
+            const_cast<char*>("nativeDispatch"),
+            const_cast<char*>("(I[Ljava/lang/Object;)Ljava/lang/Object;"),
+            reinterpret_cast<void*>(NativeDispatch),
+        },
+    };
+    return env->RegisterNatives(
+        g_state.hooker_class, methods,
+        static_cast<jint>(sizeof(methods) / sizeof(methods[0]))) == JNI_OK;
+}
 
 void ClearException(JNIEnv* env, const char* operation) {
     if (!env->ExceptionCheck()) return;
@@ -180,6 +471,13 @@ bool LoadHookerDex(JNIEnv* env, const std::uint8_t* dex, std::size_t dex_size) {
         g_state.hooker_class =
             static_cast<jclass>(env->NewGlobalRef(hooker));
     }
+    if (g_state.hooker_class != nullptr && !RegisterHookerNatives(env)) {
+        PG_LOGE("register Provider Hooker natives failed");
+        env->DeleteGlobalRef(g_state.hooker_class);
+        env->DeleteGlobalRef(g_state.hooker_class_loader);
+        g_state.hooker_class = nullptr;
+        g_state.hooker_class_loader = nullptr;
+    }
     env->DeleteLocalRef(hooker);
     env->DeleteLocalRef(hooker_name);
     env->DeleteLocalRef(class_loader_class);
@@ -187,8 +485,21 @@ bool LoadHookerDex(JNIEnv* env, const std::uint8_t* dex, std::size_t dex_size) {
     env->DeleteLocalRef(loader_class);
     env->DeleteLocalRef(parent);
     env->DeleteLocalRef(buffer);
-    return g_state.hooker_class != nullptr
-        && g_state.hooker_class_loader != nullptr;
+    if (g_state.hooker_class == nullptr
+        || g_state.hooker_class_loader == nullptr) return false;
+    const jmethodID install_dispatcher = env->GetStaticMethodID(
+        g_state.hooker_class, "installNativeDispatcher", "()V");
+    if (install_dispatcher == nullptr) {
+        ClearException(env, "resolve native dispatcher installer");
+        return false;
+    }
+    env->CallStaticVoidMethod(g_state.hooker_class, install_dispatcher);
+    if (env->ExceptionCheck()) {
+        ClearException(env, "install native dispatcher");
+        return false;
+    }
+    PG_LOGI("Provider native dispatcher installed as pass-through");
+    return true;
 }
 
 template <std::size_t Size>

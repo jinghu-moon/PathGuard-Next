@@ -55,6 +55,22 @@ pathguard::ProviderMappingRequestV1 CompleteRequest(
     return request;
 }
 
+pathguard::ProviderJavaDispatchRequestV1 JavaRequest(
+        pathguard::ProviderJavaDispatchRole role,
+        pathguard::OperationMask operations,
+        pathguard::ProviderJavaIdentifierKind kind,
+        std::string_view identifier) {
+    pathguard::ProviderJavaDispatchRequestV1 request;
+    request.role = role;
+    request.operations = operations;
+    request.identifier.kind = kind;
+    request.identifier.size = static_cast<std::uint16_t>(identifier.size());
+    for (std::size_t index = 0; index < identifier.size(); ++index) {
+        request.identifier.bytes[index] = identifier[index];
+    }
+    return request;
+}
+
 }  // namespace
 
 int main() {
@@ -166,5 +182,56 @@ int main() {
     decision = EvaluateProviderMapping(request);
     assert(decision.disposition == ProviderMappingDisposition::kUnsupported);
     assert(decision.reason == ProviderMappingReason::kInvalidOperation);
+
+    auto java_request = JavaRequest(
+        ProviderJavaDispatchRole::kQuery, kOperationProviderQuery,
+        ProviderJavaIdentifierKind::kContentUri, binding.provider_uri);
+    assert(ProviderJavaDispatchMappingOperation(java_request)
+           == ProviderMappingOperation::kQuery);
+    assert(ProviderJavaDispatchMatchesBinding(java_request, binding));
+    request = BuildProviderMappingRequest(
+        java_request,
+        {0x616c696f74682d6d, ProviderAdapterProfileReason::kMatched},
+        kProviderCompositeOperationsV1, &binding,
+        CompleteRequest(&binding).reverse, true);
+    decision = EvaluateProviderMapping(request);
+    assert(decision.rewrite());
+
+    java_request.identifier.bytes[10] = 'x';
+    request = BuildProviderMappingRequest(
+        java_request,
+        {0x616c696f74682d6d, ProviderAdapterProfileReason::kMatched},
+        kProviderCompositeOperationsV1, &binding,
+        CompleteRequest(&binding).reverse, true);
+    assert(request.binding == nullptr);
+    decision = EvaluateProviderMapping(request);
+    assert(decision.disposition == ProviderMappingDisposition::kPass);
+
+    java_request = JavaRequest(
+        ProviderJavaDispatchRole::kQuery,
+        kOperationProviderQuery | kOperationDirectoryIterate,
+        ProviderJavaIdentifierKind::kDocumentId,
+        binding.stable_document_id);
+    assert(ProviderJavaDispatchMappingOperation(java_request)
+           == ProviderMappingOperation::kDirectoryQuery);
+    assert(ProviderMappingOperationMask(ProviderMappingOperation::kDirectoryQuery)
+           == (kOperationProviderQuery | kOperationDirectoryIterate));
+
+    java_request.role = ProviderJavaDispatchRole::kOpen;
+    java_request.operations = kOperationOpenRead | kOperationOpenWrite;
+    assert(ProviderJavaDispatchMappingOperation(java_request)
+           == ProviderMappingOperation::kOpenReadWrite);
+    assert(ProviderMappingOperationMask(ProviderMappingOperation::kOpenReadWrite)
+           == (kOperationOpenRead | kOperationOpenWrite));
+
+    java_request.role = ProviderJavaDispatchRole::kUpdate;
+    java_request.operations = kOperationMetadataMutation | kOperationRename;
+    assert(ProviderJavaDispatchMappingOperation(java_request)
+           == ProviderMappingOperation::kMetadataRename);
+
+    java_request.role = ProviderJavaDispatchRole::kDelete;
+    java_request.operations = kOperationUnlink;
+    assert(ProviderJavaDispatchMappingOperation(java_request)
+           == ProviderMappingOperation::kDeleteFile);
     return 0;
 }

@@ -46,6 +46,15 @@ public final class ProviderHooker {
         dispatcher = null;
     }
 
+    public static void installNativeDispatcher() {
+        dispatcher = (methodId, args) -> {
+            nativeDispatch(methodId, args);
+            return DispatchResult.pass();
+        };
+    }
+
+    private static native Object nativeDispatch(int methodId, Object[] args);
+
     public ProviderHooker(int methodId, Method target) {
         this.methodId = methodId;
         Method checkedTarget = Objects.requireNonNull(target, "target");

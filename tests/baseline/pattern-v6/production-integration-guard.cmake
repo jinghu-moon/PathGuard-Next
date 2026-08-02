@@ -128,6 +128,25 @@ foreach(contract IN ITEMS
     message(FATAL_ERROR "LSPlant Hooker target semantics miss ${contract}")
   endif()
 endforeach()
+foreach(contract IN ITEMS
+    "installNativeDispatcher"
+    "nativeDispatch"
+    "RegisterHookerNatives"
+    "ProviderJavaDispatchSpec"
+    "ReadProviderIdentifier"
+    "ReadJavaFilePathString"
+    "EncodeProviderJavaIdentifierUtf16"
+    "EncodeProviderJavaFilePathUtf16"
+    "BuildProviderJavaDispatchRequest"
+    "DispatchProviderRequest"
+    "BuildProviderMappingRequest"
+    "EvaluateProviderMapping"
+    "Provider native dispatcher installed as pass-through")
+  if(NOT lsplant_hooker MATCHES "${contract}" AND
+     NOT lsplant_bridge MATCHES "${contract}")
+    message(FATAL_ERROR "native Provider dispatcher contract misses ${contract}")
+  endif()
+endforeach()
 string(FIND "${lsplant_hooker}" "ProviderHooker(int methodId, Method target)" hooker_target_at)
 if(hooker_target_at EQUAL -1)
   message(FATAL_ERROR "LSPlant Hooker must capture target Method before hooking")

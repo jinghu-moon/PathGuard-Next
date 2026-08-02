@@ -117,7 +117,7 @@ bool EncodeRecord(const RouteRecord& record, std::vector<std::uint8_t>* out) {
 
 bool DecodeRecord(const std::uint8_t* data, std::size_t size, RouteRecord* record) {
     Reader reader(data, size); std::uint32_t uid = 0; std::uint8_t kind = 0;
-    std::uint8_t object_type = 0; std::uint32_t reserved = 0;
+    std::uint8_t object_type = 0;
     if (!reader.U32(&uid) || !reader.U32(&record->scope.user_id)
         || !reader.U64(&record->scope.identity_epoch)
         || !reader.String(&record->scope.trusted_attribution)

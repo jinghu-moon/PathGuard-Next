@@ -6,18 +6,29 @@ OperationMask ProviderMappingOperationMask(
         ProviderMappingOperation operation) noexcept {
     switch (operation) {
         case ProviderMappingOperation::kQuery:
-        case ProviderMappingOperation::kDirectoryQuery:
             return kOperationProviderQuery;
+        case ProviderMappingOperation::kDirectoryQuery:
+            return kOperationProviderQuery | kOperationDirectoryIterate;
         case ProviderMappingOperation::kCreate:
             return kOperationProviderInsert | kOperationCreate;
         case ProviderMappingOperation::kOpenRead:
             return kOperationOpenRead;
         case ProviderMappingOperation::kOpenWrite:
             return kOperationOpenWrite;
+        case ProviderMappingOperation::kOpenReadWrite:
+            return kOperationOpenRead | kOperationOpenWrite;
+        case ProviderMappingOperation::kMetadataMutation:
+            return kOperationMetadataMutation;
+        case ProviderMappingOperation::kMetadataRename:
+            return kOperationMetadataMutation | kOperationRename;
         case ProviderMappingOperation::kRename:
             return kOperationRename;
         case ProviderMappingOperation::kDelete:
             return kOperationUnlink | kOperationRmdir;
+        case ProviderMappingOperation::kDeleteFile:
+            return kOperationUnlink;
+        case ProviderMappingOperation::kDeleteDirectory:
+            return kOperationRmdir;
         case ProviderMappingOperation::kMediaScan:
             return kOperationMediaScan | kOperationReverseMapping;
         case ProviderMappingOperation::kReverseLookup:
@@ -89,6 +100,96 @@ ProviderMappingDecisionV1 EvaluateProviderMapping(
 
     output.disposition = ProviderMappingDisposition::kRewrite;
     output.reason = ProviderMappingReason::kReady;
+    return output;
+}
+
+ProviderMappingOperation ProviderJavaDispatchMappingOperation(
+        const ProviderJavaDispatchRequestV1& request) noexcept {
+    if (request.version != kProviderJavaDispatchRequestVersionV1) {
+        return ProviderMappingOperation::kUnknown;
+    }
+    switch (request.role) {
+        case ProviderJavaDispatchRole::kForwardDocumentPath:
+        case ProviderJavaDispatchRole::kQuery:
+            return (request.operations & kOperationDirectoryIterate) != 0
+                ? ProviderMappingOperation::kDirectoryQuery
+                : ProviderMappingOperation::kQuery;
+        case ProviderJavaDispatchRole::kReverseDocumentId:
+            return ProviderMappingOperation::kReverseLookup;
+        case ProviderJavaDispatchRole::kInsert:
+            return ProviderMappingOperation::kCreate;
+        case ProviderJavaDispatchRole::kOpen: {
+            const OperationMask open = request.operations
+                & (kOperationOpenRead | kOperationOpenWrite);
+            if (open == (kOperationOpenRead | kOperationOpenWrite)) {
+                return ProviderMappingOperation::kOpenReadWrite;
+            }
+            return open == kOperationOpenRead
+                ? ProviderMappingOperation::kOpenRead
+                : open == kOperationOpenWrite
+                    ? ProviderMappingOperation::kOpenWrite
+                    : ProviderMappingOperation::kUnknown;
+        }
+        case ProviderJavaDispatchRole::kUpdate: {
+            const OperationMask update = request.operations
+                & (kOperationMetadataMutation | kOperationRename);
+            if (update == (kOperationMetadataMutation | kOperationRename)) {
+                return ProviderMappingOperation::kMetadataRename;
+            }
+            return update == kOperationMetadataMutation
+                ? ProviderMappingOperation::kMetadataMutation
+                : update == kOperationRename
+                    ? ProviderMappingOperation::kRename
+                    : ProviderMappingOperation::kUnknown;
+        }
+        case ProviderJavaDispatchRole::kDelete: {
+            const OperationMask removal = request.operations
+                & (kOperationUnlink | kOperationRmdir);
+            if (removal == (kOperationUnlink | kOperationRmdir)) {
+                return ProviderMappingOperation::kDelete;
+            }
+            return removal == kOperationUnlink
+                ? ProviderMappingOperation::kDeleteFile
+                : removal == kOperationRmdir
+                    ? ProviderMappingOperation::kDeleteDirectory
+                    : ProviderMappingOperation::kUnknown;
+        }
+    }
+    return ProviderMappingOperation::kUnknown;
+}
+
+bool ProviderJavaDispatchMatchesBinding(
+        const ProviderJavaDispatchRequestV1& request,
+        const ProviderRouteBindingV1& binding) noexcept {
+    switch (request.identifier.kind) {
+        case ProviderJavaIdentifierKind::kContentUri:
+            return request.identifier.value() == binding.provider_uri;
+        case ProviderJavaIdentifierKind::kDocumentId:
+            return request.identifier.value() == binding.stable_document_id;
+        case ProviderJavaIdentifierKind::kFilePath:
+        case ProviderJavaIdentifierKind::kNone:
+            break;
+    }
+    return !request.file_path.value().empty()
+        && request.file_path.value() == binding.backing_target_path;
+}
+
+ProviderMappingRequestV1 BuildProviderMappingRequest(
+        const ProviderJavaDispatchRequestV1& request,
+        const ProviderAdapterProfileMatchV1& profile_match,
+        OperationMask supported_operations,
+        const ProviderRouteBindingV1* binding,
+        const provenance::ResolveResult& reverse,
+        bool runtime_available) noexcept {
+    ProviderMappingRequestV1 output;
+    output.operation = ProviderJavaDispatchMappingOperation(request);
+    output.profile_match = profile_match;
+    output.supported_operations = supported_operations;
+    output.binding = binding != nullptr
+            && ProviderJavaDispatchMatchesBinding(request, *binding)
+        ? binding : nullptr;
+    output.reverse = reverse;
+    output.runtime_available = runtime_available;
     return output;
 }
 
