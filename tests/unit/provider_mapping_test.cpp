@@ -111,6 +111,7 @@ int main() {
     binding.fd_identity.handle.clear();
     binding.reverse_record.identity = binding.fd_identity;
     request = CompleteRequest(&binding);
+    request.operation = ProviderMappingOperation::kReverseLookup;
     decision = EvaluateProviderMapping(request);
     assert(decision.disposition == ProviderMappingDisposition::kFailOpen);
     assert(decision.binding_reason
@@ -119,6 +120,7 @@ int main() {
     binding = CompleteBinding();
     binding.reverse_record.logical_source_path = binding.backing_target_path;
     request = CompleteRequest(&binding);
+    request.operation = ProviderMappingOperation::kReverseLookup;
     decision = EvaluateProviderMapping(request);
     assert(decision.disposition == ProviderMappingDisposition::kFailOpen);
     assert(decision.binding_reason
@@ -131,6 +133,7 @@ int main() {
         provenance::Error::kIdentityMismatch,
         std::nullopt,
     };
+    request.operation = ProviderMappingOperation::kReverseLookup;
     decision = EvaluateProviderMapping(request);
     assert(decision.disposition
            == ProviderMappingDisposition::kAmbiguousReverse);
@@ -138,6 +141,11 @@ int main() {
 
     request = CompleteRequest(&binding);
     request.reverse = {};
+    decision = EvaluateProviderMapping(request);
+    assert(decision.rewrite());
+    assert(decision.reason == ProviderMappingReason::kReady);
+
+    request.operation = ProviderMappingOperation::kReverseLookup;
     decision = EvaluateProviderMapping(request);
     assert(decision.disposition == ProviderMappingDisposition::kUnsupported);
     assert(decision.reason == ProviderMappingReason::kReverseMissing);
@@ -172,6 +180,7 @@ int main() {
     auto conflicting = binding.reverse_record;
     conflicting.commit_sequence = 2;
     request.reverse.record = conflicting;
+    request.operation = ProviderMappingOperation::kReverseLookup;
     decision = EvaluateProviderMapping(request);
     assert(decision.disposition
            == ProviderMappingDisposition::kAmbiguousReverse);
@@ -182,6 +191,42 @@ int main() {
     decision = EvaluateProviderMapping(request);
     assert(decision.disposition == ProviderMappingDisposition::kUnsupported);
     assert(decision.reason == ProviderMappingReason::kInvalidOperation);
+
+    request = CompleteRequest(&binding);
+    request.operation = ProviderMappingOperation::kOpenRead;
+    request.reverse = {};
+    decision = EvaluateProviderMapping(request);
+    assert(decision.rewrite());
+
+    constexpr ProviderMappingOperation forward_operations[] = {
+        ProviderMappingOperation::kQuery,
+        ProviderMappingOperation::kDirectoryQuery,
+        ProviderMappingOperation::kCreate,
+        ProviderMappingOperation::kOpenRead,
+        ProviderMappingOperation::kOpenWrite,
+        ProviderMappingOperation::kOpenReadWrite,
+        ProviderMappingOperation::kMetadataMutation,
+        ProviderMappingOperation::kMetadataRename,
+        ProviderMappingOperation::kRename,
+        ProviderMappingOperation::kDelete,
+        ProviderMappingOperation::kDeleteFile,
+        ProviderMappingOperation::kDeleteDirectory,
+    };
+    for (const auto operation : forward_operations) {
+        request = CompleteRequest(&binding);
+        request.operation = operation;
+        request.reverse = {};
+        decision = EvaluateProviderMapping(request);
+        assert(decision.rewrite());
+    }
+
+    request.operation = ProviderMappingOperation::kReverseLookup;
+    request.reverse = CompleteRequest(&binding).reverse;
+    binding.provider_uri.clear();
+    decision = EvaluateProviderMapping(request);
+    assert(decision.rewrite());
+
+    binding = CompleteBinding();
 
     auto java_request = JavaRequest(
         ProviderJavaDispatchRole::kQuery, kOperationProviderQuery,

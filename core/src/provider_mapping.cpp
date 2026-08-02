@@ -2,6 +2,54 @@
 
 namespace pathguard {
 
+namespace {
+
+ProviderRouteBindingObservationV1 ValidateMappingBinding(
+        ProviderMappingOperation operation,
+        const ProviderRouteBindingV1& binding) noexcept {
+    if (!binding.context.valid()) {
+        return {ProviderRouteBindingReason::kInvalidContext};
+    }
+    if (!ValidProviderAbsolutePath(binding.visible_source_path)
+        || !ValidProviderAbsolutePath(binding.backing_target_path)
+        || binding.visible_source_path == binding.backing_target_path
+        || !TargetMatchesRouteKey(binding.backing_target_path,
+                                  binding.reverse_record.key)) {
+        return {ProviderRouteBindingReason::kInvalidPathMapping};
+    }
+    if (operation != ProviderMappingOperation::kReverseLookup
+        && binding.provider_uri.compare(0, 10, "content://") != 0) {
+        return {ProviderRouteBindingReason::kExternalIdentityMissing};
+    }
+    if (binding.stable_document_id.empty()) {
+        return {ProviderRouteBindingReason::kExternalIdentityMissing};
+    }
+    if (operation != ProviderMappingOperation::kReverseLookup) {
+        return {ProviderRouteBindingReason::kReady};
+    }
+    if (!binding.fd_identity.Strong()) {
+        return {ProviderRouteBindingReason::kWeakFdIdentity};
+    }
+    const provenance::RouteRecord& reverse = binding.reverse_record;
+    if (reverse.scope.caller_uid != binding.context.caller_uid
+        || reverse.scope.user_id != binding.context.user_id
+        || reverse.identity != binding.fd_identity
+        || reverse.logical_source_path != binding.visible_source_path
+        || reverse.rule_id != binding.context.rule_id
+        || reverse.created_plan_generation != binding.context.plan_generation
+        || reverse.bound_plan_generation != binding.context.plan_generation
+        || reverse.commit_sequence == 0) {
+        return {ProviderRouteBindingReason::kReverseMismatch};
+    }
+    return {ProviderRouteBindingReason::kReady};
+}
+
+bool RequiresCommittedReverse(ProviderMappingOperation operation) noexcept {
+    return operation == ProviderMappingOperation::kReverseLookup;
+}
+
+}  // namespace
+
 OperationMask ProviderMappingOperationMask(
         ProviderMappingOperation operation) noexcept {
     switch (operation) {
@@ -69,11 +117,17 @@ ProviderMappingDecisionV1 EvaluateProviderMapping(
         return output;
     }
 
-    const auto binding = ValidateProviderRouteBinding(*request.binding);
+    const auto binding = ValidateMappingBinding(
+        request.operation, *request.binding);
     output.binding_reason = binding.reason;
     if (!binding.ready()) {
         output.disposition = ProviderMappingDisposition::kFailOpen;
         output.reason = ProviderMappingReason::kBindingInvalid;
+        return output;
+    }
+    if (!RequiresCommittedReverse(request.operation)) {
+        output.disposition = ProviderMappingDisposition::kRewrite;
+        output.reason = ProviderMappingReason::kReady;
         return output;
     }
     if (request.reverse.status == provenance::ResolveStatus::kAmbiguous) {
