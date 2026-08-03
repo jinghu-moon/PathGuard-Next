@@ -6,21 +6,28 @@
 #include <xdl.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <linux/stat.h>
+#include <sys/syscall.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <string_view>
 
 #include "lsplant.hpp"
 #include "pathguard/provider_lsplant_bridge.h"
 #include "pathguard/provider_mapping.h"
+#include "pathguard/provider_route_snapshot_registry.h"
 
 namespace {
 
@@ -56,6 +63,8 @@ struct HookState {
     jobject hooker_class_loader = nullptr;
     jobject target_class_loader = nullptr;
     jclass hooker_class = nullptr;
+    jclass dispatch_result_class = nullptr;
+    jmethodID dispatch_result_rewrite = nullptr;
     PathGuardLsplantBridgeResultV1 final_result{};
     std::array<jobject, pathguard::kProviderJavaMethodCountV1> targets{};
     std::array<jobject, pathguard::kProviderJavaMethodCountV1> hookers{};
@@ -64,12 +73,144 @@ struct HookState {
 HookState g_state;
 PathGuardLsplantMappingResolverV1 g_mapping_resolver = nullptr;
 void* g_mapping_user_data = nullptr;
+PathGuardLsplantExternalIdentitySinkV1 g_external_identity_sink = nullptr;
+void* g_external_identity_user_data = nullptr;
+
+struct ProviderRegistrySnapshot {
+    explicit ProviderRegistrySnapshot(
+            std::unique_ptr<pathguard::ProviderRouteSnapshotRegistryV1> value)
+        : registry(std::move(value)) {}
+    std::unique_ptr<pathguard::ProviderRouteSnapshotRegistryV1> registry;
+};
+
+class ProviderRegistryDomain {
+public:
+    class Guard {
+    public:
+        Guard() = default;
+        Guard(const Guard&) = delete;
+        Guard& operator=(const Guard&) = delete;
+        ~Guard() { Reset(); }
+        explicit operator bool() const noexcept { return snapshot_ != nullptr; }
+        const ProviderRegistrySnapshot* operator->() const noexcept {
+            return snapshot_;
+        }
+    private:
+        friend class ProviderRegistryDomain;
+        void Reset() noexcept {
+            if (domain_ != nullptr && slot_ < kSlots) {
+                domain_->hazards_[slot_].store(nullptr);
+                domain_->owners_[slot_].store(nullptr);
+            }
+            domain_ = nullptr;
+            snapshot_ = nullptr;
+            slot_ = kSlots;
+        }
+        ProviderRegistryDomain* domain_ = nullptr;
+        ProviderRegistrySnapshot* snapshot_ = nullptr;
+        std::size_t slot_ = kSlots;
+    };
+
+    bool Acquire(Guard* guard) noexcept {
+        if (guard == nullptr) return false;
+        guard->Reset();
+        std::size_t slot = kSlots;
+        for (std::size_t index = 0; index < kSlots; ++index) {
+            void* expected = nullptr;
+            if (owners_[index].compare_exchange_strong(expected, guard)) {
+                slot = index;
+                break;
+            }
+        }
+        if (slot == kSlots) return false;
+        guard->domain_ = this;
+        guard->slot_ = slot;
+        for (;;) {
+            ProviderRegistrySnapshot* candidate = active_.load();
+            hazards_[slot].store(candidate);
+            if (active_.load() == candidate) {
+                guard->snapshot_ = candidate;
+                return candidate != nullptr;
+            }
+            hazards_[slot].store(nullptr);
+        }
+    }
+
+    bool Publish(ProviderRegistrySnapshot* candidate) noexcept {
+        if (candidate == nullptr || writer_.test_and_set()) return false;
+        Reclaim();
+        if (retired_count_ >= kRetired) {
+            writer_.clear();
+            return false;
+        }
+        ProviderRegistrySnapshot* previous = active_.exchange(candidate);
+        if (previous != nullptr) retired_[retired_count_++] = previous;
+        Reclaim();
+        writer_.clear();
+        return true;
+    }
+
+private:
+    void Reclaim() noexcept {
+        bool reader_entering = false;
+        for (std::size_t slot = 0; slot < kSlots; ++slot) {
+            if (owners_[slot].load() != nullptr
+                && hazards_[slot].load() == nullptr) {
+                reader_entering = true;
+                break;
+            }
+        }
+        if (reader_entering) return;
+        std::size_t kept = 0;
+        for (std::size_t index = 0; index < retired_count_; ++index) {
+            bool hazardous = false;
+            for (std::size_t slot = 0; slot < kSlots; ++slot) {
+                hazardous = hazardous
+                    || hazards_[slot].load() == retired_[index];
+            }
+            if (hazardous) {
+                retired_[kept++] = retired_[index];
+            } else {
+                delete retired_[index];
+            }
+        }
+        retired_count_ = kept;
+    }
+
+    static constexpr std::size_t kSlots = 256;
+    static constexpr std::size_t kRetired = 8;
+    std::array<std::atomic<void*>, kSlots> owners_{};
+    std::array<std::atomic<ProviderRegistrySnapshot*>, kSlots> hazards_{};
+    std::atomic<ProviderRegistrySnapshot*> active_{nullptr};
+    std::atomic_flag writer_ = ATOMIC_FLAG_INIT;
+    std::array<ProviderRegistrySnapshot*, kRetired> retired_{};
+    std::size_t retired_count_ = 0;
+};
+
+ProviderRegistryDomain g_mapping_registry_domain;
+
+int PublishMappingSnapshot(
+        const PathGuardProviderRouteSnapshotV1* snapshot) noexcept {
+    if (snapshot == nullptr) return EINVAL;
+    auto registry = pathguard::DecodeProviderRouteSnapshotV1(*snapshot);
+    if (registry == nullptr) return EINVAL;
+    auto* publication = new (std::nothrow) ProviderRegistrySnapshot(
+        std::move(registry));
+    if (publication == nullptr) return ENOMEM;
+    if (!g_mapping_registry_domain.Publish(publication)) {
+        delete publication;
+        return EBUSY;
+    }
+    return 0;
+}
 
 bool ResolveMappingRuntimeFacts(
         const pathguard::ProviderJavaDispatchRequestV1& request,
         pathguard::ProviderMappingRuntimeFactsV1* facts,
+        ProviderRegistryDomain::Guard* registry_guard,
         void* user_data) noexcept {
     if (g_mapping_resolver == nullptr || facts == nullptr
+        || registry_guard == nullptr
         || request.identifier.size
             >= PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_CAPACITY
         || request.file_path.size
@@ -100,14 +241,38 @@ bool ResolveMappingRuntimeFacts(
         || abi_facts.size != sizeof(abi_facts)
         || abi_facts.profile_matched > 1
         || abi_facts.runtime_available > 1
-        || abi_facts.binding_state != PATHGUARD_LSPLANT_MAPPING_BINDING_NONE
-        || abi_facts.snapshot_generation != 0
-        || abi_facts.binding_id != 0
-        || abi_facts.reverse_record_id != 0
+        || abi_facts.binding_state > PATHGUARD_LSPLANT_MAPPING_BINDING_SNAPSHOT
         || (abi_facts.supported_operations
             & ~pathguard::kProviderCompositeOperationsV1) != 0
         || (abi_facts.profile_matched != 0 && abi_facts.profile_id == 0)) {
         return false;
+    }
+    if (abi_facts.binding_state == PATHGUARD_LSPLANT_MAPPING_BINDING_NONE) {
+        if (abi_facts.snapshot_generation != 0 || abi_facts.binding_id != 0
+            || abi_facts.reverse_record_id != 0) {
+            return false;
+        }
+    } else {
+        if (!g_mapping_registry_domain.Acquire(registry_guard)
+            || (*registry_guard)->registry == nullptr) {
+            return false;
+        }
+        const auto lookup = (*registry_guard)->registry->Lookup(
+            abi_facts.snapshot_generation, abi_facts.binding_id,
+            abi_facts.reverse_record_id);
+        if (!lookup.resolved()) return false;
+        if (lookup.binding->reverse_mode
+                == pathguard::ProviderRouteReverseMode::kStaticUnique) {
+            if (!pathguard::MaterializeStaticProviderRouteBinding(
+                    request, *lookup.binding,
+                    &facts->materialized_binding)) {
+                return false;
+            }
+            facts->binding = &facts->materialized_binding;
+        } else {
+            facts->binding = lookup.binding;
+        }
+        if (lookup.reverse != nullptr) facts->reverse = *lookup.reverse;
     }
     facts->profile_match = {
         abi_facts.profile_id,
@@ -121,6 +286,7 @@ bool ResolveMappingRuntimeFacts(
 }
 
 bool IsJavaInstance(JNIEnv* env, jobject value, const char* class_name);
+void ClearException(JNIEnv* env, const char* operation);
 
 const char* ProviderJavaResultClassName(
         pathguard::ProviderJavaResultKind kind) noexcept {
@@ -201,8 +367,65 @@ pathguard::OperationMask ReadOpenMode(
         std::string_view(ascii, static_cast<std::size_t>(length)));
 }
 
+bool ReadContentValuesText(
+        JNIEnv* env, jobject values, jmethodID get_as_string,
+        const char* key, pathguard::ProviderJavaFilePathV1* output) {
+    if (env == nullptr || values == nullptr || get_as_string == nullptr
+        || key == nullptr || output == nullptr) return false;
+    jstring java_key = env->NewStringUTF(key);
+    jstring text = java_key == nullptr ? nullptr : static_cast<jstring>(
+        env->CallObjectMethod(values, get_as_string, java_key));
+    env->DeleteLocalRef(java_key);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(text);
+        return false;
+    }
+    if (text == nullptr) return false;
+    const jsize length = env->GetStringLength(text);
+    if (env->ExceptionCheck() || length <= 0
+        || static_cast<std::size_t>(length)
+            >= pathguard::kProviderJavaFilePathCapacityV1) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(text);
+        return false;
+    }
+    jchar utf16[pathguard::kProviderJavaFilePathCapacityV1]{};
+    env->GetStringRegion(text, 0, length, utf16);
+    env->DeleteLocalRef(text);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return pathguard::EncodeProviderJavaUtf16ToBytes(
+        utf16, static_cast<std::size_t>(length), &output->bytes,
+        &output->size);
+}
+
+bool ValidProviderRelativePath(std::string_view value) {
+    if (value.empty() || value.front() == '/' || value.back() == '/') {
+        return false;
+    }
+    std::size_t start = 0;
+    while (start < value.size()) {
+        const std::size_t end = value.find('/', start);
+        const std::size_t count =
+            (end == std::string_view::npos ? value.size() : end) - start;
+        if (count == 0 || count > 255
+            || (count == 1 && value[start] == '.')
+            || (count == 2 && value[start] == '.'
+                && value[start + 1] == '.')) {
+            return false;
+        }
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    return true;
+}
+
 pathguard::OperationMask ReadContentValuesOperations(
-        JNIEnv* env, jobjectArray arguments, std::uint8_t argument_index) {
+        JNIEnv* env, jobjectArray arguments, std::uint8_t argument_index,
+        pathguard::ProviderJavaFilePathV1* file_path) {
     jobject values = env->GetObjectArrayElement(arguments, argument_index);
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
@@ -219,9 +442,13 @@ pathguard::OperationMask ReadContentValuesOperations(
     const jmethodID contains_key = values_class == nullptr ? nullptr
         : env->GetMethodID(
             values_class, "containsKey", "(Ljava/lang/String;)Z");
+    const jmethodID get_as_string = values_class == nullptr ? nullptr
+        : env->GetMethodID(
+            values_class, "getAsString", "(Ljava/lang/String;)Ljava/lang/String;");
     jstring display_name = env->NewStringUTF("_display_name");
     if (env->ExceptionCheck() || size_method == nullptr
-        || contains_key == nullptr || display_name == nullptr) {
+        || contains_key == nullptr || get_as_string == nullptr
+        || display_name == nullptr) {
         env->ExceptionClear();
         env->DeleteLocalRef(display_name);
         env->DeleteLocalRef(values_class);
@@ -233,6 +460,39 @@ pathguard::OperationMask ReadContentValuesOperations(
         : env->CallBooleanMethod(values, contains_key, display_name);
     const bool failed = env->ExceptionCheck();
     if (failed) env->ExceptionClear();
+    if (!failed && file_path != nullptr) {
+        pathguard::ProviderJavaFilePathV1 data_path;
+        if (ReadContentValuesText(
+                env, values, get_as_string, "_data", &data_path)
+            && pathguard::ValidProviderJavaFilePath(data_path.value())) {
+            *file_path = data_path;
+        } else {
+            pathguard::ProviderJavaFilePathV1 relative;
+            pathguard::ProviderJavaFilePathV1 name;
+            if (ReadContentValuesText(
+                    env, values, get_as_string, "relative_path", &relative)
+                && ReadContentValuesText(
+                    env, values, get_as_string, "_display_name", &name)) {
+                while (relative.size != 0
+                       && relative.bytes[relative.size - 1] == '/') {
+                    --relative.size;
+                }
+                const std::size_t combined =
+                    static_cast<std::size_t>(relative.size) + 1 + name.size;
+                if (combined < file_path->bytes.size()) {
+                    std::memcpy(file_path->bytes.data(), relative.bytes.data(),
+                                relative.size);
+                    file_path->bytes[relative.size] = '/';
+                    std::memcpy(file_path->bytes.data() + relative.size + 1,
+                                name.bytes.data(), name.size);
+                    file_path->size = static_cast<std::uint16_t>(combined);
+                    if (!ValidProviderRelativePath(file_path->value())) {
+                        *file_path = {};
+                    }
+                }
+            }
+        }
+    }
     env->DeleteLocalRef(display_name);
     env->DeleteLocalRef(values_class);
     env->DeleteLocalRef(values);
@@ -369,17 +629,654 @@ bool ReadProviderIdentifier(
     return valid;
 }
 
-jobject DispatchProviderRequest(
-        JNIEnv*, const pathguard::ProviderJavaDispatchRequestV1& request) {
-    // Resolver configuration is immutable after hook installation. A missing
-    // resolver intentionally keeps the callback on the Java backup path.
-    const auto decision = pathguard::EvaluateProviderMappingWithResolver(
-        request, g_mapping_resolver == nullptr ? nullptr : ResolveMappingRuntimeFacts,
-        g_mapping_user_data);
-    if (decision.disposition != pathguard::ProviderMappingDisposition::kPass) {
+bool ResolveProviderMappingDecision(
+        const pathguard::ProviderJavaDispatchRequestV1& request,
+        pathguard::ProviderMappingRuntimeFactsV1* facts,
+        pathguard::ProviderMappingDecisionV1* decision,
+        ProviderRegistryDomain::Guard* registry_guard) {
+    if (facts == nullptr || decision == nullptr || g_mapping_resolver == nullptr
+        || registry_guard == nullptr
+        || !ResolveMappingRuntimeFacts(
+            request, facts, registry_guard, g_mapping_user_data)) {
+        return false;
+    }
+    *decision = pathguard::EvaluateProviderMapping(
+        pathguard::BuildProviderMappingRequest(
+            request, facts->profile_match, facts->supported_operations,
+            facts->binding, facts->reverse, facts->runtime_available));
+    return true;
+}
+
+jobject MakeDispatchRewrite(JNIEnv* env, jobject value) {
+    if (env == nullptr || g_state.dispatch_result_class == nullptr
+        || g_state.dispatch_result_rewrite == nullptr) return nullptr;
+    jobject result = env->CallStaticObjectMethod(
+        g_state.dispatch_result_class, g_state.dispatch_result_rewrite, value);
+    if (env->ExceptionCheck()) {
+        ClearException(env, "create DispatchResult");
         return nullptr;
     }
+    return result;
+}
+
+void EmitInsertExternalIdentity(
+        JNIEnv* env, const pathguard::ProviderJavaDispatchRequestV1& request,
+        jobject original_result) {
+    if (env == nullptr || original_result == nullptr
+        || g_external_identity_sink == nullptr
+        || request.method_id
+            != pathguard::ProviderJavaMethodId::kMediaInsert
+        || request.file_path.size == 0
+        || !IsJavaInstance(env, original_result, "android/net/Uri")) {
+        return;
+    }
+    jclass uri_class = env->FindClass("android/net/Uri");
+    const jmethodID to_string = uri_class == nullptr ? nullptr
+        : env->GetMethodID(uri_class, "toString", "()Ljava/lang/String;");
+    jstring text = to_string == nullptr ? nullptr : static_cast<jstring>(
+        env->CallObjectMethod(original_result, to_string));
+    env->DeleteLocalRef(uri_class);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(text);
+        return;
+    }
+    pathguard::ProviderJavaIdentifierV1 identifier;
+    const bool valid = text != nullptr && ReadJavaIdentifierString(
+        env, text, pathguard::ProviderJavaIdentifierKind::kContentUri,
+        &identifier);
+    env->DeleteLocalRef(text);
+    if (!valid) return;
+
+    PathGuardLsplantExternalIdentityV1 event{};
+    event.version = PATHGUARD_LSPLANT_BRIDGE_API_VERSION;
+    event.size = sizeof(event);
+    event.identifier_kind =
+        PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_CONTENT_URI;
+    event.path_kind = request.file_path.bytes[0] == '/'
+        ? PATHGUARD_LSPLANT_EXTERNAL_PATH_ABSOLUTE
+        : PATHGUARD_LSPLANT_EXTERNAL_PATH_RELATIVE;
+    event.file_path_size = request.file_path.size;
+    event.identifier_size = identifier.size;
+    std::memcpy(event.file_path, request.file_path.bytes.data(),
+                request.file_path.size);
+    std::memcpy(event.identifier, identifier.bytes.data(), identifier.size);
+    g_external_identity_sink(&event, g_external_identity_user_data);
+}
+
+jobject MakeProviderReplacement(
+        JNIEnv* env, const pathguard::ProviderJavaDispatchRequestV1& request,
+        const pathguard::ProviderRouteBindingV1& binding) {
+    switch (request.result) {
+        case pathguard::ProviderJavaResultKind::kFile: {
+            jclass file_class = env->FindClass("java/io/File");
+            const jmethodID constructor = file_class == nullptr ? nullptr
+                : env->GetMethodID(file_class, "<init>",
+                                   "(Ljava/lang/String;)V");
+            jstring path = constructor == nullptr ? nullptr
+                : env->NewStringUTF(binding.backing_target_path.c_str());
+            jobject file = constructor == nullptr || path == nullptr
+                ? nullptr : env->NewObject(file_class, constructor, path);
+            env->DeleteLocalRef(path);
+            env->DeleteLocalRef(file_class);
+            if (env->ExceptionCheck()) {
+                ClearException(env, "create Provider File result");
+                env->DeleteLocalRef(file);
+                return nullptr;
+            }
+            return MakeDispatchRewrite(env, file);
+        }
+        case pathguard::ProviderJavaResultKind::kDocumentId: {
+            jstring document_id = env->NewStringUTF(
+                binding.stable_document_id.c_str());
+            if (document_id == nullptr || env->ExceptionCheck()) {
+                ClearException(env, "create Provider document ID result");
+                env->DeleteLocalRef(document_id);
+                return nullptr;
+            }
+            return MakeDispatchRewrite(env, document_id);
+        }
+        case pathguard::ProviderJavaResultKind::kUri: {
+            if (binding.provider_uri.empty()) return nullptr;
+            jclass uri_class = env->FindClass("android/net/Uri");
+            const jmethodID parse = uri_class == nullptr ? nullptr
+                : env->GetStaticMethodID(uri_class, "parse",
+                                         "(Ljava/lang/String;)Landroid/net/Uri;");
+            jstring text = parse == nullptr ? nullptr
+                : env->NewStringUTF(binding.provider_uri.c_str());
+            jobject uri = parse == nullptr || text == nullptr ? nullptr
+                : env->CallStaticObjectMethod(uri_class, parse, text);
+            env->DeleteLocalRef(text);
+            env->DeleteLocalRef(uri_class);
+            if (env->ExceptionCheck()) {
+                ClearException(env, "create Provider Uri result");
+                env->DeleteLocalRef(uri);
+                return nullptr;
+            }
+            return MakeDispatchRewrite(env, uri);
+        }
+        case pathguard::ProviderJavaResultKind::kCount: {
+            // Count is immutable observation-only unless an operation adapter
+            // supplies an explicit replacement. Preserve the original value.
+            return nullptr;
+        }
+        case pathguard::ProviderJavaResultKind::kCursor:
+        case pathguard::ProviderJavaResultKind::kParcelFileDescriptor:
+        case pathguard::ProviderJavaResultKind::kVoid:
+            return nullptr;
+    }
     return nullptr;
+}
+
+bool JavaStringEquals(JNIEnv* env, jstring value, const char* expected) {
+    if (env == nullptr || value == nullptr || expected == nullptr) return false;
+    const char* text = env->GetStringUTFChars(value, nullptr);
+    if (text == nullptr || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    const bool equal = std::strcmp(text, expected) == 0;
+    env->ReleaseStringUTFChars(value, text);
+    return equal;
+}
+
+jobject CopyDocumentCursor(
+        JNIEnv* env, jobject original,
+        const pathguard::ProviderJavaDispatchRequestV1& request,
+        const pathguard::ProviderRouteBindingV1* fixed_binding) {
+    if (env == nullptr || original == nullptr) return nullptr;
+    jclass cursor_class = env->FindClass("android/database/Cursor");
+    const jmethodID get_columns = cursor_class == nullptr ? nullptr
+        : env->GetMethodID(cursor_class, "getColumnNames", "()[Ljava/lang/String;");
+    const jmethodID get_count = cursor_class == nullptr ? nullptr
+        : env->GetMethodID(cursor_class, "getCount", "()I");
+    const jmethodID get_position = cursor_class == nullptr ? nullptr
+        : env->GetMethodID(cursor_class, "getPosition", "()I");
+    const jmethodID move_to = cursor_class == nullptr ? nullptr
+        : env->GetMethodID(cursor_class, "moveToPosition", "(I)Z");
+    const jmethodID get_type = cursor_class == nullptr ? nullptr
+        : env->GetMethodID(cursor_class, "getType", "(I)I");
+    const jmethodID get_string = cursor_class == nullptr ? nullptr
+        : env->GetMethodID(cursor_class, "getString", "(I)Ljava/lang/String;");
+    const jmethodID get_long = cursor_class == nullptr ? nullptr
+        : env->GetMethodID(cursor_class, "getLong", "(I)J");
+    const jmethodID get_double = cursor_class == nullptr ? nullptr
+        : env->GetMethodID(cursor_class, "getDouble", "(I)D");
+    const jmethodID get_blob = cursor_class == nullptr ? nullptr
+        : env->GetMethodID(cursor_class, "getBlob", "(I)[B");
+    if (get_columns == nullptr || get_count == nullptr || get_position == nullptr
+        || move_to == nullptr || get_type == nullptr || get_string == nullptr
+        || get_long == nullptr || get_double == nullptr || get_blob == nullptr) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cursor_class);
+        return nullptr;
+    }
+    auto columns = static_cast<jobjectArray>(
+        env->CallObjectMethod(original, get_columns));
+    const jint count = env->CallIntMethod(original, get_count);
+    const jint original_position = env->CallIntMethod(original, get_position);
+    if (env->ExceptionCheck() || columns == nullptr || count < 0) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(columns);
+        env->DeleteLocalRef(cursor_class);
+        return nullptr;
+    }
+    const jsize column_count = env->GetArrayLength(columns);
+    jsize data_column = -1;
+    jsize document_column = -1;
+    for (jsize column = 0; column < column_count; ++column) {
+        auto name = static_cast<jstring>(
+            env->GetObjectArrayElement(columns, column));
+        if (JavaStringEquals(env, name, "_data")) data_column = column;
+        if (JavaStringEquals(env, name, "document_id")) {
+            document_column = column;
+        }
+        env->DeleteLocalRef(name);
+    }
+    jclass matrix_class = env->FindClass("android/database/MatrixCursor");
+    const jmethodID matrix_constructor = matrix_class == nullptr ? nullptr
+        : env->GetMethodID(matrix_class, "<init>", "([Ljava/lang/String;I)V");
+    const jmethodID add_row = matrix_class == nullptr ? nullptr
+        : env->GetMethodID(matrix_class, "addRow", "([Ljava/lang/Object;)V");
+    if (matrix_constructor == nullptr || add_row == nullptr) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(matrix_class);
+        env->DeleteLocalRef(columns);
+        env->DeleteLocalRef(cursor_class);
+        return nullptr;
+    }
+    jobject matrix = env->NewObject(
+        matrix_class, matrix_constructor, columns, count);
+    if (matrix == nullptr || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(matrix);
+        env->DeleteLocalRef(matrix_class);
+        env->DeleteLocalRef(columns);
+        env->DeleteLocalRef(cursor_class);
+        return nullptr;
+    }
+    jclass long_class = env->FindClass("java/lang/Long");
+    jclass double_class = env->FindClass("java/lang/Double");
+    const jmethodID long_value_of = long_class == nullptr ? nullptr
+        : env->GetStaticMethodID(long_class, "valueOf", "(J)Ljava/lang/Long;");
+    const jmethodID double_value_of = double_class == nullptr ? nullptr
+        : env->GetStaticMethodID(double_class, "valueOf",
+                                 "(D)Ljava/lang/Double;");
+    if (long_value_of == nullptr || double_value_of == nullptr) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(long_class);
+        env->DeleteLocalRef(double_class);
+        env->DeleteLocalRef(matrix);
+        env->DeleteLocalRef(matrix_class);
+        env->DeleteLocalRef(columns);
+        env->DeleteLocalRef(cursor_class);
+        return nullptr;
+    }
+    jclass object_class = env->FindClass("java/lang/Object");
+    if (object_class == nullptr || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(object_class);
+        env->DeleteLocalRef(long_class);
+        env->DeleteLocalRef(double_class);
+        env->DeleteLocalRef(matrix);
+        env->DeleteLocalRef(matrix_class);
+        env->DeleteLocalRef(columns);
+        env->DeleteLocalRef(cursor_class);
+        return nullptr;
+    }
+    bool failed_adapter = false;
+    bool rewritten = false;
+    for (jint row = 0; row < count; ++row) {
+        if (env->CallBooleanMethod(original, move_to, row) != JNI_TRUE
+            || env->ExceptionCheck()) {
+            env->ExceptionClear();
+            failed_adapter = true;
+            env->DeleteLocalRef(matrix);
+            env->DeleteLocalRef(object_class);
+            env->DeleteLocalRef(long_class);
+            env->DeleteLocalRef(double_class);
+            env->DeleteLocalRef(columns);
+            env->DeleteLocalRef(cursor_class);
+            return nullptr;
+        }
+        const pathguard::ProviderRouteBindingV1* row_binding = fixed_binding;
+        pathguard::ProviderMappingRuntimeFactsV1 row_facts;
+        pathguard::ProviderMappingDecisionV1 row_decision;
+        ProviderRegistryDomain::Guard row_guard;
+        if (row_binding == nullptr
+            && (data_column >= 0 || document_column >= 0)) {
+            auto row_request = request;
+            row_request.file_path = {};
+            row_request.identifier = {};
+            jstring identity = static_cast<jstring>(env->CallObjectMethod(
+                original, get_string,
+                data_column >= 0 ? data_column : document_column));
+            bool identity_ready = false;
+            if (!env->ExceptionCheck() && identity != nullptr) {
+                if (data_column >= 0) {
+                    row_request.identifier.kind =
+                        pathguard::ProviderJavaIdentifierKind::kFilePath;
+                    identity_ready = ReadJavaFilePathString(
+                        env, identity, &row_request.file_path);
+                } else {
+                    row_request.identifier.kind =
+                        pathguard::ProviderJavaIdentifierKind::kDocumentId;
+                    identity_ready = ReadJavaIdentifierString(
+                        env, identity, row_request.identifier.kind,
+                        &row_request.identifier);
+                }
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(identity);
+            if (identity_ready && ResolveProviderMappingDecision(
+                    row_request, &row_facts, &row_decision, &row_guard)
+                && row_decision.rewrite()) {
+                row_binding = row_facts.binding;
+            }
+        }
+        jobjectArray values = env->NewObjectArray(
+            column_count, object_class, nullptr);
+        if (values == nullptr || env->ExceptionCheck()) {
+            env->ExceptionClear();
+            failed_adapter = true;
+            env->DeleteLocalRef(values);
+            break;
+        }
+        for (jsize column = 0; column < column_count; ++column) {
+            auto name = static_cast<jstring>(
+                env->GetObjectArrayElement(columns, column));
+            const jint type = env->CallIntMethod(original, get_type, column);
+            jobject value = nullptr;
+            if (type == 3) {
+                auto text = static_cast<jstring>(
+                    env->CallObjectMethod(original, get_string, column));
+                std::string visible_relative_path;
+                std::string visible_display_name;
+                const bool visible_parts_ready = row_binding != nullptr
+                    && pathguard::BuildProviderVisibleMediaPath(
+                        *row_binding, &visible_relative_path,
+                        &visible_display_name);
+                if (JavaStringEquals(env, name, "_data")
+                    && row_binding != nullptr && text != nullptr
+                    && JavaStringEquals(env, text,
+                        row_binding->backing_target_path.c_str())) {
+                    value = env->NewStringUTF(
+                        row_binding->visible_source_path.c_str());
+                    rewritten = true;
+                } else if (JavaStringEquals(env, name, "relative_path")
+                           && text != nullptr && visible_parts_ready) {
+                    value = env->NewStringUTF(visible_relative_path.c_str());
+                    rewritten = true;
+                } else if (JavaStringEquals(env, name, "_display_name")
+                           && text != nullptr && visible_parts_ready) {
+                    value = env->NewStringUTF(visible_display_name.c_str());
+                    rewritten = true;
+                } else if (JavaStringEquals(env, name, "document_id")
+                           && row_binding != nullptr && text != nullptr
+                           && !row_binding->stable_document_id.empty()) {
+                    value = env->NewStringUTF(
+                        row_binding->stable_document_id.c_str());
+                    rewritten = true;
+                } else {
+                    value = text;
+                    text = nullptr;
+                }
+                env->DeleteLocalRef(text);
+            } else if (type == 1) {
+                const jlong number = env->CallLongMethod(original, get_long, column);
+                value = env->CallStaticObjectMethod(
+                    long_class, long_value_of, number);
+            } else if (type == 2) {
+                const jdouble number = env->CallDoubleMethod(
+                    original, get_double, column);
+                value = env->CallStaticObjectMethod(
+                    double_class, double_value_of, number);
+            } else if (type == 4) {
+                value = env->CallObjectMethod(original, get_blob, column);
+            }
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                failed_adapter = true;
+                env->DeleteLocalRef(value);
+                env->DeleteLocalRef(name);
+                env->DeleteLocalRef(values);
+                values = nullptr;
+                break;
+            }
+            env->SetObjectArrayElement(values, column, value);
+            env->DeleteLocalRef(value);
+            env->DeleteLocalRef(name);
+        }
+        if (values == nullptr) break;
+        env->CallVoidMethod(matrix, add_row, values);
+        env->DeleteLocalRef(values);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            failed_adapter = true;
+            break;
+        }
+    }
+    if (original_position >= -1) {
+        env->CallBooleanMethod(original, move_to, original_position);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    const bool failed = failed_adapter || env->ExceptionCheck();
+    if (failed) env->ExceptionClear();
+    env->DeleteLocalRef(object_class);
+    env->DeleteLocalRef(long_class);
+    env->DeleteLocalRef(double_class);
+    env->DeleteLocalRef(matrix_class);
+    env->DeleteLocalRef(columns);
+    env->DeleteLocalRef(cursor_class);
+    if (failed || !rewritten) {
+        env->DeleteLocalRef(matrix);
+        return nullptr;
+    }
+    return MakeDispatchRewrite(env, matrix);
+}
+
+jobject MakeAfterResultReplacement(
+        JNIEnv* env, const pathguard::ProviderJavaDispatchRequestV1& request,
+        jobject original_result,
+        const pathguard::ProviderRouteBindingV1& binding) {
+    switch (request.result) {
+        case pathguard::ProviderJavaResultKind::kFile:
+        case pathguard::ProviderJavaResultKind::kDocumentId:
+            return MakeProviderReplacement(env, request, binding);
+        case pathguard::ProviderJavaResultKind::kCount: {
+            if (original_result == nullptr
+                || !IsJavaInstance(env, original_result, "java/lang/Integer")) {
+                return nullptr;
+            }
+            jclass integer_class = env->FindClass("java/lang/Integer");
+            const jmethodID int_value = integer_class == nullptr ? nullptr
+                : env->GetMethodID(integer_class, "intValue", "()I");
+            const jint value = int_value == nullptr ? 0
+                : env->CallIntMethod(original_result, int_value);
+            const bool failed = env->ExceptionCheck();
+            if (failed) env->ExceptionClear();
+            env->DeleteLocalRef(integer_class);
+            if (failed || int_value == nullptr) return nullptr;
+            integer_class = env->FindClass("java/lang/Integer");
+            const jmethodID value_of = integer_class == nullptr ? nullptr
+                : env->GetStaticMethodID(integer_class, "valueOf",
+                                         "(I)Ljava/lang/Integer;");
+            jobject boxed = value_of == nullptr ? nullptr
+                : env->CallStaticObjectMethod(integer_class, value_of, value);
+            env->DeleteLocalRef(integer_class);
+            if (env->ExceptionCheck()) {
+                ClearException(env, "create Provider count result");
+                env->DeleteLocalRef(boxed);
+                return nullptr;
+            }
+            return MakeDispatchRewrite(env, boxed);
+        }
+        case pathguard::ProviderJavaResultKind::kCursor:
+            return CopyDocumentCursor(
+                env, original_result, request, &binding);
+        case pathguard::ProviderJavaResultKind::kParcelFileDescriptor:
+            return nullptr;
+        case pathguard::ProviderJavaResultKind::kUri:
+            return MakeProviderReplacement(env, request, binding);
+        case pathguard::ProviderJavaResultKind::kVoid:
+            return nullptr;
+    }
+    return nullptr;
+}
+
+int ReadParcelFileDescriptorFd(JNIEnv* env, jobject descriptor) {
+    if (env == nullptr || descriptor == nullptr) return -1;
+    jclass descriptor_class = env->FindClass("android/os/ParcelFileDescriptor");
+    const jmethodID get_fd = descriptor_class == nullptr ? nullptr
+        : env->GetMethodID(descriptor_class, "getFd", "()I");
+    const jint fd = get_fd == nullptr ? -1
+        : env->CallIntMethod(descriptor, get_fd);
+    env->DeleteLocalRef(descriptor_class);
+    if (env->ExceptionCheck() || fd < 0) {
+        env->ExceptionClear();
+        return -1;
+    }
+    return fd;
+}
+
+bool ReadParcelFileDescriptorPath(
+        JNIEnv* env, jobject descriptor,
+        pathguard::ProviderJavaFilePathV1* output) {
+    if (output == nullptr) return false;
+    *output = {};
+    const int fd = ReadParcelFileDescriptorFd(env, descriptor);
+    if (fd < 0) return false;
+    char link[64]{};
+    const int link_size = std::snprintf(
+        link, sizeof(link), "/proc/self/fd/%d", fd);
+    char path[pathguard::kProviderJavaFilePathCapacityV1]{};
+    const ssize_t path_size = link_size <= 0 ? -1
+        : readlink(link, path, sizeof(path) - 1);
+    if (path_size <= 0
+        || static_cast<std::size_t>(path_size) >= output->bytes.size()) {
+        return false;
+    }
+    std::memcpy(output->bytes.data(), path, static_cast<std::size_t>(path_size));
+    output->size = static_cast<std::uint16_t>(path_size);
+    if (!pathguard::ValidProviderJavaFilePath(output->value())) {
+        *output = {};
+        return false;
+    }
+    return true;
+}
+
+struct KernelFileHandle {
+    std::uint32_t handle_bytes;
+    std::int32_t handle_type;
+    std::uint8_t bytes[PATHGUARD_PROVIDER_ROUTE_IDENTITY_HANDLE_MAX];
+};
+
+bool VerifyParcelFileDescriptorIdentity(
+        JNIEnv* env, jobject descriptor,
+        const pathguard::ProviderRouteBindingV1& binding) {
+    if (env == nullptr || descriptor == nullptr
+        || !binding.fd_identity.Strong()) {
+        return false;
+    }
+    const int fd = ReadParcelFileDescriptorFd(env, descriptor);
+    if (fd < 0) return false;
+    struct statx identity {};
+    if (syscall(SYS_statx, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                STATX_INO | STATX_BTIME | STATX_TYPE, &identity) != 0) {
+        return false;
+    }
+    char volume[64]{};
+    const int volume_size = std::snprintf(
+        volume, sizeof(volume), "dev:%u:%u",
+        identity.stx_dev_major, identity.stx_dev_minor);
+    const std::uint8_t object_type = S_ISDIR(identity.stx_mode) ? 2 : 1;
+    if (volume_size <= 0
+        || static_cast<std::size_t>(volume_size) >= sizeof(volume)
+        || binding.fd_identity.volume != volume
+        || binding.fd_identity.object_type != object_type) {
+        return false;
+    }
+    if (binding.fd_identity.kind
+            == pathguard::provenance::IdentityKind::kStatxBirthTime) {
+        return (identity.stx_mask & (STATX_INO | STATX_BTIME))
+                == (STATX_INO | STATX_BTIME)
+            && binding.fd_identity.inode == identity.stx_ino
+            && binding.fd_identity.birth_seconds == identity.stx_btime.tv_sec
+            && binding.fd_identity.birth_nanoseconds
+                == identity.stx_btime.tv_nsec;
+    }
+    if (binding.fd_identity.kind
+            != pathguard::provenance::IdentityKind::kFileHandle) {
+        return false;
+    }
+    char descriptor_path[64]{};
+    const int descriptor_size = std::snprintf(
+        descriptor_path, sizeof(descriptor_path), "/proc/self/fd/%d", fd);
+    KernelFileHandle handle{};
+    handle.handle_bytes = sizeof(handle.bytes);
+    int mount_id = 0;
+    return descriptor_size > 0
+        && static_cast<std::size_t>(descriptor_size) < sizeof(descriptor_path)
+        && syscall(SYS_name_to_handle_at, AT_FDCWD, descriptor_path,
+                   &handle, &mount_id, AT_SYMLINK_FOLLOW) == 0
+        && handle.handle_bytes == binding.fd_identity.handle.size()
+        && handle.handle_type == binding.fd_identity.handle_type
+        && std::memcmp(handle.bytes, binding.fd_identity.handle.data(),
+                       handle.handle_bytes) == 0;
+}
+
+void EmitResolvedExternalIdentity(
+        const pathguard::ProviderJavaDispatchRequestV1& request,
+        const pathguard::ProviderJavaFilePathV1& backing_path) {
+    if (g_external_identity_sink == nullptr || backing_path.size == 0
+        || (request.identifier.kind
+                != pathguard::ProviderJavaIdentifierKind::kContentUri
+            && request.identifier.kind
+                != pathguard::ProviderJavaIdentifierKind::kDocumentId)) {
+        return;
+    }
+    PathGuardLsplantExternalIdentityV1 event{};
+    event.version = PATHGUARD_LSPLANT_BRIDGE_API_VERSION;
+    event.size = sizeof(event);
+    event.identifier_kind = static_cast<std::uint8_t>(request.identifier.kind);
+    event.path_kind = PATHGUARD_LSPLANT_EXTERNAL_PATH_ABSOLUTE;
+    event.file_path_size = backing_path.size;
+    event.identifier_size = request.identifier.size;
+    std::memcpy(event.file_path, backing_path.bytes.data(), backing_path.size);
+    std::memcpy(event.identifier, request.identifier.bytes.data(),
+                request.identifier.size);
+    g_external_identity_sink(&event, g_external_identity_user_data);
+}
+
+void EmitExternalFileIdentity(
+        JNIEnv* env, const pathguard::ProviderJavaDispatchRequestV1& request,
+        jobject original_result) {
+    if (env == nullptr || original_result == nullptr
+        || g_external_identity_sink == nullptr) {
+        return;
+    }
+    pathguard::ProviderJavaIdentifierV1 identifier;
+    pathguard::ProviderJavaFilePathV1 file_path;
+    if (request.method_id
+            == pathguard::ProviderJavaMethodId::kExternalGetFileForDocId
+        && request.identifier.kind
+            == pathguard::ProviderJavaIdentifierKind::kDocumentId
+        && IsJavaInstance(env, original_result, "java/io/File")) {
+        identifier = request.identifier;
+        jclass file_class = env->FindClass("java/io/File");
+        const jmethodID get_path = file_class == nullptr ? nullptr
+            : env->GetMethodID(
+                file_class, "getAbsolutePath", "()Ljava/lang/String;");
+        jstring path = get_path == nullptr ? nullptr : static_cast<jstring>(
+            env->CallObjectMethod(original_result, get_path));
+        env->DeleteLocalRef(file_class);
+        const bool ready = !env->ExceptionCheck() && path != nullptr
+            && ReadJavaFilePathString(env, path, &file_path);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(path);
+        if (!ready) return;
+    } else if (request.method_id
+                   == pathguard::ProviderJavaMethodId::kExternalGetDocIdForFile
+               && request.file_path.size != 0
+               && IsJavaInstance(env, original_result, "java/lang/String")) {
+        file_path = request.file_path;
+        if (!ReadJavaIdentifierString(
+                env, static_cast<jstring>(original_result),
+                pathguard::ProviderJavaIdentifierKind::kDocumentId,
+                &identifier)) {
+            return;
+        }
+    } else {
+        return;
+    }
+    PathGuardLsplantExternalIdentityV1 event{};
+    event.version = PATHGUARD_LSPLANT_BRIDGE_API_VERSION;
+    event.size = sizeof(event);
+    event.identifier_kind =
+        PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_DOCUMENT_ID;
+    event.path_kind = PATHGUARD_LSPLANT_EXTERNAL_PATH_ABSOLUTE;
+    event.file_path_size = file_path.size;
+    event.identifier_size = identifier.size;
+    std::memcpy(event.file_path, file_path.bytes.data(), file_path.size);
+    std::memcpy(event.identifier, identifier.bytes.data(), identifier.size);
+    g_external_identity_sink(&event, g_external_identity_user_data);
+}
+
+jobject DispatchProviderRequest(
+        JNIEnv* env, const pathguard::ProviderJavaDispatchRequestV1& request) {
+    pathguard::ProviderMappingRuntimeFactsV1 facts;
+    pathguard::ProviderMappingDecisionV1 decision;
+    ProviderRegistryDomain::Guard registry_guard;
+    if (!ResolveProviderMappingDecision(
+            request, &facts, &decision, &registry_guard)
+        || !decision.rewrite() || facts.binding == nullptr) {
+        return nullptr;
+    }
+    if (request.result != pathguard::ProviderJavaResultKind::kFile
+        && request.result != pathguard::ProviderJavaResultKind::kDocumentId) {
+        return nullptr;
+    }
+    return MakeProviderReplacement(env, request, *facts.binding);
 }
 
 bool ReadNativeDispatchRequest(
@@ -412,11 +1309,16 @@ bool ReadNativeDispatchRequest(
             break;
         case pathguard::ProviderJavaDynamicKind::kContentValues:
             operations = ReadContentValuesOperations(
-                env, arguments, dispatch->dynamic_argument_index);
+                env, arguments, dispatch->dynamic_argument_index,
+                &file_path);
             dynamic_operations_ready = operations != 0;
             break;
         case pathguard::ProviderJavaDynamicKind::kDeleteTarget:
-            dynamic_operations_ready = false;
+            // Only a uniquely bound item URI reaches rewrite evaluation.
+            // The binding object type then constrains the actual path hook;
+            // collection/selection deletes have no binding and fail open.
+            operations = dispatch->minimum_operations;
+            dynamic_operations_ready = true;
             break;
         case pathguard::ProviderJavaDynamicKind::kNone:
             break;
@@ -456,9 +1358,48 @@ jobject NativeAfterDispatch(
     if (!ReadNativeDispatchRequest(env, method_id, arguments, &request)) {
         return nullptr;
     }
-    // Observation never takes ownership of the original local reference. A
-    // replacement remains disabled until route provenance is available.
-    return nullptr;
+    EmitInsertExternalIdentity(env, request, original_result);
+    EmitExternalFileIdentity(env, request, original_result);
+    if (request.result == pathguard::ProviderJavaResultKind::kCursor) {
+        return CopyDocumentCursor(env, original_result, request, nullptr);
+    }
+    pathguard::ProviderMappingRuntimeFactsV1 facts;
+    pathguard::ProviderMappingDecisionV1 decision;
+    ProviderRegistryDomain::Guard registry_guard;
+    if (request.result
+            == pathguard::ProviderJavaResultKind::kParcelFileDescriptor) {
+        bool resolved = ResolveProviderMappingDecision(
+                request, &facts, &decision, &registry_guard)
+            && decision.rewrite() && facts.binding != nullptr;
+        pathguard::ProviderJavaFilePathV1 backing_path;
+        if (!resolved && ReadParcelFileDescriptorPath(
+                env, original_result, &backing_path)) {
+            auto path_request = request;
+            path_request.identifier = {};
+            path_request.identifier.kind =
+                pathguard::ProviderJavaIdentifierKind::kFilePath;
+            path_request.file_path = backing_path;
+            resolved = ResolveProviderMappingDecision(
+                    path_request, &facts, &decision, &registry_guard)
+                && decision.rewrite() && facts.binding != nullptr;
+        }
+        if (!resolved || !VerifyParcelFileDescriptorIdentity(
+                env, original_result, *facts.binding)) {
+            return nullptr;
+        }
+        if (backing_path.size == 0) {
+            ReadParcelFileDescriptorPath(env, original_result, &backing_path);
+        }
+        EmitResolvedExternalIdentity(request, backing_path);
+        return MakeDispatchRewrite(env, original_result);
+    }
+    if (!ResolveProviderMappingDecision(
+            request, &facts, &decision, &registry_guard)
+        || !decision.rewrite() || facts.binding == nullptr) {
+        return nullptr;
+    }
+    return MakeAfterResultReplacement(
+        env, request, original_result, *facts.binding);
 }
 
 bool RegisterHookerNatives(JNIEnv* env) {
@@ -615,6 +1556,32 @@ bool LoadHookerDex(JNIEnv* env, const std::uint8_t* dex, std::size_t dex_size) {
         g_state.hooker_class = nullptr;
         g_state.hooker_class_loader = nullptr;
     }
+    if (g_state.hooker_class != nullptr && loader != nullptr
+        && load_class != nullptr) {
+        jstring result_name = env->NewStringUTF(
+            "dev.pathguard.providerhook.ProviderHooker$DispatchResult");
+        jobject result_class = env->CallObjectMethod(
+            loader, load_class, result_name);
+        env->DeleteLocalRef(result_name);
+        if (env->ExceptionCheck() || result_class == nullptr) {
+            ClearException(env, "load DispatchResult class");
+        } else {
+            g_state.dispatch_result_class = static_cast<jclass>(
+                env->NewGlobalRef(result_class));
+            g_state.dispatch_result_rewrite = env->GetStaticMethodID(
+                g_state.dispatch_result_class, "rewrite",
+                "(Ljava/lang/Object;)Ldev/pathguard/providerhook/"
+                "ProviderHooker$DispatchResult;");
+            if (g_state.dispatch_result_rewrite == nullptr
+                || env->ExceptionCheck()) {
+                ClearException(env, "resolve DispatchResult factory");
+                env->DeleteGlobalRef(g_state.dispatch_result_class);
+                g_state.dispatch_result_class = nullptr;
+                g_state.dispatch_result_rewrite = nullptr;
+            }
+        }
+        env->DeleteLocalRef(result_class);
+    }
     env->DeleteLocalRef(hooker);
     env->DeleteLocalRef(hooker_name);
     env->DeleteLocalRef(class_loader_class);
@@ -623,7 +1590,9 @@ bool LoadHookerDex(JNIEnv* env, const std::uint8_t* dex, std::size_t dex_size) {
     env->DeleteLocalRef(parent);
     env->DeleteLocalRef(buffer);
     if (g_state.hooker_class == nullptr
-        || g_state.hooker_class_loader == nullptr) return false;
+        || g_state.hooker_class_loader == nullptr
+        || g_state.dispatch_result_class == nullptr
+        || g_state.dispatch_result_rewrite == nullptr) return false;
     const jmethodID install_dispatcher = env->GetStaticMethodID(
         g_state.hooker_class, "installNativeDispatcher", "()V");
     if (install_dispatcher == nullptr) {
@@ -887,6 +1856,8 @@ pathguard_lsplant_configure_mapping_v1(
     if (config == nullptr) {
         g_mapping_resolver = nullptr;
         g_mapping_user_data = nullptr;
+        g_external_identity_sink = nullptr;
+        g_external_identity_user_data = nullptr;
         return 0;
     }
     if (config->version != PATHGUARD_LSPLANT_BRIDGE_API_VERSION
@@ -894,9 +1865,21 @@ pathguard_lsplant_configure_mapping_v1(
         || config->resolver == nullptr) {
         return EINVAL;
     }
+    if (config->snapshot != nullptr) {
+        const int publish_result = PublishMappingSnapshot(config->snapshot);
+        if (publish_result != 0) return publish_result;
+    }
     g_mapping_resolver = config->resolver;
     g_mapping_user_data = config->user_data;
+    g_external_identity_sink = config->external_identity_sink;
+    g_external_identity_user_data = config->external_identity_user_data;
     return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int
+pathguard_lsplant_publish_mapping_v1(
+        const PathGuardProviderRouteSnapshotV1* snapshot) {
+    return PublishMappingSnapshot(snapshot);
 }
 
 extern "C" __attribute__((visibility("default"))) int

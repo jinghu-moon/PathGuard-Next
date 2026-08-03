@@ -1,0 +1,43 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-provider-v68-20260802",
+  "before_commit": "6e6335d",
+  "after_commit": "working_tree",
+  "environment": {
+    "device": "Xiaomi M2012K11AC (alioth)",
+    "android": "13 / API 33 / MIUI V14.0.8.0.TKHCNXM",
+    "kernel": "4.19.157-perf-g9607d8651312",
+    "root": "Magisk 30600",
+    "selinux": "Enforcing",
+    "module": "0.1.44-dev / versionCode 45"
+  },
+  "rules_source_hash": "not_applicable: existing production LocalSend rules were not changed by the V-68 probe",
+  "policy_hash": "content_generation=2871743321482347064",
+  "module_abi_hashes": {
+    "universal_zip_sha256": "7ff47a3f60e30495c35cc654daa83e8c7f4d410db3cad1eeebd04c5843d47c67",
+    "provider_status": "build/device-evidence/provider-lsplant-v1/20260802-205241/provider-status.txt"
+  },
+  "scenario_id": "V-68-current-device-production-composite-boundary",
+  "steps": [
+    "Install 0.1.44-dev and reboot",
+    "Collect both Provider LSPlant and admission status",
+    "Receive test.txt and test.jpg through real LocalSend",
+    "Verify physical targets, source residuals, WAL and bootstrap diagnostics",
+    "Probe statx birth time and name_to_handle_at on visible and backing storage planes"
+  ],
+  "expected_result": "Supported forward operations remain correct; unavailable strong identity fails open without WAL or fabricated reverse mapping; bit 17 remains clear",
+  "before_actual": "0.1.43-dev redirected real files but its boolean bootstrap failure did not distinguish route, identity and broker stages",
+  "after_actual": "0.1.44-dev redirected both files with zero source residue, reported strong_identity_unavailable, created no WAL, retained healthy Provider hooks and kept bit 17 clear; the device exposes neither FILE_HANDLE nor STATX_BTIME",
+  "classification": "not_observed",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-provider-v68-20260802/V-68-current-device-production-boundary.md",
+    "build/device-evidence/provider-lsplant-v1/20260802-204858/provider-status.txt",
+    "build/device-evidence/provider-lsplant-v1/20260802-204858/post-receive-files.txt",
+    "build/device-evidence/provider-lsplant-v1/20260802-204858/post-receive-source-residual.txt",
+    "build/device-evidence/provider-lsplant-v1/20260802-204858/post-receive-wal.txt",
+    "build/device-evidence/provider-lsplant-v1/20260802-204858/post-receive-logcat.txt",
+    "build/device-evidence/provider-production-v68/20260802-185411/identity-probe-visible.txt",
+    "build/device-evidence/provider-production-v68/20260802-185411/identity-probe-backing.txt"
+  ],
+  "reviewer_conclusion": "All V-68 work executable on the current device is complete. Strong-identity-dependent reverse, PFD, live-publication and mutation/recovery cases are unsupported on this kernel and are skipped under the user-authorized current-device rule."
+}

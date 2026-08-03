@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include "pathguard/provider_adapter_profile.h"
 #include "pathguard/provider_lsplant_bridge.h"
@@ -54,6 +55,8 @@ struct ProviderMappingRequestV1 {
     ProviderMappingOperation operation = ProviderMappingOperation::kUnknown;
     ProviderAdapterProfileMatchV1 profile_match;
     OperationMask supported_operations = 0;
+    ProviderJavaIdentifierKind identifier_kind =
+        ProviderJavaIdentifierKind::kNone;
     const ProviderRouteBindingV1* binding = nullptr;
     provenance::ResolveResult reverse;
     bool runtime_available = false;
@@ -75,9 +78,20 @@ struct ProviderMappingRuntimeFactsV1 {
     ProviderAdapterProfileMatchV1 profile_match;
     OperationMask supported_operations = 0;
     const ProviderRouteBindingV1* binding = nullptr;
+    ProviderRouteBindingV1 materialized_binding;
     provenance::ResolveResult reverse;
     bool runtime_available = false;
 };
+
+bool MaterializeStaticProviderRouteBinding(
+    const ProviderJavaDispatchRequestV1& request,
+    const ProviderRouteBindingV1& route_template,
+    ProviderRouteBindingV1* output) noexcept;
+
+bool BuildProviderVisibleMediaPath(
+    const ProviderRouteBindingV1& binding,
+    std::string* relative_path,
+    std::string* display_name);
 
 #ifndef PATHGUARD_PROVIDER_MAPPING_RUNTIME_RESOLVER_V1_DEFINED
 #define PATHGUARD_PROVIDER_MAPPING_RUNTIME_RESOLVER_V1_DEFINED 1

@@ -200,6 +200,7 @@ uint32_t g_thread_state_key_ready = 0;
 uint32_t g_rewrite_log_count = 0;
 uint32_t g_hooks_enabled = 0;
 uint32_t g_fuse_install_state = 0;
+uint32_t g_provenance_transactions_available = 0;
 uint64_t g_transaction_nonce = 0;
 uint64_t g_transaction_sequence = 0;
 uint32_t g_transaction_atfork_state = 0;
@@ -470,13 +471,18 @@ provenance_protocol::Request MakeProvenanceRequest(
     return request;
 }
 
+struct KernelFileHandle {
+    uint32_t handle_bytes;
+    int32_t handle_type;
+    uint8_t bytes[provenance_protocol::kIdentityHandleCapacity];
+};
+
 bool CaptureIdentity(int fd, provenance_protocol::Identity* output) {
     if (fd < 0 || output == nullptr) return false;
     struct statx value {};
     if (syscall(SYS_statx, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
                 STATX_INO | STATX_BTIME | STATX_TYPE, &value) != 0
-        || (value.stx_mask & (STATX_INO | STATX_BTIME))
-            != (STATX_INO | STATX_BTIME)
+        || (value.stx_mask & STATX_INO) == 0
         || value.stx_ino == 0) return false;
     *output = {};
     output->inode = value.stx_ino;
@@ -486,7 +492,30 @@ bool CaptureIdentity(int fd, provenance_protocol::Identity* output) {
     const int size = snprintf(output->volume, sizeof(output->volume),
                               "dev:%u:%u", value.stx_dev_major,
                               value.stx_dev_minor);
-    return size > 0 && static_cast<size_t>(size) < sizeof(output->volume);
+    if (size <= 0 || static_cast<size_t>(size) >= sizeof(output->volume)) {
+        return false;
+    }
+    char descriptor_path[64]{};
+    const int descriptor_size = snprintf(
+        descriptor_path, sizeof(descriptor_path), "/proc/self/fd/%d", fd);
+    KernelFileHandle handle{};
+    handle.handle_bytes = sizeof(handle.bytes);
+    int mount_id = 0;
+    if (descriptor_size > 0
+        && static_cast<size_t>(descriptor_size) < sizeof(descriptor_path)
+        && syscall(SYS_name_to_handle_at, AT_FDCWD, descriptor_path,
+                   &handle, &mount_id, AT_SYMLINK_FOLLOW) == 0
+        && handle.handle_bytes != 0
+        && handle.handle_bytes <= sizeof(handle.bytes)) {
+        output->kind = provenance_protocol::IdentityKind::kFileHandle;
+        output->handle_type = handle.handle_type;
+        output->handle_size = static_cast<uint16_t>(handle.handle_bytes);
+        memcpy(output->handle, handle.bytes, handle.handle_bytes);
+        return true;
+    }
+    if ((value.stx_mask & STATX_BTIME) == 0) return false;
+    output->kind = provenance_protocol::IdentityKind::kStatxBirthTime;
+    return true;
 }
 
 bool SendTransactionStep(provenance_protocol::Request* request,
@@ -506,6 +535,11 @@ bool ResolveOwnedRecord(const provenance_protocol::Record& record,
         && response.provenance_error == provenance_protocol::Error::kNone
         && response.resolve_status == provenance_protocol::ResolveStatus::kUnique
         && strcmp(response.logical_source, record.logical_source) == 0;
+}
+
+bool ProvenanceTransactionsAvailable() {
+    return __atomic_load_n(
+        &g_provenance_transactions_available, __ATOMIC_ACQUIRE) != 0;
 }
 
 template <typename T>
@@ -561,7 +595,8 @@ auto WithPath(const char* operation_name, OperationMask operation,
     }
     using Return = decltype(function(dirfd, path));
     if constexpr (__is_same(Return, int)) {
-        const bool transactional_create = rewrite.reverse_mode == 2
+        const bool transactional_create = ProvenanceTransactionsAvailable()
+            && rewrite.reverse_mode == 2
             && (operation & kOperationMkdir) != 0;
         if (transactional_create) {
             provenance_protocol::Record record;
@@ -625,7 +660,8 @@ auto WithPath(const char* operation_name, OperationMask operation,
             errno = call_errno;
             return value;
         }
-        const bool transactional_delete = rewrite.reverse_mode == 2
+        const bool transactional_delete = ProvenanceTransactionsAvailable()
+            && rewrite.reverse_mode == 2
             && (operation & (kOperationUnlink | kOperationRmdir)) != 0;
         if (transactional_delete) {
             provenance_protocol::Record record;
@@ -718,8 +754,12 @@ int WithOpenPath(const char* operation_name, int dirfd, const char* path,
     }
     const auto& domain_capabilities = snapshot_guard->capabilities.domains[
         static_cast<uint8_t>(snapshot_guard->domain)];
+    const OperationMask provenance_operations =
+        domain_capabilities.observed_operations
+        | (ProvenanceTransactionsAvailable()
+            ? kOperationReverseMapping : OperationMask{0});
     const auto open_plan = path_hook_contract::PlanRedirectOpen(
-        rewrite, domain_capabilities.observed_operations, flags);
+        rewrite, provenance_operations, flags);
     if (!open_plan.coordinate_provenance) {
         errno = saved_errno;
         const int value = function(AT_FDCWD, pinned_path,
@@ -1022,7 +1062,8 @@ int WithTwoPaths(const char* operation, OperationMask operation_mask,
         errno = ENAMETOOLONG;
         return -1;
     }
-    const bool transactional_link = operation_mask == kOperationHardLink
+    const bool transactional_link = ProvenanceTransactionsAvailable()
+        && operation_mask == kOperationHardLink
         && new_changed && new_result.reverse_mode == 2;
     if (transactional_link) {
         provenance_protocol::Record candidate;
@@ -1089,7 +1130,8 @@ int WithTwoPaths(const char* operation, OperationMask operation_mask,
         errno = call_errno;
         return value;
     }
-    const bool transactional_rename = operation_mask == kOperationRename
+    const bool transactional_rename = ProvenanceTransactionsAvailable()
+        && operation_mask == kOperationRename
         && old_changed && new_changed
         && old_result.reverse_mode == 2 && new_result.reverse_mode == 2;
     if (transactional_rename) {
@@ -1813,6 +1855,31 @@ void MaybeInstallFuseHooks(const char* path, void* handle) {
 
 }  // namespace
 
+int32_t CurrentCallingUid() noexcept {
+    const int32_t uid = EffectiveCallingUid();
+    return uid >= 10000 && uid != static_cast<int32_t>(getuid()) ? uid : -1;
+}
+
+void SetProvenanceTransactionsAvailable(bool available) noexcept {
+    __atomic_store_n(
+        &g_provenance_transactions_available,
+        available ? 1u : 0u,
+        __ATOMIC_RELEASE);
+}
+
+bool BuildProvenanceRecordForRoute(
+        const storage_path_adapter::RewriteResult& rewrite,
+        int32_t caller_uid, const char* logical_path, const char* target_path,
+        provenance_protocol::Record* output) noexcept {
+    return BuildProvenanceRecord(
+        rewrite, caller_uid, logical_path, target_path, output);
+}
+
+bool CaptureProvenanceIdentity(
+        int fd, provenance_protocol::Identity* output) noexcept {
+    return CaptureIdentity(fd, output);
+}
+
 InstallResult Install(zygisk::Api* api, JNIEnv* env,
                       const PolicyConfig& config) {
     if (api == nullptr || env == nullptr || config.policy_data == nullptr
@@ -1842,6 +1909,7 @@ InstallResult Install(zygisk::Api* api, JNIEnv* env,
     g_resolver_probe.ObserveOpenAt2(EPERM, true);
     __atomic_store_n(&g_hooks_enabled, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_fuse_install_state, 0, __ATOMIC_RELEASE);
+    SetProvenanceTransactionsAvailable(false);
     g_api = api;
     auto* runtime = static_cast<RuntimePolicySnapshot*>(
         calloc(1, sizeof(RuntimePolicySnapshot)));

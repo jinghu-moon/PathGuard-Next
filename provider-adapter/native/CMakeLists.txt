@@ -46,6 +46,7 @@ add_subdirectory("${PATHGUARD_THIRD_PARTY}/lsplant/src" lsplant)
 
 add_library(pathguard_lsplant SHARED
     src/provider_lsplant_bridge.cpp
+    "${PATHGUARD_ROOT}/core/src/namespace_projection.cpp"
     "${PATHGUARD_ROOT}/core/src/provider_mapping.cpp"
     "${PATHGUARD_ROOT}/core/src/provider_route_snapshot_registry.cpp"
     "${PATHGUARD_ROOT}/core/src/route_provenance.cpp")

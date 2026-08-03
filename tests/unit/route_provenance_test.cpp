@@ -9,6 +9,7 @@ pathguard::provenance::ObjectIdentity Identity(std::uint8_t value) {
     pathguard::provenance::ObjectIdentity result;
     result.volume = "primary";
     result.handle = {value, static_cast<std::uint8_t>(value + 1)};
+    result.handle_type = 7;
     return result;
 }
 pathguard::provenance::RouteRecord Record(const char* source, const char* target,
@@ -41,6 +42,23 @@ int main() {
     assert(store.Abort(tx) == Error::kTransactionConflict);
     assert(store.committed_count() == 1);
 
+    auto committed = store.ResolveReverse(
+        record.scope, record.key, record.identity, 3);
+    assert(committed.status == ResolveStatus::kUnique);
+    assert(store.BindExternalIdentity(
+               {1, 4}, record.scope, record.key, record.identity, 3,
+               "content://media/external/images/media/42", "image:42")
+           == Error::kNone);
+    committed = store.ResolveReverse(
+        record.scope, record.key, record.identity, 3);
+    assert(committed.record->provider_uri
+           == "content://media/external/images/media/42");
+    assert(committed.record->stable_document_id == "image:42");
+    assert(store.BindExternalIdentity(
+               {1, 5}, record.scope, record.key, Identity(99), 3,
+               "content://media/external/images/media/43", "image:43")
+           == Error::kIdentityMismatch);
+
     auto other_scope = record;
     other_scope.scope.caller_uid = 10002;
     other_scope.logical_source_path = "DCIM/a.jpg";
@@ -56,6 +74,11 @@ int main() {
     RouteProvenanceStore replayed(&journal);
     assert(replayed.Recover() == Error::kNone);
     assert(replayed.committed_count() == 1);
+    auto replayed_record = replayed.ResolveReverse(
+        record.scope, record.key, record.identity, 3);
+    assert(replayed_record.record->provider_uri
+           == "content://media/external/images/media/42");
+    assert(replayed_record.record->identity.handle_type == 7);
 
     MemoryRouteJournal abandoned_journal;
     RouteProvenanceStore abandoned_writer(&abandoned_journal);

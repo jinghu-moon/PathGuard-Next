@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 
 #if defined(_WIN32)
 #include <io.h>
@@ -16,7 +17,9 @@ namespace pathguard::provenance {
 namespace {
 
 constexpr std::uint32_t kMagic = UINT32_C(0x52504750);  // PGPR
-constexpr std::uint16_t kFormat = 1;
+constexpr std::uint16_t kLegacyFormat = 1;
+constexpr std::uint16_t kExternalIdentityFormat = 2;
+constexpr std::uint16_t kFormat = 3;
 constexpr std::size_t kHeaderSize = 48;
 constexpr std::size_t kMaxPayload = 16 * 1024;
 constexpr std::size_t kMaxPending = 1024;
@@ -63,6 +66,7 @@ public:
     Reader(const std::uint8_t* data, std::size_t size) : data_(data), size_(size) {}
     bool U8(std::uint8_t* out) { if (offset_ >= size_) return false; *out = data_[offset_++]; return true; }
     bool U32(std::uint32_t* out) { if (size_ - offset_ < 4) return false; *out = Read32(data_ + offset_); offset_ += 4; return true; }
+    bool I32(std::int32_t* out) { std::uint32_t value; if (!U32(&value)) return false; std::memcpy(out, &value, 4); return true; }
     bool U64(std::uint64_t* out) { if (size_ - offset_ < 8) return false; *out = Read64(data_ + offset_); offset_ += 8; return true; }
     bool I64(std::int64_t* out) { std::uint64_t value; if (!U64(&value)) return false; std::memcpy(out, &value, 8); return true; }
     bool String(std::string* out) { std::uint32_t n; if (!U32(&n) || n > 4096 || size_ - offset_ < n) return false; out->assign(reinterpret_cast<const char*>(data_ + offset_), n); offset_ += n; return out->find('\0') == std::string::npos; }
@@ -88,14 +92,27 @@ bool ValidRelative(const std::string& value) {
     return true;
 }
 
+bool ValidProviderUri(const std::string& value) {
+    return value.empty() || (value.size() <= 1023
+        && value.starts_with("content://")
+        && value.find('\0') == std::string::npos);
+}
+
+bool ValidDocumentId(const std::string& value) {
+    return value.size() <= 1023 && value.find('\0') == std::string::npos;
+}
+
 bool EncodeRecord(const RouteRecord& record, std::vector<std::uint8_t>* out) {
     if (!ValidRelative(record.key.target_relative_path)
         || !ValidRelative(record.logical_source_path)
         || (!record.identity.Strong()
             && (!record.identity.volume.empty() || !record.identity.handle.empty()
+                || record.identity.handle_type != 0
                 || record.identity.inode != 0 || record.identity.birth_seconds != 0
                 || record.identity.birth_nanoseconds != 0))
-        || record.scope.caller_uid < 0 || record.rule_id == 0) return false;
+        || record.scope.caller_uid < 0 || record.rule_id == 0
+        || !ValidProviderUri(record.provider_uri)
+        || !ValidDocumentId(record.stable_document_id)) return false;
     Put32(out, static_cast<std::uint32_t>(record.scope.caller_uid));
     Put32(out, record.scope.user_id); Put64(out, record.scope.identity_epoch);
     if (!PutString(out, record.scope.trusted_attribution)
@@ -106,16 +123,20 @@ bool EncodeRecord(const RouteRecord& record, std::vector<std::uint8_t>* out) {
     out->push_back(record.identity.object_type); Put16(out, 0);
     if (!PutString(out, record.identity.volume)
         || !PutBytes(out, record.identity.handle.data(), record.identity.handle.size())) return false;
+    Put32(out, static_cast<std::uint32_t>(record.identity.handle_type));
     Put64(out, record.identity.inode);
     std::uint64_t birth = 0; std::memcpy(&birth, &record.identity.birth_seconds, 8);
     Put64(out, birth); Put32(out, record.identity.birth_nanoseconds);
     Put64(out, record.rule_id); Put64(out, record.content_generation);
     Put64(out, record.created_plan_generation); Put64(out, record.bound_plan_generation);
     Put64(out, record.commit_sequence);
+    if (!PutString(out, record.provider_uri)
+        || !PutString(out, record.stable_document_id)) return false;
     return out->size() <= kMaxPayload;
 }
 
-bool DecodeRecord(const std::uint8_t* data, std::size_t size, RouteRecord* record) {
+bool DecodeRecord(const std::uint8_t* data, std::size_t size,
+                  std::uint16_t format, RouteRecord* record) {
     Reader reader(data, size); std::uint32_t uid = 0; std::uint8_t kind = 0;
     std::uint8_t object_type = 0;
     if (!reader.U32(&uid) || !reader.U32(&record->scope.user_id)
@@ -129,6 +150,8 @@ bool DecodeRecord(const std::uint8_t* data, std::size_t size, RouteRecord* recor
     if (!reader.U8(&r0) || !reader.U8(&r1) || r0 != 0 || r1 != 0
         || !reader.String(&record->identity.volume)
         || !reader.Bytes(&record->identity.handle)
+        || (format >= kFormat
+            && !reader.I32(&record->identity.handle_type))
         || !reader.U64(&record->identity.inode)
         || !reader.I64(&record->identity.birth_seconds)
         || !reader.U32(&record->identity.birth_nanoseconds)
@@ -136,16 +159,25 @@ bool DecodeRecord(const std::uint8_t* data, std::size_t size, RouteRecord* recor
         || !reader.U64(&record->content_generation)
         || !reader.U64(&record->created_plan_generation)
         || !reader.U64(&record->bound_plan_generation)
-        || !reader.U64(&record->commit_sequence) || !reader.done()) return false;
+        || !reader.U64(&record->commit_sequence)) return false;
+    if (format >= kExternalIdentityFormat
+        && (!reader.String(&record->provider_uri)
+            || !reader.String(&record->stable_document_id))) {
+        return false;
+    }
+    if (!reader.done()) return false;
     record->scope.caller_uid = static_cast<std::int32_t>(uid);
     record->identity.kind = static_cast<IdentityKind>(kind);
     record->identity.object_type = object_type;
     const bool empty_identity = record->identity.volume.empty()
         && record->identity.handle.empty() && record->identity.inode == 0
+        && record->identity.handle_type == 0
         && record->identity.birth_seconds == 0
         && record->identity.birth_nanoseconds == 0;
     return (kind == 1 || kind == 2) && ValidRelative(record->key.target_relative_path)
         && ValidRelative(record->logical_source_path)
+        && ValidProviderUri(record->provider_uri)
+        && ValidDocumentId(record->stable_document_id)
         && (record->identity.Strong() || empty_identity);
 }
 
@@ -178,8 +210,12 @@ std::vector<std::uint8_t> EncodeFrame(const JournalFrame& frame) {
 }
 
 bool DecodeFrame(std::vector<std::uint8_t> bytes, JournalFrame* frame) {
+    const std::uint16_t format = bytes.size() < kHeaderSize
+        ? 0 : Read16(bytes.data() + 4);
     if (bytes.size() < kHeaderSize || Read32(bytes.data()) != kMagic
-        || Read16(bytes.data() + 4) != kFormat || Read16(bytes.data() + 6) != kHeaderSize
+        || (format != kLegacyFormat && format != kExternalIdentityFormat
+            && format != kFormat)
+        || Read16(bytes.data() + 6) != kHeaderSize
         || Read32(bytes.data() + 8) != bytes.size()
         || Read32(bytes.data() + 44) != bytes.size() - kHeaderSize) return false;
     const std::uint32_t expected = Read32(bytes.data() + 12); Set32(&bytes, 12, 0);
@@ -188,7 +224,10 @@ bool DecodeFrame(std::vector<std::uint8_t> bytes, JournalFrame* frame) {
     frame->transaction.low = Read64(bytes.data() + 32); frame->event = static_cast<Event>(bytes[40]);
     frame->operation = static_cast<Operation>(bytes[41]);
     if (!frame->transaction.valid() || bytes[42] != 0 || bytes[43] != 0
-        || bytes[40] < 1 || bytes[40] > 4 || bytes[41] < 1 || bytes[41] > 3) return false;
+        || bytes[40] < 1 || bytes[40] > 5
+        || bytes[41] < 1 || bytes[41] > 4
+        || (format == kLegacyFormat
+            && (bytes[40] > 4 || bytes[41] > 3))) return false;
     const std::uint8_t* payload = bytes.data() + kHeaderSize;
     const std::size_t payload_size = bytes.size() - kHeaderSize;
     if (payload_size < 8 || payload[0] > 1 || payload[1] > 1) return false;
@@ -200,7 +239,7 @@ bool DecodeFrame(std::vector<std::uint8_t> bytes, JournalFrame* frame) {
         const std::uint32_t size = Read32(payload + offset); offset += 4;
         if (size == 0 || size > kMaxPayload || payload_size - offset < size) return false;
         RouteRecord record;
-        if (!DecodeRecord(payload + offset, size, &record)) return false;
+        if (!DecodeRecord(payload + offset, size, format, &record)) return false;
         offset += size; *output = std::move(record); return true;
     };
     if (!decode_record(payload[0] != 0, &frame->record)
@@ -289,6 +328,41 @@ Error RouteProvenanceStore::Append(TransactionId transaction, Event event,
 
 Error RouteProvenanceStore::Apply(const JournalFrame& frame, bool replay) {
     auto pending = pending_.find(frame.transaction);
+    if (frame.event == Event::kExternalBind) {
+        if (frame.operation != Operation::kBindExternal || !frame.record
+            || !frame.record->identity.Strong()
+            || !ValidProviderUri(frame.record->provider_uri)
+            || !ValidDocumentId(frame.record->stable_document_id)
+            || (frame.record->provider_uri.empty()
+                && frame.record->stable_document_id.empty())) {
+            return Error::kCorrupt;
+        }
+        const auto current = committed_.find(frame.record->key);
+        if (current == committed_.end()
+            || current->second.scope != frame.record->scope
+            || current->second.identity != frame.record->identity
+            || current->second.bound_plan_generation
+                != frame.record->bound_plan_generation
+            || current->second.commit_sequence
+                != frame.record->commit_sequence) {
+            return Error::kIdentityMismatch;
+        }
+        for (const auto& [key, record] : committed_) {
+            if (key == frame.record->key || record.scope != frame.record->scope) {
+                continue;
+            }
+            if ((!frame.record->provider_uri.empty()
+                    && record.provider_uri == frame.record->provider_uri)
+                || (!frame.record->stable_document_id.empty()
+                    && record.stable_document_id
+                        == frame.record->stable_document_id)) {
+                return Error::kTransactionConflict;
+            }
+        }
+        committed_[frame.record->key] = *frame.record;
+        finalized_[frame.transaction] = Event::kExternalBind;
+        return Error::kNone;
+    }
     if (frame.event == Event::kPrepare) {
         if (finalized_.contains(frame.transaction)) {
             return Error::kTransactionConflict;
@@ -461,6 +535,35 @@ Error RouteProvenanceStore::Abort(TransactionId tx) {
     return Append(tx, Event::kAbort, it->second.operation, std::nullopt);
 }
 
+Error RouteProvenanceStore::BindExternalIdentity(
+        TransactionId transaction, const RouteScope& scope,
+        const RouteKey& key, const ObjectIdentity& identity,
+        std::uint64_t current_plan_generation,
+        std::string provider_uri, std::string stable_document_id) {
+    if (!transaction.valid() || finalized_.contains(transaction)
+        || !identity.Strong()
+        || (provider_uri.empty() && stable_document_id.empty())
+        || !ValidProviderUri(provider_uri)
+        || !ValidDocumentId(stable_document_id)) {
+        return Error::kInvalidState;
+    }
+    const auto current = committed_.find(key);
+    if (current == committed_.end() || current->second.scope != scope
+        || current->second.identity != identity
+        || current->second.bound_plan_generation != current_plan_generation) {
+        return Error::kIdentityMismatch;
+    }
+    RouteRecord record = current->second;
+    if (record.provider_uri == provider_uri
+        && record.stable_document_id == stable_document_id) {
+        return Error::kNone;
+    }
+    record.provider_uri = std::move(provider_uri);
+    record.stable_document_id = std::move(stable_document_id);
+    return Append(transaction, Event::kExternalBind,
+                  Operation::kBindExternal, record);
+}
+
 ResolveResult RouteProvenanceStore::ResolveReverse(const RouteScope& scope, const RouteKey& key,
         const ObjectIdentity& identity, std::uint64_t generation) const {
     const auto it = committed_.find(key);
@@ -470,6 +573,15 @@ ResolveResult RouteProvenanceStore::ResolveReverse(const RouteScope& scope, cons
     if (!identity.Strong() || record.identity != identity) return {ResolveStatus::kAmbiguous, Error::kIdentityMismatch, std::nullopt};
     if (record.bound_plan_generation != generation) return {ResolveStatus::kAmbiguous, Error::kPolicyStale, std::nullopt};
     return {ResolveStatus::kUnique, Error::kNone, record};
+}
+
+bool RouteProvenanceStore::CommittedAt(
+        std::size_t index, RouteRecord* output) const {
+    if (output == nullptr || index >= committed_.size()) return false;
+    auto record = committed_.begin();
+    std::advance(record, static_cast<std::ptrdiff_t>(index));
+    *output = record->second;
+    return true;
 }
 
 MutationResult ProvenanceCoordinator::Create(TransactionId tx, const RouteRecord& candidate,

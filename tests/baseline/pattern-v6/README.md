@@ -79,6 +79,9 @@
 | `p6-provider-result-observation-20260802` | T-51～R-51 result-kind observation | complete（Host/ABI/device passthrough；真实 rewrite unsupported/not_observed） | `p6-provider-result-observation-20260802/T-51-R-51-result-observation-host.md` |
 | `p6-provider-c-abi-facts-20260802` | T-52～R-52 resolver request/facts C ABI | complete（Host/ABI/device passthrough；真实 resolver unsupported/not_observed） | `p6-provider-c-abi-facts-20260802/T-52-R-52-c-abi-facts-host.md` |
 | `p6-provider-route-snapshot-20260802` | T-53～R-53 immutable route snapshot registry | complete（Host/ABI contract；production resolver wiring pending） | `p6-provider-route-snapshot-20260802/T-53-R-53-route-snapshot-host.md` |
+| `p6-provider-production-v1-20260802` | T-54～R-58 Provider production snapshot/result/mutation/recovery | complete（Host/ABI/offline）；V-68 current-device boundary closed | `p6-provider-production-v1-20260802/T-54-T-58-provider-production-host.md` |
+| `p6-provider-v68-20260802` | V-68 production composite current-device boundary | current-device supported scope complete；strong identity dependent scope unsupported/not_observed | `p6-provider-v68-20260802/V-68-current-device-production-boundary.json` |
+| `p6-provider-namespace-v1-20260803` | V-69 Namespace Projection 真机验收 | current-device supported scope complete（unknown mount exclusion 通过；exact collision 与 caller-scoped Provider query/open not_observed；外部删除活动 Namespace 只验证进程重启恢复） | `p6-provider-namespace-v1-20260803/V-69-namespace-projection-device.json` |
 
 `p6-auxiliary-20260730/V-31-provider-early-start-before.md` 是上述 Provider 生命周期修复的 before 证据；
 原文件曾误标为 V-40，已按任务清单更正为 V-31，避免与 ADR-0015 决策门冲突。

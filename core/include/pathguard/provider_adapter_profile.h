@@ -6,6 +6,7 @@
 #include <string>
 
 #include "pathguard/provider_contract.h"
+#include "pathguard/namespace_projection.h"
 #include "pathguard/provider_route_context.h"
 #include "pathguard/route_provenance.h"
 
@@ -161,10 +162,20 @@ inline ProviderAdapterDeploymentMatchV1 MatchProviderAdapterDeployment(
     return output;
 }
 
+enum class ProviderRouteReverseMode : std::uint8_t {
+    kStaticUnique = 1,
+    kProvenance = 2,
+};
+
 struct ProviderRouteBindingV1 {
     ProviderRouteContext context;
+    ProviderRouteReverseMode reverse_mode =
+        ProviderRouteReverseMode::kProvenance;
+    std::string namespace_id;
     std::string visible_source_path;
     std::string backing_target_path;
+    std::string visible_source_root;
+    std::string backing_target_root;
     std::string provider_uri;
     std::string stable_document_id;
     provenance::ObjectIdentity fd_identity;
@@ -231,13 +242,30 @@ inline ProviderRouteBindingObservationV1 ValidateProviderRouteBinding(
     }
     if (!ValidProviderAbsolutePath(binding.visible_source_path)
         || !ValidProviderAbsolutePath(binding.backing_target_path)
-        || binding.visible_source_path == binding.backing_target_path
+        || binding.visible_source_path == binding.backing_target_path) {
+        return {ProviderRouteBindingReason::kInvalidPathMapping};
+    }
+    if (binding.stable_document_id.empty()) {
+        return {ProviderRouteBindingReason::kExternalIdentityMissing};
+    }
+    if (binding.reverse_mode == ProviderRouteReverseMode::kStaticUnique) {
+        if (!ValidProviderAbsolutePath(binding.visible_source_root)
+            || !ValidProviderAbsolutePath(binding.backing_target_root)
+            || !namespace_projection::NamespaceTargetMatchesV1(
+                binding.backing_target_root, binding.namespace_id)
+            || !namespace_projection::SameRelativeTail(
+                binding.visible_source_path, binding.visible_source_root,
+                binding.backing_target_path, binding.backing_target_root)) {
+            return {ProviderRouteBindingReason::kInvalidPathMapping};
+        }
+        return {ProviderRouteBindingReason::kReady};
+    }
+    if (binding.reverse_mode != ProviderRouteReverseMode::kProvenance
         || !TargetMatchesRouteKey(binding.backing_target_path,
                                   binding.reverse_record.key)) {
         return {ProviderRouteBindingReason::kInvalidPathMapping};
     }
-    if (binding.provider_uri.compare(0, 10, "content://") != 0
-        || binding.stable_document_id.empty()) {
+    if (binding.provider_uri.compare(0, 10, "content://") != 0) {
         return {ProviderRouteBindingReason::kExternalIdentityMissing};
     }
     if (!binding.fd_identity.Strong()) {

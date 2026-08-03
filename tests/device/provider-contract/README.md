@@ -26,3 +26,12 @@ Passing this probe proves the public operation contract only. A version-pinned
 adapter profile, virtual source/target mapping, FD identity, reverse mapping,
 Provider restart recovery, and fail-open injection must also pass before
 `provider_query_insert_mapping` can become active.
+
+Shared Target Namespace Projection evidence is collected after LocalSend has
+received at least one test file:
+
+```powershell
+.\tests\device\provider-contract\collect_namespace_projection_status.ps1
+# After both logical sources have been exercised:
+.\tests\device\provider-contract\collect_namespace_projection_status.ps1 -RequireNamespaceCount 2
+```

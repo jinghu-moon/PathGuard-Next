@@ -42,6 +42,7 @@
 #include "pathguard/provenance_protocol.h"
 #include "pathguard/runtime_status.h"
 #include "pathguard/runtime_status_builder.h"
+#include "pathguard/secure_path_resolver.h"
 #include "zygisk.hpp"
 
 namespace {
@@ -64,12 +65,15 @@ constexpr uint32_t kCompanionResultVersion = 1;
 constexpr uint32_t kSharedStateMagic = 0x53534750;
 constexpr uint32_t kSharedStateVersion = 5;
 constexpr size_t kMaxMountRules = 64;
+constexpr uint32_t kMaxProviderRouteSnapshotBindings = 256;
+constexpr size_t kProviderNamespaceIdSize = 26;
 constexpr size_t kMaxPlanPathBytes = 64 * 1024;
 constexpr size_t kMaxProcessNameBytes = 256;
 constexpr int kProcessReadyTimeoutMs = 5000;
 constexpr int kCompanionIoTimeoutMs = 5000;
 constexpr int kRuntimeStatusTimeoutMs = 5000;
 constexpr uint32_t kProviderBridgeWaitTimeoutMs = 4500;
+constexpr useconds_t kProviderRoutePollUs = 500000;
 constexpr int kAppResultTimeoutMs = 300;
 constexpr int kPreflightCompletionGraceMs = 500;
 constexpr int kApplyingCompletionGraceMs = 500;
@@ -281,10 +285,11 @@ bool PrepareProviderLsplant(
         PathGuardLsplantInstallPassthroughV1* install,
         PathGuardLsplantWaitPassthroughV1* wait,
         PathGuardLsplantConfigureMappingV1* configure,
+        PathGuardLsplantPublishMappingV1* publish,
         ModuleBytes* dex) {
     if (module_dir < 0 || probe == nullptr || handle == nullptr
         || initialize == nullptr || install == nullptr || wait == nullptr
-        || configure == nullptr
+        || configure == nullptr || publish == nullptr
         || dex == nullptr) {
         return false;
     }
@@ -318,13 +323,16 @@ bool PrepareProviderLsplant(
         dlsym(library, "pathguard_lsplant_wait_passthrough_v1"));
     auto configure_mapping = reinterpret_cast<PathGuardLsplantConfigureMappingV1>(
         dlsym(library, "pathguard_lsplant_configure_mapping_v1"));
+    auto publish_mapping = reinterpret_cast<PathGuardLsplantPublishMappingV1>(
+        dlsym(library, "pathguard_lsplant_publish_mapping_v1"));
     if (init == nullptr || hook == nullptr || wait_for_hook == nullptr
-        || configure_mapping == nullptr
+        || configure_mapping == nullptr || publish_mapping == nullptr
         || !ReadModuleFile(module_dir, "provider/provider-hooker.dex", dex)) {
         dlclose(library); return false;
     }
     *handle = library; *initialize = init; *install = hook; *wait = wait_for_hook;
     *configure = configure_mapping;
+    *publish = publish_mapping;
     probe->library_loaded = true;
     return true;
 }
@@ -712,6 +720,29 @@ bool BuildMountSourcePath(const ProcessPlan& plan,
                               output, capacity);
 }
 
+int EnsureStorageDirectory(const char* absolute_path) {
+    pathguard::SecureResolvedPath parent =
+        pathguard::ResolveStoragePathParent(absolute_path, true, nullptr);
+    if (!parent.ok()) return parent.error;
+    int error = 0;
+    if (mkdirat(parent.parent_fd, parent.basename, 0770) != 0
+        && errno != EEXIST) {
+        error = errno;
+    }
+    if (error == 0) {
+        const int directory = openat(
+            parent.parent_fd, parent.basename,
+            O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (directory < 0) {
+            error = errno;
+        } else {
+            close(directory);
+        }
+    }
+    pathguard::CloseSecureResolvedPath(&parent);
+    return error;
+}
+
 bool LoadProcessPlan(int module_dir, const char* process_name, jint uid,
                      ProcessPlan* plan, PolicyLoadPerf* perf) {
     if (plan == nullptr || process_name == nullptr
@@ -945,6 +976,953 @@ bool LoadProviderPolicy(int module_dir, PathPolicyMapping* output) {
     }
     if (output->scope_count == 0) ReleasePathPolicy(output);
     return output->scope_count > 0;
+}
+
+struct ProviderRouteSnapshotData {
+    pathguard::provenance_protocol::Record record{};
+    char visible_source[PATH_MAX]{};
+    char backing_target[PATH_MAX]{};
+    char namespace_id[kProviderNamespaceIdSize + 1]{};
+    char stable_document_id[
+        PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_CAPACITY]{};
+};
+
+struct ProviderRouteSnapshotOwned {
+    PathGuardProviderRouteSnapshotV1 snapshot{};
+    PathGuardProviderRouteBindingV1* bindings = nullptr;
+    ProviderRouteSnapshotData* data = nullptr;
+    bool provenance_available = false;
+    uint64_t provenance_generation = 0;
+};
+
+void ReleaseProviderRouteSnapshot(ProviderRouteSnapshotOwned* snapshot) {
+    if (snapshot == nullptr) return;
+    free(snapshot->bindings);
+    free(snapshot->data);
+    free(snapshot);
+}
+
+class ProviderRouteDomain final {
+public:
+    class Guard final {
+    public:
+        Guard() = default;
+        Guard(const Guard&) = delete;
+        Guard& operator=(const Guard&) = delete;
+        ~Guard() { Reset(); }
+        const ProviderRouteSnapshotOwned* get() const { return snapshot_; }
+    private:
+        friend class ProviderRouteDomain;
+        void Reset() {
+            if (domain_ != nullptr && slot_ < kSlots) {
+                __atomic_store_n(
+                    &domain_->hazards_[slot_],
+                    static_cast<ProviderRouteSnapshotOwned*>(nullptr),
+                    __ATOMIC_RELEASE);
+                __atomic_store_n(
+                    &domain_->owners_[slot_], static_cast<void*>(nullptr),
+                    __ATOMIC_RELEASE);
+            }
+            domain_ = nullptr;
+            snapshot_ = nullptr;
+            slot_ = kSlots;
+        }
+        ProviderRouteDomain* domain_ = nullptr;
+        const ProviderRouteSnapshotOwned* snapshot_ = nullptr;
+        uint32_t slot_ = kSlots;
+    };
+
+    bool Acquire(Guard* guard) {
+        if (guard == nullptr) return false;
+        guard->Reset();
+        uint32_t slot = kSlots;
+        for (uint32_t index = 0; index < kSlots; ++index) {
+            void* expected = nullptr;
+            if (__atomic_compare_exchange_n(
+                    &owners_[index], &expected, guard, false,
+                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                slot = index;
+                break;
+            }
+        }
+        if (slot == kSlots) return false;
+        guard->domain_ = this;
+        guard->slot_ = slot;
+        for (;;) {
+            ProviderRouteSnapshotOwned* candidate = __atomic_load_n(
+                &active_, __ATOMIC_ACQUIRE);
+            __atomic_store_n(&hazards_[slot], candidate, __ATOMIC_RELEASE);
+            if (__atomic_load_n(&active_, __ATOMIC_ACQUIRE) == candidate) {
+                guard->snapshot_ = candidate;
+                return candidate != nullptr;
+            }
+            __atomic_store_n(
+                &hazards_[slot], static_cast<ProviderRouteSnapshotOwned*>(nullptr),
+                __ATOMIC_RELEASE);
+        }
+    }
+
+    bool Publish(ProviderRouteSnapshotOwned* candidate, size_t bytes) {
+        if (candidate == nullptr || bytes == 0 || bytes > 8 * 1024 * 1024) {
+            return false;
+        }
+        uint32_t expected = 0;
+        if (!__atomic_compare_exchange_n(
+                &writer_active_, &expected, 1u, false,
+                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            return false;
+        }
+        Reclaim();
+        if (retired_count_ >= kRetired) {
+            __atomic_store_n(&writer_active_, 0u, __ATOMIC_RELEASE);
+            return false;
+        }
+        ProviderRouteSnapshotOwned* previous = __atomic_exchange_n(
+            &active_, candidate, __ATOMIC_ACQ_REL);
+        if (previous != nullptr) retired_[retired_count_++] = previous;
+        Reclaim();
+        __atomic_store_n(&writer_active_, 0u, __ATOMIC_RELEASE);
+        return true;
+    }
+
+private:
+    void Reclaim() {
+        for (uint32_t slot = 0; slot < kSlots; ++slot) {
+            if (__atomic_load_n(&owners_[slot], __ATOMIC_ACQUIRE) != nullptr
+                && __atomic_load_n(&hazards_[slot], __ATOMIC_ACQUIRE)
+                    == nullptr) {
+                return;
+            }
+        }
+        uint32_t kept = 0;
+        for (uint32_t index = 0; index < retired_count_; ++index) {
+            bool hazardous = false;
+            for (uint32_t slot = 0; slot < kSlots; ++slot) {
+                hazardous = hazardous
+                    || __atomic_load_n(&hazards_[slot], __ATOMIC_ACQUIRE)
+                        == retired_[index];
+            }
+            if (hazardous) {
+                retired_[kept++] = retired_[index];
+            } else {
+                ReleaseProviderRouteSnapshot(retired_[index]);
+            }
+        }
+        retired_count_ = kept;
+    }
+
+    static constexpr uint32_t kSlots = 256;
+    static constexpr uint32_t kRetired = 8;
+    void* owners_[kSlots]{};
+    ProviderRouteSnapshotOwned* hazards_[kSlots]{};
+    ProviderRouteSnapshotOwned* active_ = nullptr;
+    ProviderRouteSnapshotOwned* retired_[kRetired]{};
+    uint32_t retired_count_ = 0;
+    uint32_t writer_active_ = 0;
+};
+
+struct ProviderMappingResolverContext {
+    ProviderRouteDomain* routes = nullptr;
+    uint64_t profile_id = 0;
+    uint32_t runtime_available = 0;
+};
+
+struct ProviderExternalIdentitySlot {
+    uint32_t state = 0;
+    uint32_t attempts = 0;
+    int32_t caller_uid = -1;
+    PathGuardLsplantExternalIdentityV1 identity{};
+};
+
+struct ProviderExternalIdentityQueue {
+    static constexpr uint32_t kSlotCount = 32;
+    ProviderExternalIdentitySlot slots[kSlotCount]{};
+};
+
+int EnqueueProviderExternalIdentity(
+        const PathGuardLsplantExternalIdentityV1* identity,
+        void* user_data) {
+    if (identity == nullptr || user_data == nullptr
+        || identity->version != PATHGUARD_LSPLANT_BRIDGE_API_VERSION
+        || identity->size < sizeof(*identity)
+        || identity->reserved[0] != 0 || identity->reserved[1] != 0
+        || identity->file_path_size == 0
+        || identity->file_path_size
+            >= PATHGUARD_LSPLANT_MAPPING_FILE_PATH_CAPACITY
+        || identity->identifier_size == 0
+        || identity->identifier_size
+            >= PATHGUARD_LSPLANT_EXTERNAL_IDENTITY_CAPACITY
+        || (identity->identifier_kind
+                != PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_CONTENT_URI
+            && identity->identifier_kind
+                != PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_DOCUMENT_ID)
+        || (identity->path_kind
+                != PATHGUARD_LSPLANT_EXTERNAL_PATH_ABSOLUTE
+            && identity->path_kind
+                != PATHGUARD_LSPLANT_EXTERNAL_PATH_RELATIVE)
+        || (identity->identifier_kind
+                == PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_CONTENT_URI
+            && (identity->identifier_size < 10
+                || memcmp(identity->identifier, "content://", 10) != 0))) {
+        return 0;
+    }
+    const int32_t caller_uid =
+        pathguard::provider_redirect::CurrentCallingUid();
+    if (caller_uid < 10000) return 0;
+    auto* queue = static_cast<ProviderExternalIdentityQueue*>(user_data);
+    for (uint32_t index = 0; index < queue->kSlotCount; ++index) {
+        uint32_t expected = 0;
+        if (!__atomic_compare_exchange_n(
+                &queue->slots[index].state, &expected, 1u, false,
+                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            continue;
+        }
+        queue->slots[index].caller_uid = caller_uid;
+        queue->slots[index].attempts = 0;
+        queue->slots[index].identity = *identity;
+        __atomic_store_n(
+            &queue->slots[index].state, 2u, __ATOMIC_RELEASE);
+        return 1;
+    }
+    return 0;
+}
+
+PathGuardProviderRouteBytesV1 ProviderRouteBytes(
+        const void* data, size_t size) {
+    return {
+        static_cast<const uint8_t*>(data),
+        static_cast<uint32_t>(size),
+    };
+}
+
+bool CallProvenanceCompanion(
+        zygisk::Api* api,
+        const pathguard::provenance_protocol::Request& request,
+        pathguard::provenance_protocol::Response* response) {
+    if (api == nullptr || response == nullptr) return false;
+    const int socket = api->connectCompanion();
+    if (socket < 0) return false;
+    SetSocketTimeout(socket, kCompanionIoTimeoutMs);
+    const bool handled = send(socket, &request, sizeof(request), MSG_NOSIGNAL)
+            == static_cast<ssize_t>(sizeof(request))
+        && recv(socket, response, sizeof(*response), MSG_WAITALL)
+            == static_cast<ssize_t>(sizeof(*response))
+        && response->magic == pathguard::provenance_protocol::kMagic
+        && response->version == pathguard::provenance_protocol::kVersion
+        && response->provenance_error
+            == pathguard::provenance_protocol::Error::kNone;
+    close(socket);
+    return handled;
+}
+
+bool ProviderRecordMatchesPolicy(
+        const pathguard::policy_v6_view::PolicyV6View& policy,
+        const PathPolicyMapping& mapping,
+        const pathguard::provenance_protocol::Record& record,
+        uint32_t* package_index) {
+    if (package_index == nullptr || record.caller_uid < 10000
+        || record.rule_id == 0 || record.identity_epoch == 0
+        || record.commit_sequence == 0
+        || record.content_generation != policy.content_generation()
+        || record.identity_epoch != record.content_generation
+        || record.created_plan_generation == 0
+        || record.bound_plan_generation != record.created_plan_generation) {
+        return false;
+    }
+    const void* volume_end = memchr(
+        record.identity.volume, '\0', sizeof(record.identity.volume));
+    const void* root_end = memchr(
+        record.storage_root, '\0', sizeof(record.storage_root));
+    const void* target_end = memchr(
+        record.target_relative, '\0', sizeof(record.target_relative));
+    const void* logical_end = memchr(
+        record.logical_source, '\0', sizeof(record.logical_source));
+    const void* uri_end = memchr(
+        record.provider_uri, '\0', sizeof(record.provider_uri));
+    const void* document_end = memchr(
+        record.stable_document_id, '\0',
+        sizeof(record.stable_document_id));
+    if (volume_end == nullptr || root_end == nullptr || target_end == nullptr
+        || logical_end == nullptr || uri_end == nullptr
+        || document_end == nullptr || record.identity.inode == 0
+        || record.identity.birth_nanoseconds >= 1000000000
+        || record.identity.object_type == 0) {
+        return false;
+    }
+    const size_t uri_size = static_cast<const char*>(uri_end)
+        - record.provider_uri;
+    if (uri_size != 0
+        && (uri_size < 10
+            || memcmp(record.provider_uri, "content://", 10) != 0)) {
+        return false;
+    }
+    const size_t target_size = static_cast<const char*>(target_end)
+        - record.target_relative;
+    const size_t logical_size = static_cast<const char*>(logical_end)
+        - record.logical_source;
+    if (!pathguard::storage_path_adapter::SafePathComponents(
+            record.target_relative, target_size)
+        || !pathguard::storage_path_adapter::SafePathComponents(
+            record.logical_source, logical_size)) {
+        return false;
+    }
+    for (uint32_t scope_index = 0;
+         scope_index < mapping.scope_count; ++scope_index) {
+        const auto& scope = mapping.scopes[scope_index];
+        if (scope.caller_uid != record.caller_uid
+            || scope.user_id != record.user_id) {
+            continue;
+        }
+        pathguard::policy_v6_view::PackageRef package;
+        if (!policy.PackageAt(scope.package_index, &package)
+            || package.plan_generation != record.bound_plan_generation) {
+            continue;
+        }
+        for (uint32_t action_index = 0;
+             action_index < package.action_count; ++action_index) {
+            pathguard::policy_v6_view::ActionRef action;
+            if (policy.ActionAt(package.first_action + action_index, &action)
+                && action.rule_id == record.rule_id
+                && action.domain == kProviderDomain
+                && action.kind == kRedirectAction) {
+                *package_index = scope.package_index;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool PopulateProviderRouteBinding(
+        const pathguard::provenance_protocol::Record& record,
+        uint32_t package_index, ProviderRouteSnapshotData* data,
+        PathGuardProviderRouteBindingV1* binding) {
+    if (data == nullptr || binding == nullptr) return false;
+    data->record = record;
+    const int visible_size = snprintf(
+        data->visible_source, sizeof(data->visible_source),
+        "/storage/emulated/%u/%s", record.user_id,
+        data->record.logical_source);
+    const int backing_size = snprintf(
+        data->backing_target, sizeof(data->backing_target),
+        "/storage/emulated/%u/%s", record.user_id,
+        data->record.target_relative);
+    const int document_size = data->record.stable_document_id[0] != '\0'
+        ? snprintf(data->stable_document_id, sizeof(data->stable_document_id),
+                   "%s", data->record.stable_document_id)
+        : snprintf(data->stable_document_id, sizeof(data->stable_document_id),
+                   "primary:%s", data->record.logical_source);
+    if (visible_size <= 0 || backing_size <= 0 || document_size <= 0
+        || static_cast<size_t>(visible_size) >= sizeof(data->visible_source)
+        || static_cast<size_t>(backing_size) >= sizeof(data->backing_target)
+        || static_cast<size_t>(document_size)
+            >= sizeof(data->stable_document_id)) {
+        return false;
+    }
+    const size_t volume_size = strlen(data->record.identity.volume);
+    const size_t root_size = strlen(data->record.storage_root);
+    const size_t target_relative_size = strlen(data->record.target_relative);
+    const bool file_handle = data->record.identity.kind
+        == pathguard::provenance_protocol::IdentityKind::kFileHandle;
+    if ((!file_handle && data->record.identity.kind
+            != pathguard::provenance_protocol::IdentityKind::kStatxBirthTime)
+        || data->record.identity.handle_size
+            > pathguard::provenance_protocol::kIdentityHandleCapacity) {
+        return false;
+    }
+    *binding = {};
+    binding->version = PATHGUARD_PROVIDER_ROUTE_SNAPSHOT_VERSION;
+    binding->size = sizeof(*binding);
+    binding->reverse_mode = PATHGUARD_PROVIDER_ROUTE_REVERSE_PROVENANCE;
+    binding->identity_kind = file_handle
+        ? PATHGUARD_PROVIDER_ROUTE_IDENTITY_FILE_HANDLE
+        : PATHGUARD_PROVIDER_ROUTE_IDENTITY_STATX_BIRTH_TIME;
+    binding->object_type = data->record.identity.object_type;
+    binding->identity_handle_type = data->record.identity.handle_type;
+    binding->binding_id = data->record.commit_sequence;
+    binding->reverse_record_id = data->record.commit_sequence;
+    binding->caller_uid = data->record.caller_uid;
+    binding->user_id = data->record.user_id;
+    binding->package_index = package_index;
+    binding->birth_nanoseconds = data->record.identity.birth_nanoseconds;
+    binding->plan_generation = data->record.bound_plan_generation;
+    binding->rule_id = data->record.rule_id;
+    binding->identity_epoch = data->record.identity_epoch;
+    binding->content_generation = data->record.content_generation;
+    binding->created_plan_generation = data->record.created_plan_generation;
+    binding->bound_plan_generation = data->record.bound_plan_generation;
+    binding->commit_sequence = data->record.commit_sequence;
+    binding->inode = data->record.identity.inode;
+    binding->birth_seconds = data->record.identity.birth_seconds;
+    binding->visible_source_path = ProviderRouteBytes(
+        data->visible_source, static_cast<size_t>(visible_size));
+    binding->backing_target_path = ProviderRouteBytes(
+        data->backing_target, static_cast<size_t>(backing_size));
+    binding->provider_uri = ProviderRouteBytes(
+        data->record.provider_uri, strlen(data->record.provider_uri));
+    binding->stable_document_id = ProviderRouteBytes(
+        data->stable_document_id, static_cast<size_t>(document_size));
+    binding->identity_volume = ProviderRouteBytes(
+        data->record.identity.volume, volume_size);
+    binding->identity_handle = ProviderRouteBytes(
+        data->record.identity.handle,
+        data->record.identity.handle_size);
+    binding->storage_root_id = ProviderRouteBytes(
+        data->record.storage_root, root_size);
+    binding->target_relative_path = ProviderRouteBytes(
+        data->record.target_relative, target_relative_size);
+    return true;
+}
+
+uint32_t CountStaticProviderRouteBindings(
+        const pathguard::policy_v6_view::PolicyV6View& policy,
+        const PathPolicyMapping& mapping) {
+    uint32_t count = 0;
+    for (uint32_t scope_index = 0;
+         scope_index < mapping.scope_count; ++scope_index) {
+        pathguard::policy_v6_view::PackageRef package;
+        if (!policy.PackageAt(mapping.scopes[scope_index].package_index,
+                              &package)) {
+            continue;
+        }
+        for (uint32_t index = 0; index < package.action_count; ++index) {
+            pathguard::policy_v6_view::ActionRef action;
+            if (policy.ActionAt(package.first_action + index, &action)
+                && action.domain == kProviderDomain
+                && action.kind == kRedirectAction
+                && action.reverse
+                    == PATHGUARD_PROVIDER_ROUTE_REVERSE_STATIC_UNIQUE) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
+bool PopulateStaticProviderRouteBinding(
+        const pathguard::policy_v6_view::PolicyV6View& policy,
+        const pathguard::storage_path_adapter::PolicyScope& scope,
+        const pathguard::policy_v6_view::PackageRef& package,
+        const pathguard::policy_v6_view::ActionRef& action,
+        uint64_t binding_id, ProviderRouteSnapshotData* data,
+        PathGuardProviderRouteBindingV1* binding) {
+    if (data == nullptr || binding == nullptr || binding_id == 0) return false;
+    pathguard::policy_v6_view::SelectorRef selector;
+    pathguard::policy_v6_view::StringRef source;
+    pathguard::policy_v6_view::StringRef target;
+    if (!policy.SelectorAt(action.selector_id, &selector)
+        || !policy.StringAt(selector.root_id, &source)
+        || !policy.StringAt(action.target_id, &target)
+        || source.empty() || target.empty()) {
+        return false;
+    }
+    constexpr char kMarker[] = "/_pg/v1/ns_";
+    constexpr size_t kMarkerSize = sizeof(kMarker) - 1;
+    if (target.size <= kMarkerSize + kProviderNamespaceIdSize) {
+        return false;
+    }
+    const size_t marker = target.size
+        - kMarkerSize - kProviderNamespaceIdSize;
+    if (memcmp(target.data + marker, kMarker, kMarkerSize) != 0) return false;
+    const char* namespace_id = target.data + marker + kMarkerSize;
+    for (size_t index = 0; index < kProviderNamespaceIdSize; ++index) {
+        const char value = namespace_id[index];
+        if (!((value >= 'a' && value <= 'z')
+              || (value >= '2' && value <= '7'))) {
+            return false;
+        }
+    }
+    const int visible_size = snprintf(
+        data->visible_source, sizeof(data->visible_source),
+        "/storage/emulated/%u/%.*s", scope.user_id,
+        static_cast<int>(source.size), source.data);
+    const int backing_size = snprintf(
+        data->backing_target, sizeof(data->backing_target),
+        "/storage/emulated/%u/%.*s", scope.user_id,
+        static_cast<int>(target.size), target.data);
+    const int document_size = snprintf(
+        data->stable_document_id, sizeof(data->stable_document_id),
+        "primary:%.*s", static_cast<int>(source.size), source.data);
+    if (visible_size <= 0 || backing_size <= 0 || document_size <= 0
+        || static_cast<size_t>(visible_size) >= sizeof(data->visible_source)
+        || static_cast<size_t>(backing_size) >= sizeof(data->backing_target)
+        || static_cast<size_t>(document_size)
+            >= sizeof(data->stable_document_id)) {
+        return false;
+    }
+    memcpy(data->namespace_id, namespace_id, kProviderNamespaceIdSize);
+    *binding = {};
+    binding->version = PATHGUARD_PROVIDER_ROUTE_SNAPSHOT_VERSION;
+    binding->size = sizeof(*binding);
+    binding->reverse_mode =
+        PATHGUARD_PROVIDER_ROUTE_REVERSE_STATIC_UNIQUE;
+    binding->binding_id = binding_id;
+    binding->caller_uid = scope.caller_uid;
+    binding->user_id = scope.user_id;
+    binding->package_index = scope.package_index;
+    binding->plan_generation = package.plan_generation;
+    binding->rule_id = action.rule_id;
+    binding->visible_source_path = ProviderRouteBytes(
+        data->visible_source, static_cast<size_t>(visible_size));
+    binding->backing_target_path = ProviderRouteBytes(
+        data->backing_target, static_cast<size_t>(backing_size));
+    binding->stable_document_id = ProviderRouteBytes(
+        data->stable_document_id, static_cast<size_t>(document_size));
+    binding->namespace_id = ProviderRouteBytes(
+        data->namespace_id, kProviderNamespaceIdSize);
+    binding->visible_source_root = binding->visible_source_path;
+    binding->backing_target_root = binding->backing_target_path;
+    return true;
+}
+
+ProviderRouteSnapshotOwned* LoadProviderRouteSnapshot(
+        zygisk::Api* api, const PathPolicyMapping& mapping) {
+    pathguard::policy_v6_view::PolicyV6View policy;
+    if (mapping.mapping == nullptr
+        || !policy.Initialize(static_cast<const uint8_t*>(mapping.mapping),
+                              mapping.size)) {
+        return nullptr;
+    }
+    auto* output = static_cast<ProviderRouteSnapshotOwned*>(
+        calloc(1, sizeof(ProviderRouteSnapshotOwned)));
+    if (output == nullptr) return nullptr;
+    output->snapshot.version = PATHGUARD_PROVIDER_ROUTE_SNAPSHOT_VERSION;
+    output->snapshot.size = sizeof(output->snapshot);
+    output->snapshot.generation = policy.content_generation();
+
+    pathguard::provenance_protocol::Request request;
+    request.command = pathguard::provenance_protocol::Command::kSnapshotInfo;
+    pathguard::provenance_protocol::Response response;
+    const bool provenance_available =
+        CallProvenanceCompanion(api, request, &response);
+    const uint32_t provenance_count = provenance_available
+        ? response.snapshot_count : 0;
+    const uint32_t static_count =
+        CountStaticProviderRouteBindings(policy, mapping);
+    if (provenance_count > kMaxProviderRouteSnapshotBindings
+        || static_count > kMaxProviderRouteSnapshotBindings
+        || static_count + provenance_count
+            > kMaxProviderRouteSnapshotBindings) {
+        ReleaseProviderRouteSnapshot(output);
+        return nullptr;
+    }
+    output->provenance_available = provenance_available;
+    output->provenance_generation = provenance_available
+        ? response.snapshot_generation : 0;
+    if (provenance_available && response.snapshot_generation != 0) {
+        output->snapshot.generation = response.snapshot_generation;
+    }
+    const uint32_t capacity = static_count + provenance_count;
+    if (capacity == 0) return output;
+    output->bindings = static_cast<PathGuardProviderRouteBindingV1*>(
+        calloc(capacity,
+               sizeof(PathGuardProviderRouteBindingV1)));
+    output->data = static_cast<ProviderRouteSnapshotData*>(
+        calloc(capacity, sizeof(ProviderRouteSnapshotData)));
+    if (output->bindings == nullptr || output->data == nullptr) {
+        ReleaseProviderRouteSnapshot(output);
+        return nullptr;
+    }
+    uint32_t accepted = 0;
+    for (uint32_t scope_index = 0;
+         scope_index < mapping.scope_count; ++scope_index) {
+        const auto& scope = mapping.scopes[scope_index];
+        pathguard::policy_v6_view::PackageRef package;
+        if (!policy.PackageAt(scope.package_index, &package)) continue;
+        for (uint32_t index = 0; index < package.action_count; ++index) {
+            pathguard::policy_v6_view::ActionRef action;
+            if (!policy.ActionAt(package.first_action + index, &action)
+                || action.domain != kProviderDomain
+                || action.kind != kRedirectAction
+                || action.reverse
+                    != PATHGUARD_PROVIDER_ROUTE_REVERSE_STATIC_UNIQUE) {
+                continue;
+            }
+            if (!PopulateStaticProviderRouteBinding(
+                    policy, scope, package, action,
+                    static_cast<uint64_t>(accepted) + 1,
+                    &output->data[accepted], &output->bindings[accepted])) {
+                ReleaseProviderRouteSnapshot(output);
+                return nullptr;
+            }
+            ++accepted;
+        }
+    }
+    const uint64_t expected_generation = response.snapshot_generation;
+    const uint32_t expected_count = provenance_count;
+    for (uint32_t index = 0; index < expected_count; ++index) {
+        request = {};
+        request.command =
+            pathguard::provenance_protocol::Command::kSnapshotRecord;
+        request.transaction_low = index;
+        response = {};
+        uint32_t package_index = 0;
+        if (!CallProvenanceCompanion(api, request, &response)
+            || response.snapshot_generation != expected_generation
+            || response.snapshot_count != expected_count
+            || response.snapshot_index != index) {
+            ReleaseProviderRouteSnapshot(output);
+            return nullptr;
+        }
+        if (!ProviderRecordMatchesPolicy(
+                policy, mapping, response.record, &package_index)) {
+            continue;
+        }
+        if (!PopulateProviderRouteBinding(
+                response.record, package_index, &output->data[accepted],
+                &output->bindings[accepted])) {
+            ReleaseProviderRouteSnapshot(output);
+            return nullptr;
+        }
+        output->bindings[accepted].binding_id =
+            static_cast<uint64_t>(accepted) + 1;
+        ++accepted;
+    }
+    output->snapshot.binding_count = accepted;
+    output->snapshot.bindings = output->bindings;
+    return output;
+}
+
+bool ProviderRouteSliceEquals(
+        const uint8_t* value, uint16_t size,
+        const PathGuardProviderRouteBytesV1& expected) {
+    return value != nullptr && size == expected.size
+        && (size == 0 || memcmp(value, expected.data, size) == 0);
+}
+
+bool ProviderRouteSliceHasPathPrefix(
+        const uint8_t* value, uint16_t size,
+        const PathGuardProviderRouteBytesV1& prefix) {
+    return value != nullptr && prefix.data != nullptr && prefix.size != 0
+        && size >= prefix.size
+        && memcmp(value, prefix.data, prefix.size) == 0
+        && (size == prefix.size || value[prefix.size] == '/');
+}
+
+bool ProviderRouteRelativeSliceHasSourcePrefix(
+        const uint8_t* value, uint16_t size,
+        const PathGuardProviderRouteBytesV1& stable_document_id) {
+    constexpr char kPrimary[] = "primary:";
+    if (stable_document_id.data == nullptr
+        || stable_document_id.size <= sizeof(kPrimary) - 1
+        || memcmp(stable_document_id.data, kPrimary,
+                  sizeof(kPrimary) - 1) != 0) {
+        return false;
+    }
+    const PathGuardProviderRouteBytesV1 source{
+        stable_document_id.data + sizeof(kPrimary) - 1,
+        static_cast<uint32_t>(
+            stable_document_id.size - (sizeof(kPrimary) - 1)),
+    };
+    return ProviderRouteSliceHasPathPrefix(value, size, source);
+}
+
+bool ProviderRouteSliceHasStorageRelativePrefix(
+        const uint8_t* value, uint16_t size,
+        const PathGuardProviderRouteBytesV1& absolute_prefix) {
+    constexpr char kStorage[] = "/storage/emulated/";
+    if (absolute_prefix.data == nullptr
+        || absolute_prefix.size <= sizeof(kStorage) - 1
+        || memcmp(absolute_prefix.data, kStorage,
+                  sizeof(kStorage) - 1) != 0) {
+        return false;
+    }
+    const uint8_t* user = absolute_prefix.data + sizeof(kStorage) - 1;
+    const uint8_t* end = absolute_prefix.data + absolute_prefix.size;
+    const uint8_t* separator = static_cast<const uint8_t*>(
+        memchr(user, '/', static_cast<size_t>(end - user)));
+    if (separator == nullptr || separator + 1 >= end) return false;
+    const PathGuardProviderRouteBytesV1 relative{
+        separator + 1, static_cast<uint32_t>(end - separator - 1),
+    };
+    return ProviderRouteSliceHasPathPrefix(value, size, relative);
+}
+
+bool ProviderRouteDocumentSliceHasAbsolutePrefix(
+        const uint8_t* value, uint16_t size,
+        const PathGuardProviderRouteBytesV1& absolute_prefix) {
+    constexpr char kPrimary[] = "primary:";
+    return size > sizeof(kPrimary) - 1
+        && memcmp(value, kPrimary, sizeof(kPrimary) - 1) == 0
+        && ProviderRouteSliceHasStorageRelativePrefix(
+            value + sizeof(kPrimary) - 1,
+            static_cast<uint16_t>(size - (sizeof(kPrimary) - 1)),
+            absolute_prefix);
+}
+
+bool CopyProviderExternalText(
+        const uint8_t* input, uint16_t size,
+        char* output, size_t capacity) {
+    if (input == nullptr || output == nullptr || size == 0
+        || size >= capacity || memchr(input, '\0', size) != nullptr) {
+        return false;
+    }
+    memcpy(output, input, size);
+    output[size] = '\0';
+    return true;
+}
+
+bool SameProviderLogicalPath(const char* left, const char* right) {
+    pathguard::storage_path_adapter::LogicalPath left_path;
+    pathguard::storage_path_adapter::LogicalPath right_path;
+    return pathguard::storage_path_adapter::ParseLogicalPath(
+               left, &left_path)
+        && pathguard::storage_path_adapter::ParseLogicalPath(
+               right, &right_path)
+        && left_path.user_id == right_path.user_id
+        && left_path.root_size == right_path.root_size
+        && left_path.relative_size == right_path.relative_size
+        && memcmp(left_path.root, right_path.root, left_path.root_size) == 0
+        && memcmp(left_path.relative, right_path.relative,
+                  left_path.relative_size) == 0;
+}
+
+enum class ProviderBootstrapResult : uint8_t {
+    kReady,
+    kInvalidInput,
+    kPolicyUnavailable,
+    kScopeUnavailable,
+    kAuthoritativePathInvalid,
+    kRouteUnavailable,
+    kRecordInvalid,
+    kTargetUnavailable,
+    kStrongIdentityUnavailable,
+    kPrepareFailed,
+    kMaterializeFailed,
+    kCommitFailed,
+};
+
+const char* ProviderBootstrapResultName(ProviderBootstrapResult result) {
+    switch (result) {
+        case ProviderBootstrapResult::kReady: return "ready";
+        case ProviderBootstrapResult::kInvalidInput: return "invalid_input";
+        case ProviderBootstrapResult::kPolicyUnavailable:
+            return "policy_unavailable";
+        case ProviderBootstrapResult::kScopeUnavailable:
+            return "scope_unavailable";
+        case ProviderBootstrapResult::kAuthoritativePathInvalid:
+            return "authoritative_path_invalid";
+        case ProviderBootstrapResult::kRouteUnavailable:
+            return "route_unavailable";
+        case ProviderBootstrapResult::kRecordInvalid: return "record_invalid";
+        case ProviderBootstrapResult::kTargetUnavailable:
+            return "target_unavailable";
+        case ProviderBootstrapResult::kStrongIdentityUnavailable:
+            return "strong_identity_unavailable";
+        case ProviderBootstrapResult::kPrepareFailed: return "prepare_failed";
+        case ProviderBootstrapResult::kMaterializeFailed:
+            return "materialize_failed";
+        case ProviderBootstrapResult::kCommitFailed: return "commit_failed";
+    }
+    return "unknown";
+}
+
+ProviderBootstrapResult BuildProviderBootstrapRecord(
+        const PathPolicyMapping& mapping, int32_t caller_uid,
+        const PathGuardLsplantExternalIdentityV1& event,
+        pathguard::provenance_protocol::Record* record) {
+    if (mapping.mapping == nullptr || record == nullptr) {
+        return ProviderBootstrapResult::kInvalidInput;
+    }
+    pathguard::policy_v6_view::PolicyV6View policy;
+    if (!policy.Initialize(
+            static_cast<const uint8_t*>(mapping.mapping), mapping.size)) {
+        return ProviderBootstrapResult::kPolicyUnavailable;
+    }
+    const pathguard::storage_path_adapter::PolicyScope* selected = nullptr;
+    for (uint32_t index = 0; index < mapping.scope_count; ++index) {
+        if (mapping.scopes[index].caller_uid == caller_uid) {
+            if (selected != nullptr) {
+                return ProviderBootstrapResult::kScopeUnavailable;
+            }
+            selected = &mapping.scopes[index];
+        }
+    }
+    if (selected == nullptr) return ProviderBootstrapResult::kScopeUnavailable;
+
+    char event_path[PATH_MAX]{};
+    char logical_relative[PATH_MAX]{};
+    if (!CopyProviderExternalText(
+            event.file_path, event.file_path_size,
+            event_path, sizeof(event_path))) {
+        return ProviderBootstrapResult::kAuthoritativePathInvalid;
+    }
+    if (event.path_kind == PATHGUARD_LSPLANT_EXTERNAL_PATH_RELATIVE) {
+        if (!pathguard::storage_path_adapter::SafePathComponents(
+                event_path, event.file_path_size)) {
+            return ProviderBootstrapResult::kAuthoritativePathInvalid;
+        }
+        memcpy(logical_relative, event_path, event.file_path_size + 1);
+    } else {
+        constexpr char kPrimaryDocumentPrefix[] = "primary:";
+        if (event.identifier_kind
+                != PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_DOCUMENT_ID
+            || event.identifier_size <= sizeof(kPrimaryDocumentPrefix) - 1
+            || memcmp(event.identifier, kPrimaryDocumentPrefix,
+                      sizeof(kPrimaryDocumentPrefix) - 1) != 0) {
+            return ProviderBootstrapResult::kAuthoritativePathInvalid;
+        }
+        const size_t relative_size = event.identifier_size
+            - (sizeof(kPrimaryDocumentPrefix) - 1);
+        if (relative_size >= sizeof(logical_relative)) {
+            return ProviderBootstrapResult::kAuthoritativePathInvalid;
+        }
+        memcpy(logical_relative,
+               event.identifier + sizeof(kPrimaryDocumentPrefix) - 1,
+               relative_size);
+        logical_relative[relative_size] = '\0';
+        if (!pathguard::storage_path_adapter::SafePathComponents(
+                logical_relative, relative_size)) {
+            return ProviderBootstrapResult::kAuthoritativePathInvalid;
+        }
+    }
+
+    char logical_path[PATH_MAX]{};
+    const int logical_size = snprintf(
+        logical_path, sizeof(logical_path), "/storage/emulated/%u/%s",
+        selected->user_id, logical_relative);
+    if (logical_size <= 0
+        || static_cast<size_t>(logical_size) >= sizeof(logical_path)) {
+        return ProviderBootstrapResult::kAuthoritativePathInvalid;
+    }
+    pathguard::CapabilitySnapshot capabilities;
+    capabilities.capability_generation = 1;
+    capabilities.observed_capabilities =
+        pathguard::kCapabilityProviderCallerUid;
+    capabilities.domains[static_cast<uint8_t>(
+        pathguard::AdmissionDomain::kProvider)] = {
+            pathguard::AdapterState::kActive,
+            pathguard::kProviderCompositeOperationsV1,
+            0,
+        };
+    pathguard::policy_pattern_runtime::MatchScratch scratch;
+    char target_path[PATH_MAX]{};
+    const auto rewrite = pathguard::storage_path_adapter::Rewrite(
+        policy, mapping.scopes, mapping.scope_count, caller_uid,
+        logical_path, pathguard::AdmissionDomain::kProvider,
+        pathguard::kOperationCreate, 1, capabilities, &scratch,
+        target_path, sizeof(target_path));
+    if (rewrite.disposition
+            != pathguard::storage_path_adapter::RewriteDisposition::kRedirect
+        || rewrite.reverse_mode != 2
+        || (event.path_kind == PATHGUARD_LSPLANT_EXTERNAL_PATH_ABSOLUTE
+            && !SameProviderLogicalPath(event_path, logical_path)
+            && !SameProviderLogicalPath(event_path, target_path))) {
+        return ProviderBootstrapResult::kRouteUnavailable;
+    }
+    if (!pathguard::provider_redirect::BuildProvenanceRecordForRoute(
+            rewrite, caller_uid, logical_path, target_path, record)) {
+        return ProviderBootstrapResult::kRecordInvalid;
+    }
+    if (event.identifier_kind
+            == PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_CONTENT_URI) {
+        memcpy(record->provider_uri, event.identifier, event.identifier_size);
+        record->provider_uri[event.identifier_size] = '\0';
+    } else {
+        memcpy(record->stable_document_id,
+               event.identifier, event.identifier_size);
+        record->stable_document_id[event.identifier_size] = '\0';
+    }
+    const int target = open(
+        target_path, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    if (target < 0) return ProviderBootstrapResult::kTargetUnavailable;
+    const bool identified =
+        pathguard::provider_redirect::CaptureProvenanceIdentity(
+            target, &record->identity);
+    close(target);
+    return identified ? ProviderBootstrapResult::kReady
+        : ProviderBootstrapResult::kStrongIdentityUnavailable;
+}
+
+int ResolveProviderMapping(
+        const PathGuardLsplantMappingRequestV1* request,
+        PathGuardLsplantMappingFactsV1* facts, void* user_data) {
+    if (request == nullptr || facts == nullptr || user_data == nullptr
+        || request->version != PATHGUARD_LSPLANT_BRIDGE_API_VERSION
+        || request->size < sizeof(*request)) {
+        return 0;
+    }
+    auto* context = static_cast<ProviderMappingResolverContext*>(user_data);
+    *facts = {};
+    facts->version = PATHGUARD_LSPLANT_BRIDGE_API_VERSION;
+    facts->size = sizeof(*facts);
+    facts->profile_matched = context->profile_id != 0 ? 1 : 0;
+    facts->profile_id = context->profile_id;
+    facts->supported_operations = pathguard::kProviderCompositeOperationsV1;
+    facts->runtime_available = static_cast<uint8_t>(__atomic_load_n(
+        &context->runtime_available, __ATOMIC_ACQUIRE) != 0);
+    ProviderRouteDomain::Guard routes;
+    if (context->routes == nullptr || !context->routes->Acquire(&routes)
+        || routes.get()->snapshot.binding_count == 0
+        || pathguard::provider_redirect::CurrentCallingUid() < 10000) {
+        return 1;
+    }
+    const int32_t caller_uid =
+        pathguard::provider_redirect::CurrentCallingUid();
+    for (uint32_t index = 0;
+         index < routes.get()->snapshot.binding_count; ++index) {
+        const auto& binding = routes.get()->bindings[index];
+        if (binding.caller_uid != caller_uid) continue;
+        bool matches = false;
+        if (binding.reverse_mode
+                == PATHGUARD_PROVIDER_ROUTE_REVERSE_STATIC_UNIQUE) {
+            if (request->file_path_size != 0) {
+                matches = request->file_path[0] == '/'
+                    ? ProviderRouteSliceHasPathPrefix(
+                          request->file_path, request->file_path_size,
+                          binding.visible_source_root)
+                        || ProviderRouteSliceHasPathPrefix(
+                            request->file_path, request->file_path_size,
+                            binding.backing_target_root)
+                    : ProviderRouteRelativeSliceHasSourcePrefix(
+                          request->file_path, request->file_path_size,
+                          binding.stable_document_id)
+                        || ProviderRouteSliceHasStorageRelativePrefix(
+                            request->file_path, request->file_path_size,
+                            binding.backing_target_root);
+            }
+            if (!matches && request->identifier_kind
+                    == PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_DOCUMENT_ID) {
+                matches = ProviderRouteSliceHasPathPrefix(
+                    request->identifier, request->identifier_size,
+                    binding.stable_document_id)
+                    || ProviderRouteDocumentSliceHasAbsolutePrefix(
+                        request->identifier, request->identifier_size,
+                        binding.backing_target_root);
+            }
+        } else {
+        switch (request->identifier_kind) {
+            case PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_CONTENT_URI:
+                matches = ProviderRouteSliceEquals(
+                    request->identifier, request->identifier_size,
+                    binding.provider_uri);
+                break;
+            case PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_DOCUMENT_ID:
+                matches = ProviderRouteSliceEquals(
+                    request->identifier, request->identifier_size,
+                    binding.stable_document_id);
+                break;
+            case PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_FILE_PATH:
+                matches = ProviderRouteSliceEquals(
+                    request->file_path, request->file_path_size,
+                    binding.backing_target_path);
+                break;
+            default:
+                break;
+        }
+        }
+        if (!matches) continue;
+        facts->binding_state = PATHGUARD_LSPLANT_MAPPING_BINDING_SNAPSHOT;
+        facts->snapshot_generation =
+            routes.get()->snapshot.generation;
+        facts->binding_id = binding.binding_id;
+        if (request->role
+            == PATHGUARD_LSPLANT_MAPPING_ROLE_REVERSE_DOCUMENT_ID) {
+            facts->reverse_record_id = binding.reverse_record_id;
+        }
+        break;
+    }
+    return 1;
 }
 
 bool ReadProcessStartTime(pid_t pid, uint64_t* output);
@@ -2031,6 +3009,10 @@ MountPerfResult ApplyProcessPlan(pid_t pid, uid_t uid, int module_dir_fd,
                 source_path, sizeof(source_path))) {
             return finish_preflight(EINVAL);
         }
+        if (plan.mounts[rule_index].action == kRedirectAction) {
+            const int create_error = EnsureStorageDirectory(source_path);
+            if (create_error != 0) return finish_preflight(create_error);
+        }
 
         size_t source_index = 0;
         while (source_index < pinned_source_count
@@ -2886,12 +3868,52 @@ public:
                 &provider_lsplant_handle_, &provider_lsplant_initialize_,
                 &provider_lsplant_install_, &provider_lsplant_wait_,
                 &provider_lsplant_configure_,
+                &provider_lsplant_publish_,
                 &provider_hooker_dex_);
             if (provider_lsplant_ready_) {
-                const int configure_result = provider_lsplant_configure_(nullptr);
+                ProviderRouteSnapshotOwned* initial_routes = LoadProviderRouteSnapshot(
+                    api_, path_policy_);
+                provider_provenance_available_ = initial_routes != nullptr
+                    && initial_routes->provenance_available;
+                provider_mapping_resolver_.routes = &provider_route_domain_;
+                provider_mapping_resolver_.profile_id =
+                    provider_bridge_probe_.provider_profile_id;
+                PathGuardLsplantMappingRuntimeV1 mapping_runtime{};
+                mapping_runtime.version =
+                    PATHGUARD_LSPLANT_BRIDGE_API_VERSION;
+                mapping_runtime.size = sizeof(mapping_runtime);
+                mapping_runtime.resolver = ResolveProviderMapping;
+                mapping_runtime.user_data = &provider_mapping_resolver_;
+                mapping_runtime.snapshot = initial_routes == nullptr
+                    ? nullptr : &initial_routes->snapshot;
+                mapping_runtime.external_identity_sink =
+                    EnqueueProviderExternalIdentity;
+                mapping_runtime.external_identity_user_data =
+                    &provider_external_identity_queue_;
+                int configure_result = initial_routes == nullptr
+                    ? ENOMEM : provider_lsplant_configure_(&mapping_runtime);
+                if (configure_result == 0) {
+                    if (!provider_route_domain_.Publish(
+                            initial_routes,
+                            ProviderRouteSnapshotBytes(*initial_routes))) {
+                        configure_result = ENOMEM;
+                    } else {
+                        __atomic_store_n(
+                            &provider_route_generation_,
+                            initial_routes->snapshot.generation,
+                            __ATOMIC_RELEASE);
+                        __atomic_store_n(
+                            &provider_provenance_generation_,
+                            initial_routes->provenance_generation,
+                            __ATOMIC_RELEASE);
+                        initial_routes = nullptr;
+                    }
+                }
+                ReleaseProviderRouteSnapshot(initial_routes);
                 if (configure_result != 0) {
                     provider_bridge_probe_.bridge_errno = configure_result;
                     provider_lsplant_ready_ = false;
+                    provider_provenance_available_ = false;
                 }
                 PathGuardLsplantBridgeResultV1 bridge_result{};
                 const int init_result = provider_lsplant_ready_
@@ -2903,6 +3925,8 @@ public:
                 provider_lsplant_ready_ =
                     provider_bridge_probe_.lsplant_initialized;
                 if (!provider_lsplant_ready_) {
+                    provider_provenance_available_ = false;
+                    provider_mapping_resolver_.routes = nullptr;
                     ReleaseModuleBytes(&provider_hooker_dex_);
                     dlclose(provider_lsplant_handle_);
                     provider_lsplant_handle_ = nullptr;
@@ -3063,6 +4087,7 @@ public:
                 if (thread_result == 0) return;
                 provider_bridge_probe_.bridge_errno = thread_result;
             }
+            StartProviderRoutePublisher();
             PublishPreparedProviderStatus();
             if (!provider_redirect_installed_
                 && !provider_redirect_module_retained_) Unload();
@@ -3172,6 +4197,7 @@ private:
         const int wait_result = module->provider_lsplant_wait_(
             kProviderBridgeWaitTimeoutMs, &result);
         module->ApplyProviderBridgeResult(result, wait_result);
+        module->StartProviderRoutePublisher();
         module->PublishPreparedProviderStatus();
         LOGI("Provider LSPlant deferred result: process=%s errno=%d methods=%llx",
              module->provider_media_process_ ? "media" : "external_storage",
@@ -3186,6 +4212,260 @@ private:
         const int result = pthread_create(
             &thread, nullptr, ProviderBridgeWaitMain, this);
         if (result == 0) pthread_detach(thread);
+        return result;
+    }
+
+    static size_t ProviderRouteSnapshotBytes(
+            const ProviderRouteSnapshotOwned& snapshot) {
+        return sizeof(snapshot)
+            + static_cast<size_t>(snapshot.snapshot.binding_count)
+                * (sizeof(PathGuardProviderRouteBindingV1)
+                   + sizeof(ProviderRouteSnapshotData));
+    }
+
+    static void* ProviderRoutePublisherMain(void* context) {
+        auto* module = static_cast<PathGuardModule*>(context);
+        for (;;) {
+            usleep(kProviderRoutePollUs);
+            module->BindQueuedExternalIdentities();
+            pathguard::provenance_protocol::Request request;
+            request.command =
+                pathguard::provenance_protocol::Command::kSnapshotInfo;
+            pathguard::provenance_protocol::Response response;
+            if (!CallProvenanceCompanion(module->api_, request, &response)) {
+                pathguard::provider_redirect::
+                    SetProvenanceTransactionsAvailable(false);
+                __atomic_store_n(
+                    &module->provider_mapping_resolver_.runtime_available,
+                    0u, __ATOMIC_RELEASE);
+                continue;
+            }
+            const uint64_t current = __atomic_load_n(
+                &module->provider_provenance_generation_, __ATOMIC_ACQUIRE);
+            if (response.snapshot_generation == current) {
+                pathguard::provider_redirect::
+                    SetProvenanceTransactionsAvailable(
+                        module->provider_redirect_installed_);
+                __atomic_store_n(
+                    &module->provider_mapping_resolver_.runtime_available,
+                    module->provider_redirect_installed_ ? 1u : 0u,
+                    __ATOMIC_RELEASE);
+                continue;
+            }
+            ProviderRouteSnapshotOwned* routes = LoadProviderRouteSnapshot(
+                module->api_, module->path_policy_);
+            if (routes == nullptr || !routes->provenance_available) {
+                pathguard::provider_redirect::
+                    SetProvenanceTransactionsAvailable(false);
+                ReleaseProviderRouteSnapshot(routes);
+                continue;
+            }
+            const int bridge_result = module->provider_lsplant_publish_(
+                &routes->snapshot);
+            if (bridge_result != 0 || !module->provider_route_domain_.Publish(
+                    routes, ProviderRouteSnapshotBytes(*routes))) {
+                pathguard::provider_redirect::
+                    SetProvenanceTransactionsAvailable(false);
+                ReleaseProviderRouteSnapshot(routes);
+                continue;
+            }
+            __atomic_store_n(
+                &module->provider_route_generation_, routes->snapshot.generation,
+                __ATOMIC_RELEASE);
+            __atomic_store_n(
+                &module->provider_provenance_generation_,
+                routes->provenance_generation, __ATOMIC_RELEASE);
+            __atomic_store_n(
+                &module->provider_mapping_resolver_.runtime_available,
+                module->provider_redirect_installed_ ? 1u : 0u,
+                __ATOMIC_RELEASE);
+            pathguard::provider_redirect::SetProvenanceTransactionsAvailable(
+                module->provider_redirect_installed_);
+        }
+    }
+
+    void BindQueuedExternalIdentities() {
+        for (uint32_t slot_index = 0;
+             slot_index < provider_external_identity_queue_.kSlotCount;
+             ++slot_index) {
+            auto& slot = provider_external_identity_queue_.slots[slot_index];
+            if (__atomic_load_n(&slot.state, __ATOMIC_ACQUIRE) != 2u) {
+                continue;
+            }
+            ProviderRouteDomain::Guard routes;
+            if (!provider_route_domain_.Acquire(&routes)) continue;
+            const auto& event = slot.identity;
+            const ProviderRouteSnapshotOwned* snapshot = routes.get();
+            const ProviderRouteSnapshotData* matched = nullptr;
+            bool static_route = false;
+            for (uint32_t index = 0;
+                 index < snapshot->snapshot.binding_count; ++index) {
+                const auto& binding = snapshot->bindings[index];
+                if (binding.caller_uid != slot.caller_uid) continue;
+                const bool absolute = event.path_kind
+                    == PATHGUARD_LSPLANT_EXTERNAL_PATH_ABSOLUTE;
+                if (binding.reverse_mode
+                        == PATHGUARD_PROVIDER_ROUTE_REVERSE_STATIC_UNIQUE) {
+                    const bool static_matches = absolute
+                        ? ProviderRouteSliceHasPathPrefix(
+                              event.file_path, event.file_path_size,
+                              binding.visible_source_root)
+                            || ProviderRouteSliceHasPathPrefix(
+                                event.file_path, event.file_path_size,
+                                binding.backing_target_root)
+                        : ProviderRouteRelativeSliceHasSourcePrefix(
+                              event.file_path, event.file_path_size,
+                              binding.stable_document_id)
+                            || ProviderRouteSliceHasStorageRelativePrefix(
+                                event.file_path, event.file_path_size,
+                                binding.backing_target_root);
+                    if (static_matches) {
+                        static_route = true;
+                        break;
+                    }
+                    continue;
+                }
+                const bool path_matches = absolute
+                    ? ProviderRouteSliceEquals(
+                        event.file_path, event.file_path_size,
+                        binding.backing_target_path)
+                    : (event.file_path_size
+                            == strlen(snapshot->data[index].record.target_relative)
+                        && memcmp(
+                            event.file_path,
+                            snapshot->data[index].record.target_relative,
+                            event.file_path_size) == 0)
+                        || (event.file_path_size
+                            == strlen(snapshot->data[index].record.logical_source)
+                        && memcmp(
+                            event.file_path,
+                            snapshot->data[index].record.logical_source,
+                            event.file_path_size) == 0);
+                if (path_matches) {
+                    if (matched != nullptr) {
+                        matched = nullptr;
+                        break;
+                    }
+                    matched = &snapshot->data[index];
+                }
+            }
+            if (static_route) {
+                __atomic_store_n(&slot.state, 0u, __ATOMIC_RELEASE);
+                continue;
+            }
+            if (matched == nullptr) {
+                const ProviderBootstrapResult bootstrap =
+                    BootstrapExternalIdentity(slot);
+                if (bootstrap == ProviderBootstrapResult::kReady) {
+                    LOGI("Provider external identity bootstrapped: caller_uid=%d kind=%u",
+                         slot.caller_uid,
+                         static_cast<unsigned>(slot.identity.identifier_kind));
+                    __atomic_store_n(&slot.state, 0u, __ATOMIC_RELEASE);
+                    continue;
+                }
+                if (slot.attempts == 0) {
+                    LOGI("Provider external identity bootstrap deferred: caller_uid=%d kind=%u path_kind=%u stage=%s",
+                         slot.caller_uid,
+                         static_cast<unsigned>(slot.identity.identifier_kind),
+                         static_cast<unsigned>(slot.identity.path_kind),
+                         ProviderBootstrapResultName(bootstrap));
+                }
+                if (bootstrap
+                        == ProviderBootstrapResult::kStrongIdentityUnavailable
+                    || ++slot.attempts >= 120) {
+                    __atomic_store_n(&slot.state, 0u, __ATOMIC_RELEASE);
+                }
+                continue;
+            }
+            pathguard::provenance_protocol::Request request;
+            request.command = pathguard::provenance_protocol::Command::
+                kBindExternalIdentity;
+            request.transaction_high =
+                (static_cast<uint64_t>(getpid()) << 32)
+                | static_cast<uint32_t>(slot.caller_uid);
+            request.transaction_low = __atomic_add_fetch(
+                &provider_external_transaction_, uint64_t{1},
+                __ATOMIC_RELAXED);
+            request.record = matched->record;
+            if (event.identifier_kind
+                    == PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_CONTENT_URI) {
+                memcpy(request.record.provider_uri, event.identifier,
+                       event.identifier_size);
+                request.record.provider_uri[event.identifier_size] = '\0';
+            } else {
+                memcpy(request.record.stable_document_id, event.identifier,
+                       event.identifier_size);
+                request.record.stable_document_id[event.identifier_size] = '\0';
+            }
+            pathguard::provenance_protocol::Response response;
+            if (CallProvenanceCompanion(api_, request, &response)) {
+                __atomic_store_n(&slot.state, 0u, __ATOMIC_RELEASE);
+            } else if (++slot.attempts >= 120) {
+                __atomic_store_n(&slot.state, 0u, __ATOMIC_RELEASE);
+            }
+        }
+    }
+
+    ProviderBootstrapResult BootstrapExternalIdentity(
+            ProviderExternalIdentitySlot& slot) {
+        pathguard::provenance_protocol::Record record;
+        const ProviderBootstrapResult build = BuildProviderBootstrapRecord(
+            path_policy_, slot.caller_uid, slot.identity, &record);
+        if (build != ProviderBootstrapResult::kReady) return build;
+        pathguard::provenance_protocol::Request request;
+        request.command = pathguard::provenance_protocol::Command::
+            kPrepareCreate;
+        request.transaction_high =
+            (static_cast<uint64_t>(getpid()) << 32)
+            | static_cast<uint32_t>(slot.caller_uid);
+        request.transaction_low = __atomic_add_fetch(
+            &provider_external_transaction_, uint64_t{1}, __ATOMIC_RELAXED);
+        request.record = record;
+        const auto identity = request.record.identity;
+        request.record.identity = {};
+        pathguard::provenance_protocol::Response response;
+        if (!CallProvenanceCompanion(api_, request, &response)) {
+            return ProviderBootstrapResult::kPrepareFailed;
+        }
+        request.record.identity = identity;
+        request.command = pathguard::provenance_protocol::Command::kMaterialize;
+        if (!CallProvenanceCompanion(api_, request, &response)) {
+            request.command = pathguard::provenance_protocol::Command::kAbort;
+            CallProvenanceCompanion(api_, request, &response);
+            return ProviderBootstrapResult::kMaterializeFailed;
+        }
+        request.command = pathguard::provenance_protocol::Command::kCommit;
+        if (!CallProvenanceCompanion(api_, request, &response)) {
+            request.command = pathguard::provenance_protocol::Command::kAbort;
+            CallProvenanceCompanion(api_, request, &response);
+            return ProviderBootstrapResult::kCommitFailed;
+        }
+        pathguard::provider_redirect::SetProvenanceTransactionsAvailable(true);
+        return ProviderBootstrapResult::kReady;
+    }
+
+    int StartProviderRoutePublisher() {
+        if (!provider_lsplant_ready_
+            || provider_bridge_probe_.bridge_errno != 0
+            || provider_lsplant_publish_ == nullptr
+            || !provider_redirect_installed_) {
+            return ENOTSUP;
+        }
+        uint32_t expected = 0;
+        if (!__atomic_compare_exchange_n(
+                &provider_route_publisher_started_, &expected, 1u, false,
+                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            return 0;
+        }
+        pthread_t thread{};
+        const int result = pthread_create(
+            &thread, nullptr, ProviderRoutePublisherMain, this);
+        if (result == 0) {
+            pthread_detach(thread);
+        } else {
+            __atomic_store_n(
+                &provider_route_publisher_started_, 0u, __ATOMIC_RELEASE);
+        }
         return result;
     }
 
@@ -3234,6 +4514,14 @@ private:
         provider_redirect_module_retained_ =
             pathguard::provider_redirect::MustRetainModule(
                 provider_install_result_);
+        pathguard::provider_redirect::SetProvenanceTransactionsAvailable(
+            provider_redirect_installed_ && provider_lsplant_ready_
+                && provider_provenance_available_);
+        __atomic_store_n(
+            &provider_mapping_resolver_.runtime_available,
+            provider_redirect_installed_
+                ? 1u : 0u,
+            __ATOMIC_RELEASE);
         LOGI("provider redirect post-specialize: process=%s scopes=%u caller_scope=binder_uid attempted=%d committed=%d installed=%d capabilities=%llx operations=%llx",
              provider_media_process_ ? "media" : "external_storage",
              config.scope_count,
@@ -3293,11 +4581,20 @@ private:
     PathPolicyMapping path_policy_;
     pathguard::provider_redirect::InstallResult provider_install_result_;
     bool provider_lsplant_ready_ = false;
+    bool provider_provenance_available_ = false;
     void* provider_lsplant_handle_ = nullptr;
     PathGuardLsplantInitializeV1 provider_lsplant_initialize_ = nullptr;
     PathGuardLsplantInstallPassthroughV1 provider_lsplant_install_ = nullptr;
     PathGuardLsplantWaitPassthroughV1 provider_lsplant_wait_ = nullptr;
     PathGuardLsplantConfigureMappingV1 provider_lsplant_configure_ = nullptr;
+    PathGuardLsplantPublishMappingV1 provider_lsplant_publish_ = nullptr;
+    ProviderRouteDomain provider_route_domain_;
+    uint64_t provider_route_generation_ = 0;
+    uint64_t provider_provenance_generation_ = 0;
+    uint32_t provider_route_publisher_started_ = 0;
+    uint64_t provider_external_transaction_ = 0;
+    ProviderExternalIdentityQueue provider_external_identity_queue_;
+    ProviderMappingResolverContext provider_mapping_resolver_{};
     ModuleBytes provider_hooker_dex_;
     pathguard::ProviderJavaBridgeStatusV1 provider_bridge_probe_;
 };

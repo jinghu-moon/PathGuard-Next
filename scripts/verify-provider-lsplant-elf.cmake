@@ -34,7 +34,8 @@ foreach(name IN ITEMS
     pathguard_lsplant_initialize_v1
     pathguard_lsplant_install_passthrough_v1
     pathguard_lsplant_wait_passthrough_v1
-    pathguard_lsplant_configure_mapping_v1)
+    pathguard_lsplant_configure_mapping_v1
+    pathguard_lsplant_publish_mapping_v1)
   if(NOT symbols MATCHES "[ \t]${name}(@@PATHGUARD_LSPLANT_1.0)?(\n|$)")
     message(FATAL_ERROR "LSPlant bridge export missing: ${name}")
   endif()

@@ -1,18 +1,26 @@
 # PathGuard Next Pattern Redirect TDD 执行清单
 
 > 状态：原 pattern v6 当前设备范围已闭环；2026-08-01 根据用户决策启动 Provider contract
-> adapter（方案 B）后续工作，T-34～R-36 Host/bridge wiring 及 V-64 alioth/Android 13 公共操作基线已完成，
+> adapter（方案 B）后续工作，T-34～R-58 的生产实现及 V-64 alioth/Android 13 公共操作基线已完成，
 > bit 17 在真实 adapter profile、虚拟映射、FD identity、reverse 和 restart 全部通过前保持
-> `unsupported`。原 V-46 `adapter-only` 决策形成合法阻断，fanotify/Export
+> `unsupported`。2026-08-02 已启动并完成 Shared Target Namespace Projection 的 Host/双 ABI
+> 实现：多源共享 target root 编译为 `_pg/v1/ns_<id>`，mount/Provider 同投影共享 Namespace，
+> static reverse 不再依赖 strong identity；真机 V-69 已在 `0.1.45-dev`/`0.1.46-dev` 完成当前设备
+> 可构造范围，caller-scoped query/open 与 exact collision 按设备/应用入口不满足记为
+> `unsupported/not_observed`；活动 Namespace 被外部删除后只验证进程重启恢复，不宣称热恢复。
+> 原 V-46 `adapter-only` 决策形成合法阻断，fanotify/Export
 > 因当前设备 `CONFIG_FANOTIFY` disabled 按用户授权跳过并保持 unsupported/not_observed。第二部分已有单设备
 > LocalSend/Provider 生命周期补充证据；2026-08-01 已增加一台 Android 16/myron/SukiSU Ultra
 > 的 0.1.19 Provider 修复、50 次启动和接收批次；0.1.24 又补齐 Provider per-action 状态、
 > Provider restart、死亡 PID 状态回收与 10 次冷启动。上述批次仅为 partial observed；用户已于
 > 2026-08-01 明确跳过第二设备验证，其余 ROM、root framework、kernel tier 和 arm32 保持
 > `not_observed` 且不纳入当前待执行范围；未覆盖 operation/state 矩阵按当前设备能力标记
-> `unsupported/not_observed`
+> `unsupported/not_observed`。2026-08-02 的 V-68 在 `0.1.44-dev` 上完成当前设备可执行的
+> LocalSend TXT/JPG forward、双 Provider、admission 和 fail-open 子项；alioth 的 FUSE/backing
+> 均无 `STATX_BTIME` 且 `name_to_handle_at=ENOSYS`，strong-identity 依赖矩阵按设备不满足跳过，
+> bit 17 继续清零。
 >
-> 基准设计：`docs/08-pattern-redirect-design.md` v0.8
+> 基准设计：`docs/08-pattern-redirect-design.md` v0.9
 >
 > 单任务时间盒：2～4 小时；超过 4 小时必须再次拆分
 
@@ -1282,19 +1290,22 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 | T-35～R-35 | complete | 精确 APK SHA-256/build identity deployment pair gate、完整 check/operation mask、virtual source/target/URI/document-ID/strong FD/provenance binding conformance；MSVC Release 80/80 |
 | T-36～R-36 | complete（Host/production wiring） | 独立 LSPlant C ABI bridge、最小 Java Hooker、精确 alioth APK SHA-256 gate、Zygisk pre/post lifecycle、双 ABI/ELF/许可证/状态观测；MSVC Release 81/81 |
 | T-37～R-37 | complete（Host decision contract） | profile/operation/binding/committed reverse 的纯决策层；pass/rewrite/unsupported/ambiguous/fail-open 负矩阵；MSVC Release 82/82 |
-| T-38～R-38 | complete（callback safety boundary） | Java dispatcher 默认关闭；异常/类型不匹配 fail-open 到 backup；Java/guard/双 ABI/CTest 通过；真实 provenance wiring pending |
+| T-38～R-38 | complete（callback safety boundary） | Java dispatcher 异常/类型不匹配 fail-open 到 backup；Java/guard/双 ABI/CTest 通过；真实 provenance wiring 已由 T-54～R-58 完成 |
 | T-39～R-39 | complete（native dispatcher seam） | Java/native `nativeDispatch` 注册入口；当前实现固定 pass-through；Host/双 ABI 与 `20260802-104458` 真机回归通过；bit 17 不变 |
-| T-40～R-40 | complete（dispatch spec） | 11 方法的 role/operation mask/dynamic argument/result kind 完整表；native method-ID gate；对象提取 pending |
-| T-41～R-41 | complete（Host/ABI/device passthrough） | `r/w/wt/wa/rw/rwt` 有界解析；参数数量/类型/JNI 异常 fail-open；`20260802-110216` 真机回归通过，其他对象提取 pending |
-| T-42～R-42 | complete（Host/ABI/device passthrough） | 5 个 URI、5 个 document ID 方法显式类型/索引；固定 1024 字节 UTF-8 缓冲与 fail-open；`20260802-113334` 回归通过，File reverse pending |
-| T-43～R-43 | complete（Host/ABI/device passthrough） | `getDocIdForFile(File)` 显式 File 类型与索引；固定 4096 字节绝对路径缓冲；`20260802-114618` 回归通过，真实 reverse mapping pending |
-| T-44～R-44 | complete（immutable request Host/ABI） | 按值 dispatch request seam；精确 open operation；update/delete 动态事实缺失时 incomplete；真机回归 pending |
+| T-40～R-40 | complete（dispatch spec） | 11 方法的 role/operation mask/dynamic argument/result kind 完整表；native method-ID gate；对象提取已由 T-41～R-58 完成 |
+| T-41～R-41 | complete（Host/ABI/device passthrough） | `r/w/wt/wa/rw/rwt` 有界解析；参数数量/类型/JNI 异常 fail-open；`20260802-110216` 真机回归通过，结果适配已由 T-54～R-58 完成 |
+| T-42～R-42 | complete（Host/ABI/device passthrough） | 5 个 URI、5 个 document ID 方法显式类型/索引；固定 1024 字节 UTF-8 缓冲与 fail-open；`20260802-113334` 回归通过，持久 identity 已由 T-56 完成 |
+| T-43～R-43 | complete（Host/ABI/device passthrough） | `getDocIdForFile(File)` 显式 File 类型与索引；固定 4096 字节绝对路径缓冲；`20260802-114618` 回归通过，reverse mapping 已由 T-58 完成 |
+| T-44～R-44 | complete（immutable request Host/ABI） | 按值 dispatch request seam；精确 open operation；update/delete 动态事实由 T-56～R-58 补全；V-68 真机验收 pending |
 | T-45～R-45 | complete（Host/ABI/device passthrough） | 非空 metadata 与 `_display_name` rename operation 提取；空/错误/JNI 异常 incomplete；`20260802-120913` 回归通过，delete target unsupported |
-| T-46～R-46 | complete（Host/ABI；device passthrough） | dispatch request 映射为既有 `ProviderMappingOperation`，binding/profile/reverse 不匹配均保持 fail-open/pass-through；真实 route resolver wiring 仍 pending |
+| T-46～R-46 | complete（Host/ABI；device passthrough） | dispatch request 映射为既有 `ProviderMappingOperation`，binding/profile/reverse 不匹配均保持 fail-open/pass-through；真实 route resolver wiring 已由 T-54 完成 |
 | T-47～R-47 | complete（Host/ABI/device passthrough） | operation-specific binding validation：前向 Provider 操作不要求 committed reverse；reverse lookup 继续要求 strong identity 与 unique committed record；`0.1.36-dev` 回归通过 |
-| V-67 | not_observed（当前设备/ABI 不支持） | pinned `MediaProvider.delete(Uri,Bundle)` 无可信 file/directory target 输入；禁止 URI/MIME 猜测，保持 delete request incomplete |
+| T-48～R-53 | complete | runtime resolver、Java result transport、after-dispatch、result observation、C ABI facts 和 immutable route registry |
+| T-54～R-58 | complete（Host/production implementation） | 真实 snapshot/resolver、bounded live publication、持久 external identity、权威 ContentValues、逐行 Cursor、PFD statx、mutation/reverse 接线；Host/双 ABI/ELF 通过 |
+| V-67 | complete（Host contract；device pending） | 只允许 uniquely-bound item URI 进入 delete；collection/selection delete 无 binding 时 fail-open，实际 file/directory 由 path hook 的 unlink/rmdir 事实决定 |
 | V-65 | pending（当前设备 partial） | `0.1.36-dev` 两组 passthrough/fault gate 复采通过；真实 virtual query/create/open/rename/delete/reverse、FD identity、Java callback fail-open 矩阵当前设备无法构造，记为 unsupported/not_observed；bit 17 不置位 |
 | V-66 | pending（当前设备 partial） | `0.1.36-dev` Provider restart/republication 已通过（PID 轮换、hook 重装、状态重发）；Mainline build identity 变化、provenance recovery、真实 virtual mapping 仍 unsupported/not_observed |
+| V-68 | pending（需要当前设备安装候选） | `0.1.41-dev` 需执行真实 insert/query/open/update/delete/File reverse/Provider restart 矩阵；通过前 bit 17 保持清零 |
 
 ### T-34 [红] 冻结 Provider contract pair gate
 
@@ -1946,6 +1957,122 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 - **执行结果**：完成（Host/ABI contract scope）。真实 snapshot 数据和 rewrite 仍为
   `unsupported/not_observed`。证据同 T-53。
 - **依赖/时间盒**：I-53；1 小时。
+
+### T-54～R-54 [生产] 接入真实 route snapshot 与 Java 结果工厂
+
+- **任务描述**：从 companion 枚举已提交 provenance，按当前 policy/scope/rule/plan generation
+  过滤并编码 C ABI snapshot；Zygisk resolver 使用 Binder caller UID 返回 numeric handles，bridge
+  构造 File、document ID、Uri、Cursor、PFD 和 boxed count 的类型安全结果。
+- **验收标准**：任何 generation、scope、identity 或 result type 不一致均 fail-open；callback 不访问
+  daemon/store；bit 17 不变。
+- **执行结果**：完成（Host/production implementation）。证据：
+  `tests/baseline/pattern-v6/p6-provider-production-v1-20260802/T-54-T-58-provider-production-host.md`。
+
+### T-55～R-55 [生产] 有界 live snapshot publication
+
+- **任务描述**：Provider 后台线程按 provenance generation 拉取新快照；Zygisk 与 LSPlant bridge
+  分别使用固定 256 reader slots、最多 8 个 retired snapshot 的 hazard publication，热路径无锁、
+  无 I/O、无 route/provenance 对象分配；bridge 不引入 `PT_TLS`。
+- **验收标准**：进程启动后新 route 不要求 Provider restart；发布失败保持旧 generation 或暂时
+  fail-open；retire storage 不无界增长；双 ABI ELF guard 继续通过。
+- **执行结果**：完成（Host/production implementation）；真机 generation 推进归 V-68。
+
+### T-56～R-56 [生产] 持久化 Provider URI/document-ID 外部身份
+
+- **任务描述**：provenance protocol v4 和 WAL format 3 增加 external bind 与完整
+  FILE_HANDLE type/bytes；保留 WAL format 1/2 恢复兼容。insert 仅从 `_data` 或
+  `relative_path + _display_name` 权威字段建立路径；首次
+  openDocument/openFile 可由 PFD backing path 与 strong FILE_HANDLE/statx identity 自举
+  URI/document ID。
+- **验收标准**：禁止 URI 尾段、display name 单字段、MIME 或 count 猜 route；同 scope 外部身份
+  冲突被拒绝；daemon 暂时不可用时 bounded queue 保持 fail-open。
+- **执行结果**：完成（Host/production implementation）；协议、恢复和冲突测试通过。
+
+### T-57～R-57 [生产] MediaStore Cursor 与 PFD identity
+
+- **任务描述**：Cursor 按真实 `_data`/document-ID 逐行解析 binding，复制列类型并只改写匹配行；
+  PFD 按 FILE_HANDLE type/bytes/volume/object type，或 `getFd + statx(AT_EMPTY_PATH)` 的
+  volume/inode/btime/object type 比较，全部一致才承认 rewrite。
+- **验收标准**：无 `_data`/document fact、projection 缺失、Cursor/JNI 异常、weak/stale FD identity
+  均透传；directory query 不从 parent/name 推导 child route。
+- **执行结果**：完成（Host/production implementation）；真实 Cursor/PFD 结果归 V-68。
+
+### T-58～R-58 [生产] mutation、reverse 与恢复闭环
+
+- **任务描述**：uniquely-bound item URI 支持 update/delete observation，实际 rename/unlink/rmdir
+  继续由统一 path hook 事务和 provenance WAL 更新；ExternalStorageProvider File reverse 和
+  MediaDocumentsProvider document ID 均消费同一 committed record；publisher 在 companion 恢复后
+  重新置 runtime available。
+- **验收标准**：collection/selection delete 无唯一 binding 时 fail-open；rename/delete 不产生第二套
+  provenance；Provider restart 后重新加载 committed external identity；bit 17 仍由 V-68 决定。
+- **执行结果**：完成（Host/production implementation）；真机 reverse/restart 矩阵归 V-68。
+
+### V-68 [真机] 方案 B production composite matrix
+
+- **任务描述**：安装最新 production 候选后，在 alioth 上执行真实 virtual insert/query/open/update/delete、
+  ExternalStorageProvider File reverse、MediaDocuments document ID、PFD strong identity、live publication、
+  Provider restart/recovery 与 fault injection。
+- **验收标准**：操作结果、Cursor/document ID、实际 FD 和 reverse source 一致；daemon/store 窗口
+  fail-open，恢复后无需 Provider restart；无 JNI/LSPlant fault。全部通过后才允许另行修改 bit 17。
+- **执行结果**：当前设备支持范围完成；证据：
+  `tests/baseline/pattern-v6/p6-provider-v68-20260802/V-68-current-device-production-boundary.json`。
+  `0.1.44-dev` 的真实 LocalSend TXT/JPG 仅落 target、源残留为 0；双 Provider hook/admission
+  稳定，bootstrap 明确报告 `strong_identity_unavailable` 且不生成 WAL。alioth 的 FUSE 与 backing
+  plane 均无 `STATX_BTIME`，`name_to_handle_at` 返回 `ENOSYS`，因此 reverse/PFD/committed live
+  publication/mutation-recovery 子矩阵按当前设备不满足记为 `unsupported/not_observed` 并跳过；
+  bit 17 继续强制清零。
+
+### T-59～R-59 [生产] Shared Target Namespace Projection
+
+- **任务描述**：多 source 共享声明 target root 时，编译器为每个 canonical projection 生成
+  `target/_pg/v1/ns_<SHA256-128-base32>`；Namespace 身份与 Rule 策略解耦，mount/Provider 同投影
+  共享 ID。Provider snapshot 增加显式 static/provenance mode，static binding 按请求双向物化，
+  不要求 strong identity、reverse record 或 provenance companion。
+- **验收标准**：规则重排和 priority 变化不改变 Namespace；不同 source Namespace 不同；同一
+  source 的 mount/Provider Namespace 相同；`_pg` 用户规则拒绝；unknown/unsafe path fail-open；
+  static reverse 在无 FILE_HANDLE/BTIME 时通过；provenance 原矩阵保持独立。
+- **执行结果**：Host/双 ABI 实现完成。MSVC Release CTest `84/84`、Clang UBSan static
+  CTest `84/84` 通过，新增
+  Namespace SHA-256/Base32、编译稳定性、跨执行域一致、snapshot static decode、无需 strong
+  identity 的 reverse 和双向 materialization 测试；NDK r27d Zygisk 双 ABI、零 STL ELF 隔离及
+  NDK 29 LSPlant 双 ABI/ELF guard 通过。当前项目未发布，不实现旧布局迁移、adopt/migrate CLI、
+  Legacy Namespace、GC 或迁移 UI。
+
+### V-69 [真机] Namespace Projection 当前设备验收
+
+- **任务描述**：第一阶段安装 `0.1.45-dev`，重启后分别从 Download/localsend-source 与 Pictures 创建同名
+  TXT/JPG，确认物理文件进入同一 target root 下不同 `ns_*`；验证 LocalSend、MediaStore/
+  DocumentsProvider query/open、Provider restart、删除重建及卸载残留。
+- **验收标准**：不依赖 FILE_HANDLE/STATX_BTIME；双源同名可共存，逻辑视图各自恢复；同
+  Namespace collision 仍 reject；未知 Namespace 不投影；Provider/daemon 重启后静态恢复；无
+  JNI/LSPlant fault。当前设备不支持的操作逐项记 `unsupported/not_observed` 后跳过。
+- **执行结果**：第一阶段已完成（`0.1.45-dev`，当前设备）。LocalSend 实际接收的
+  `test.txt`、`test.jpg`、两个同名 `test1.jpg` 均进入同一声明 target root 下的不同 Namespace：
+  `ns_57xfxvj54rskidat5ak4krdeye` 对应 `Download/localsend-source`，
+  `ns_vzn4kspwdxed2tgosk2o4z6bpu` 对应 `Pictures`；两个 `test1.jpg` 同时存在且各为
+  125478 bytes，target 顶层无扁平残留。LocalSend mount namespace 将前者投影回
+  `/storage/emulated/0/Download/localsend-source`，双 Provider 均 `action_total=2`、
+  admission `active`、`provider_bridge_errno=0`，无过滤日志中的 FATAL/JNI/LSPlant fault。
+  证据：`build/device-evidence/provider-namespace-v1/20260802-235239/`、
+  `build/device-evidence/provider-lsplant-v1/20260802-235131/`、
+  `tests/baseline/pattern-v6/p6-provider-namespace-v1-20260803/V-69-namespace-projection-device.md`。
+  MediaStore/DocumentsProvider 探针已修正并复采，但 shell/root caller 不具备 LocalSend 的
+  caller scope，观察到的是物理诊断视图，不能据此宣称应用逻辑 Cursor 已通过；Provider
+  `0.1.46-dev` 复测得到相同双 Namespace/同名共存结果；随后 MediaProvider PID
+  `4981→29994`、ExternalStorageProvider PID `9169→30195`，两端重新发布 active 状态，四个
+  文件路径与 SHA-256 不变，Provider restart 静态恢复通过。精确删除两个 `test1.jpg` 后重新按
+  两个逻辑 source 接收，新对象时间戳均为 `2026-08-03 12:03` 且回到原 Namespace，删除重建
+  通过。LocalSend UID `10382` 下启动的 shell `content query/read` 在取得 Provider 前因缺少
+  `ACCESS_CONTENT_PROVIDERS_EXTERNALLY` 被系统拒绝，不能构造真实 LocalSend ContentResolver
+  caller；query/open 按当前设备不满足记为 `unsupported/not_observed` 并跳过。卸载模块并重启后，
+  模块目录、daemon PID、全进程相关 mountinfo 和双 Provider PathGuard/LSPlant maps 残留均为 0，
+  四个物理测试文件按不删除用户数据的契约保留。LocalSend 对第二个 `collision.txt` 在 Provider
+  create 前自动改名为 `collision (1).txt`，exact collision 未构造，记为 `not_observed`；隔离的
+  unknown Namespace fixture 在物理路径可见、在刷新后的 LocalSend 逻辑 source 返回 `ENOENT`，
+  mount 投影子项通过并已清理。外部 Solid Explorer 删除活动物理 Namespace 后，存量 mount 出现
+  `//deleted`，重启 LocalSend 后恢复；当前不宣称热恢复。V-69 当前设备可构造范围完成。当前设备不支持的
+  strong identity 场景仍按
+  `unsupported/not_observed` 跳过。
 
 ## 参考依据
 

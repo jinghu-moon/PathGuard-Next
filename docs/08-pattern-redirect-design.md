@@ -2,9 +2,9 @@
 
 > 状态：已实施（设备矩阵与明确 unsupported 边界除外）
 >
-> 文档版本：0.8
+> 文档版本：0.9
 >
-> 日期：2026-07-29
+> 日期：2026-08-02
 >
 > 适用范围：Android 12+、Magisk Zygisk / KernelSU + ZygiskNext
 
@@ -53,10 +53,10 @@ mount 内部接口和 plan 表达允许随统一 IR 重构；
 | 层级 | 当前状态 | 本文用法 |
 | --- | --- | --- |
 | 历史 before 基线 | rules TOML format 1；policy format v5/schema 2；literal deny/redirect；`file_picker`；prefix mapper | 仅用于前后对比，不形成接口兼容承诺 |
-| 当前实现 | rules TOML format 2；policy format 6/schema 3；Selector/Action/Glob v1；五执行域 capability admission；provenance/status v2 | Host/NDK 自动化完成；设备未观察项和 unsupported 能力以任务清单为准 |
+| 当前实现 | rules TOML format 2；policy format 6/schema 3；Selector/Action/Glob v1；五执行域 capability admission；Shared Target Namespace Projection；provenance/status v2 | Host/NDK 自动化完成；设备未观察项和 unsupported 能力以任务清单为准 |
 | 已接受目标 | ADR-0010～0015 的后端策略、snapshot、capability、Glob v1 和有界反选 | 作为当前目标设计；发现与最新需求/平台事实冲突时必须修订 |
 | 已接受目标 | ADR-0016 policy format 6/schema 3 | format 6 首版编码统一 Selector/Action、PatternTable 和有界 selector 差集；不增加 NOT token |
-| 已接受目标 | ADR-0017 route provenance | daemon 单写持久 owner；多源反向只接受 strong identity + committed record，不恢复 canonical source fallback |
+| 可选高级能力 | ADR-0017 route provenance | 仅用于必须保留扁平 target 且证明历史对象来源的规则；不阻塞默认 Namespace Projection |
 
 本文保留的 Phase P0～P5 和 format 1/v5 描述是实施时的设计与 before 基线，不代表当前生产入口。
 任何 capability 仍只有在对应代码、probe 和 conformance test 同时成立后才能报告 active。
@@ -845,14 +845,53 @@ deny 与其他动作重叠不是配置冲突：只要 deny 声明的 enforcement
 多源到同一目标是核心场景 C4，前向路由不因目标 tail 语言可能重叠而在编译期拒绝：
 
 - 每个源使用 `preserve = "relative"`，目标目录不在任一 source root 内；
-- 多条规则生成相同 target path 时，首个已存在实体拥有该路径，后续写入按
-  `collision = "reject"` 返回 `EEXIST`；
+- 多个 source 可以共享同一个声明 target root，但不得共享同一个扁平物理叶子命名空间；
 - 反向映射不能按规则声明顺序或 visible path 字典序编造来源。
 
-反向路由分为两种模式：
+默认生产布局为 Shared Target Namespace Projection：
 
-1. **静态唯一**：编译器证明目标 relative-tail 语言不相交，直接由 target 唯一恢复 selector；
-2. **来源追踪**：语言可能相交时，成功 create/rename 事务提交一条 route provenance，至少包含
+```text
+logical:  <source-root>/<tail>
+physical: <target-root>/_pg/v1/ns_<namespace-id>/<tail>
+```
+
+`NamespaceId` 是编译产物，不是 RuleId。它使用域分离 SHA-256 对 canonical projection
+identity 求摘要，取前 128 bit 并编码为 26 字符小写 Base32。identity 只包含 layout version、
+package/user scope、logical source root、声明 target root 和 relative-tail transform；不包含 priority、
+collision、enforcement、plan generation 或其他运行策略。同一投影在 mount/Provider 等执行域中
+必须得到同一个 NamespaceId，策略调整不得触发物理身份变化。摘要碰撞是编译硬失败。
+
+物理路径本身携带当前逻辑归属，因此 reverse 是静态函数：
+
+```text
+<target-root>/_pg/v1/ns_A/<tail> -> <source-A>/<tail>
+<target-root>/_pg/v1/ns_B/<tail> -> <source-B>/<tail>
+```
+
+Provider 对外投影必须覆盖同一行的 `_data`、`relative_path`、`_display_name` 和
+`document_id`：前两者恢复 source 的逻辑路径，后两者保持与该路径一致；URI 打开仍以
+Provider 自己的行定位和物理 backing path 为准，不能信任调用方回传的 `_data`。若行没有
+可信的物理路径或 document identity，Cursor 保持原结果并 fail-open。
+
+这证明的是 namespace ownership，不证明文件的历史创建者。跨 Namespace move 会改变文件的
+当前逻辑归属；删除后重建同名文件不会继承数据库 owner。未知 layout、未知 NamespaceId、非法
+tail 或 generation/scope 不一致时保持 physical-only/fail-open，不猜来源。
+
+`_pg` 是保留组件，用户规则的 source/target 不得占用。Namespace backing 目录通过
+`openat2(RESOLVE_BENEATH/NO_SYMLINKS)` 或同等强度的逐组件 `openat + O_NOFOLLOW` 创建和校验；
+外部文件管理器若在 scoped app 存活期间直接删除活动 Namespace backing，Linux bind mount 会继续
+引用已 unlink 的 dentry，并在 mountinfo 中显示 `//deleted`。重新创建同路径不会让存量 mount 热重绑定；
+当前实现只承诺目标进程重启后重新校验并挂载，不宣称活动 mount 自动恢复。诊断必须显式报告该状态，
+不得把 Provider 已重建物理目录等同于 app mount 已恢复。
+mount 与 Provider 对同一 source/target 投影必须共享物理 Namespace。当前项目未发布且没有用户
+数据，因此不实现旧扁平布局迁移、adopt/migrate CLI、Legacy Namespace、自动 GC 或迁移 UI。
+
+反向能力分为两层：
+
+1. **默认静态投影**：共享 target root 下按 Namespace 分区，完全不依赖 FILE_HANDLE、BTIME、
+   inode、xattr、SQLite 或 WAL；
+2. **可选来源追踪**：只有显式要求扁平 target 和历史对象来源时，成功 create/rename 事务提交
+   route provenance，至少包含
    identity/attribution scope 与 identity epoch、稳定 target object identity、target relative path、
    RuleId、原始 logical path 和 generations。query/open/reverse scan 使用该记录恢复来源。
 
@@ -863,18 +902,19 @@ deny 与其他动作重叠不是配置冲突：只要 deny 声明的 enforcement
 使用 prepare + tombstone。跨文件系统与 store 无法形成真正 ACID 事务，无法补偿的中间状态必须
 保留为 unowned/ambiguous，不能自动删除文件或伪造来源。
 
-durable target identity 优先使用可连接 file handle/FID；fallback 只接受经过 probe 的稳定 volume
+可选 provenance 的 durable target identity 优先使用可连接 file handle/FID；fallback 只接受经过 probe 的稳定 volume
 identity + inode + `statx` birth time。`(st_dev, st_ino, ctime)` 会随正常写入变化，只能用于诊断或
-同 boot 快速拒绝，不能恢复跨重启 owner。强 identity 不可用时 provenance mode 不准入。
+同 boot 快速拒绝，不能恢复跨重启 owner。强 identity 不可用时仅 provenance mode 不准入，
+不影响 Namespace Projection。
 
 当前 v5 `RestoreAbsolutePath` 对歧义选择 canonical visible source 的行为记录为前测事实，但在
 v6 中计划内删除。policy reload 只按当前 scope 中语义相同的 RuleId rebind；无关规则改变不能让
 有效记录整体失效，RuleId/target/scope/identity epoch 变化则进入 stale/ambiguous。新文件的
-provenance 完整时，C3/C4 必须保持 Provider query 与实际 FD 一致；
-历史/外部文件缺少 provenance 且静态无法唯一恢复时，返回 `AmbiguousReverse` 并保持真实 target
+provenance 完整时，显式扁平模式必须保持 Provider query 与实际 FD 一致；
+扁平历史/外部文件缺少 provenance 时，返回 `AmbiguousReverse` 并保持真实 target
 视图或明确省略虚拟别名，不能伪造来源。Provider composite admission 必须把 provenance
-prepare/commit/reload 测试纳入 bit 17 的 reverse-mapping substatus；不需要反向展示的 app-path
-前向 redirect 可以独立准入。
+prepare/commit/reload 测试纳入独立 provenance substatus。bit 17 只表示 Provider adapter family
+基础可用，Namespace Projection 与 provenance 使用独立 operation substatus，二者不能相互代替。
 
 如果多个源可能把不同文件映射到同一个目标 basename，策略必须显式指定：
 
@@ -882,8 +922,8 @@ prepare/commit/reload 测试纳入 bit 17 的 reverse-mapping substatus；不需
 collision = "reject"   # 首版唯一允许值
 ```
 
-`collision = "reject"` 是默认值，处理目标目录中已经存在同名实体的动态碰撞，并保证同一
-target path 同时最多有一个 provenance owner。首版不自动覆盖、不追加随机后缀、不通过搬运解决碰撞。需要覆盖或版本化命名时，应
+`collision = "reject"` 是默认值，处理同一 Namespace 中已经存在同名实体的动态碰撞。不同
+Namespace 的同名文件可以共存。首版不自动覆盖、不追加随机后缀。需要覆盖或版本化命名时，应
 增加独立的目标模板和事务语义。运行时 collision 返回 `DecisionReason::Collision`，并记录
 source、target、两个 RuleId 和 plan generation；Provider adapter 将其映射为稳定 errno，
 CLI/status 保留诊断 ID，避免用户只看到无来源的“保存失败”。
@@ -1302,8 +1342,8 @@ deny，能力未通过 admission 时规则状态必须是 `inactive/unsupported`
 3. 补齐 query、insert、create、rename、delete、scan 的正向/反向映射。
 4. 补齐 provider-scope glob deny 的全操作拒绝矩阵。
 5. 实现 route provenance 的事务、持久化、identity 校验和 daemon/Provider 重启恢复。
-6. 为多源到同一目标增加 static/provenance reverse mode 和 ambiguity 诊断；删除 v5 canonical
-   source fallback。
+6. 为多源到同一目标生成 `_pg/v1/ns_<id>` 静态投影；provenance 作为可选扁平布局能力；删除
+   v5 canonical source fallback。
 7. 按 ADR-0012 实现 Provider 所属的 bit 16～17；path I/O、query、insert/create、rename/delete、
    reverse scan 作为 action mask/substatus 分别报告，不再使用一个 bool 表示 Provider 整体能力。
 8. 在真实设备上验证 LocalSend/SAF、MediaStore 相册保存、文件管理器和浏览器四类 glob
@@ -1367,7 +1407,8 @@ evidence paths / reviewer conclusion
 - 单 root 大量 `**/*`、无前缀/后缀 pattern 和 bucket candidate 超限必须编译失败；
 - 两个 package 使用相同 selector 时 ActionTable/UID scope 不串包；
 - format 1/v5 输入在切换后稳定拒绝；语义等价 format 2/v6 配置重放 C1～C5 成功；
-- literal/glob 多源同 target 编译成功；静态唯一与 provenance reverse mode 选择确定；
+- literal/glob 多源同 target 编译为稳定 Namespace；规则重排、priority/enforcement 变化不改变
+  NamespaceId；不同 source 不共享 Namespace；用户 `_pg` 路径拒绝；
 - format 6 保留 little-endian/CRC/canonical generation 等安全属性，v5/v6 reader 均严格拒绝
   非本版本、未知字段和非零 reserved 字段；
 - `except`/except ref 必须按 ADR-0015 的 canonical、预算和引用范围通过专项 golden；
@@ -1396,7 +1437,8 @@ evidence paths / reviewer conclusion
 - collision、capability missing 和 budget exceeded 返回稳定 DecisionReason/RuleId。
 - observe 与 Deny/Redirect/Pass 的 effect 组合确定；Deny 永不执行原始写、redirect 或 export；
 - shared UID 无 attribution、可信 attribution 和冲突 package rules 三种情况均不得串包；
-- 多源 route provenance 的 prepare/commit/abort、rename、delete、reload 和 generation 失效；失败
+- Namespace 正反向 tail parity、unknown namespace/layout、跨 Namespace move、同名共存和
+  mount/Provider 跨域一致；可选 provenance 的 prepare/commit/abort、rename、delete、reload 和 generation 失效；失败
   create 不留记录，缺失/陈旧 provenance 返回 `AmbiguousReverse`，不得回退到 canonical source；
 - mount backend 在首个 mutation 前按整个 ProcessPlan 选择，提交后故障不得逐规则降级，rollback
   失败必须产生 namespace taint。
@@ -1404,8 +1446,9 @@ evidence paths / reviewer conclusion
 ### 11.3 真机
 
 - LocalSend 图片、视频、压缩包和同名文件；
-- LocalSend 分别从 Pictures、Download 和其他声明源写入同一 target，重启 Provider/daemon 后
-  query/open 仍依据 provenance 恢复正确逻辑源；同名 target 返回 `EEXIST`；
+- LocalSend 分别从 Pictures、Download 和其他声明源写入同一 target root，物理文件进入各自
+  Namespace；重启 Provider/daemon 后 query/open 静态恢复逻辑源；跨 Namespace 同名文件共存，
+  同一 Namespace 重名返回 `EEXIST`；
 - provenance 在 prepare 后、文件创建后、commit 前和 rename 更新中分别注入进程崩溃；恢复后
   不得出现已提交文件无来源、失败文件残留 owner 或同一 target 多 owner；
 - 浏览器 Download 的 apk/zip/pdf 分流；
@@ -1446,8 +1489,8 @@ bypass、candidate/transition 上限）从 P0 起强制；性能 gate 使用固�
    方案都是错误建模。
 2. libc Hook 不能覆盖静态链接、直接 syscall 或未覆盖的 native 入口；因此必须公开
    capability 状态，不能把 partial hook 标成全功能 active。
-3. 多源到同一目标在正向写入上可行；反向使用 static unique 或持久 provenance。来源记录缺失、
-   陈旧或身份不匹配时只能报告歧义，不能恢复虚假 canonical source。
+3. 多源共享 target root 使用 Namespace Projection；不允许默认共享扁平叶子命名空间。只有显式
+   provenance 模式才依赖 strong identity，来源记录缺失、陈旧或不匹配时不得恢复虚假 source。
 4. glob deny 只有在声明的 enforcement scope 完整可用时才能标为 active；provider scope
    不能冒充完整文件系统 deny。
 5. fanotify move 只能作为用户显式选择的异步 export，不作为 redirect fallback。

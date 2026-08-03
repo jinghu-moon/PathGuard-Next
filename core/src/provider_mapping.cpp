@@ -5,26 +5,47 @@ namespace pathguard {
 namespace {
 
 ProviderRouteBindingObservationV1 ValidateMappingBinding(
-        ProviderMappingOperation operation,
+        const ProviderMappingRequestV1& request,
         const ProviderRouteBindingV1& binding) noexcept {
     if (!binding.context.valid()) {
         return {ProviderRouteBindingReason::kInvalidContext};
     }
     if (!ValidProviderAbsolutePath(binding.visible_source_path)
         || !ValidProviderAbsolutePath(binding.backing_target_path)
-        || binding.visible_source_path == binding.backing_target_path
-        || !TargetMatchesRouteKey(binding.backing_target_path,
-                                  binding.reverse_record.key)) {
+        || binding.visible_source_path == binding.backing_target_path) {
         return {ProviderRouteBindingReason::kInvalidPathMapping};
-    }
-    if (operation != ProviderMappingOperation::kReverseLookup
-        && binding.provider_uri.compare(0, 10, "content://") != 0) {
-        return {ProviderRouteBindingReason::kExternalIdentityMissing};
     }
     if (binding.stable_document_id.empty()) {
         return {ProviderRouteBindingReason::kExternalIdentityMissing};
     }
-    if (operation != ProviderMappingOperation::kReverseLookup) {
+    const bool content_identity = request.identifier_kind
+        == ProviderJavaIdentifierKind::kContentUri;
+    const bool requires_uri = request.operation
+            != ProviderMappingOperation::kReverseLookup
+        && (request.identifier_kind == ProviderJavaIdentifierKind::kNone
+            || content_identity);
+    if (requires_uri
+        && binding.provider_uri.compare(0, 10, "content://") != 0) {
+        return {ProviderRouteBindingReason::kExternalIdentityMissing};
+    }
+    if (binding.reverse_mode == ProviderRouteReverseMode::kStaticUnique) {
+        if (!ValidProviderAbsolutePath(binding.visible_source_root)
+            || !ValidProviderAbsolutePath(binding.backing_target_root)
+            || !namespace_projection::NamespaceTargetMatchesV1(
+                binding.backing_target_root, binding.namespace_id)
+            || !namespace_projection::SameRelativeTail(
+                binding.visible_source_path, binding.visible_source_root,
+                binding.backing_target_path, binding.backing_target_root)) {
+            return {ProviderRouteBindingReason::kInvalidPathMapping};
+        }
+        return {ProviderRouteBindingReason::kReady};
+    }
+    if (binding.reverse_mode != ProviderRouteReverseMode::kProvenance
+        || !TargetMatchesRouteKey(binding.backing_target_path,
+                                  binding.reverse_record.key)) {
+        return {ProviderRouteBindingReason::kInvalidPathMapping};
+    }
+    if (request.operation != ProviderMappingOperation::kReverseLookup) {
         return {ProviderRouteBindingReason::kReady};
     }
     if (!binding.fd_identity.Strong()) {
@@ -44,11 +65,146 @@ ProviderRouteBindingObservationV1 ValidateMappingBinding(
     return {ProviderRouteBindingReason::kReady};
 }
 
-bool RequiresCommittedReverse(ProviderMappingOperation operation) noexcept {
-    return operation == ProviderMappingOperation::kReverseLookup;
+bool RequiresCommittedReverse(
+        ProviderMappingOperation operation,
+        ProviderRouteReverseMode reverse_mode) noexcept {
+    return operation == ProviderMappingOperation::kReverseLookup
+        && reverse_mode == ProviderRouteReverseMode::kProvenance;
+}
+
+bool RelativePath(std::string_view path, std::string_view root,
+                  std::string_view* tail) noexcept {
+    if (tail == nullptr || path.size() < root.size()
+        || path.compare(0, root.size(), root) != 0) {
+        return false;
+    }
+    if (path.size() == root.size()) {
+        *tail = {};
+        return true;
+    }
+    if (path[root.size()] != '/') return false;
+    *tail = path.substr(root.size() + 1);
+    return !tail->empty();
+}
+
+bool JoinPath(std::string_view root, std::string_view tail,
+              std::string* output) {
+    if (output == nullptr || root.empty()) return false;
+    output->assign(root);
+    if (!tail.empty()) output->append("/").append(tail);
+    return output->size() <= 4095;
+}
+
+bool StorageAbsolutePath(std::string_view input, std::uint32_t user_id,
+                         std::string* output) {
+    if (input.empty() || output == nullptr) return false;
+    if (input.front() == '/') {
+        output->assign(input);
+    } else {
+        *output = "/storage/emulated/" + std::to_string(user_id) + "/";
+        output->append(input);
+    }
+    return ValidProviderAbsolutePath(*output);
+}
+
+bool LogicalDocumentPath(const ProviderJavaDispatchRequestV1& request,
+                         std::uint32_t user_id, std::string* output) {
+    const std::string_view document = request.identifier.value();
+    const std::size_t separator = document.find(':');
+    return request.identifier.kind == ProviderJavaIdentifierKind::kDocumentId
+        && separator != std::string_view::npos && separator + 1 < document.size()
+        && StorageAbsolutePath(document.substr(separator + 1), user_id, output);
+}
+
+std::string StableDocumentId(std::string_view visible_path,
+                             std::uint32_t user_id) {
+    const std::string prefix =
+        "/storage/emulated/" + std::to_string(user_id) + "/";
+    if (!visible_path.starts_with(prefix)) return {};
+    return "primary:" + std::string(visible_path.substr(prefix.size()));
 }
 
 }  // namespace
+
+bool MaterializeStaticProviderRouteBinding(
+        const ProviderJavaDispatchRequestV1& request,
+        const ProviderRouteBindingV1& route_template,
+        ProviderRouteBindingV1* output) noexcept {
+    if (output == nullptr
+        || route_template.reverse_mode
+            != ProviderRouteReverseMode::kStaticUnique
+        || !route_template.context.valid()
+        || !ValidProviderAbsolutePath(route_template.visible_source_root)
+        || !ValidProviderAbsolutePath(route_template.backing_target_root)
+        || !namespace_projection::NamespaceTargetMatchesV1(
+            route_template.backing_target_root,
+            route_template.namespace_id)) {
+        return false;
+    }
+    try {
+        std::string observed;
+        if (!request.file_path.value().empty()) {
+            if (!StorageAbsolutePath(request.file_path.value(),
+                                     route_template.context.user_id,
+                                     &observed)) {
+                return false;
+            }
+        } else if (!LogicalDocumentPath(
+                       request, route_template.context.user_id, &observed)) {
+            return false;
+        }
+        std::string_view tail;
+        *output = route_template;
+        if (RelativePath(observed, route_template.visible_source_root, &tail)) {
+            output->visible_source_path = observed;
+            if (!JoinPath(route_template.backing_target_root, tail,
+                          &output->backing_target_path)) {
+                return false;
+            }
+        } else if (RelativePath(
+                       observed, route_template.backing_target_root, &tail)) {
+            output->backing_target_path = observed;
+            if (!JoinPath(route_template.visible_source_root, tail,
+                          &output->visible_source_path)) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        output->stable_document_id = StableDocumentId(
+            output->visible_source_path, output->context.user_id);
+        if (request.identifier.kind == ProviderJavaIdentifierKind::kContentUri) {
+            output->provider_uri = std::string(request.identifier.value());
+        }
+        return ValidateProviderRouteBinding(*output).ready();
+    } catch (const std::bad_alloc&) {
+        *output = {};
+        return false;
+    }
+}
+
+bool BuildProviderVisibleMediaPath(
+        const ProviderRouteBindingV1& binding,
+        std::string* relative_path,
+        std::string* display_name) {
+    if (relative_path == nullptr || display_name == nullptr) return false;
+    const std::string volume_prefix =
+        "/storage/emulated/" + std::to_string(binding.context.user_id) + "/";
+    if (!binding.visible_source_path.starts_with(volume_prefix)) return false;
+    const std::string_view volume_relative =
+        std::string_view(binding.visible_source_path).substr(
+            volume_prefix.size());
+    const std::size_t separator = volume_relative.rfind('/');
+    if (volume_relative.empty()) return false;
+    if (separator == std::string_view::npos) {
+        relative_path->clear();
+        display_name->assign(volume_relative);
+    } else {
+        relative_path->assign(volume_relative.substr(0, separator + 1));
+        display_name->assign(volume_relative.substr(separator + 1));
+    }
+    return !display_name->empty();
+}
 
 OperationMask ProviderMappingOperationMask(
         ProviderMappingOperation operation) noexcept {
@@ -117,15 +273,15 @@ ProviderMappingDecisionV1 EvaluateProviderMapping(
         return output;
     }
 
-    const auto binding = ValidateMappingBinding(
-        request.operation, *request.binding);
+    const auto binding = ValidateMappingBinding(request, *request.binding);
     output.binding_reason = binding.reason;
     if (!binding.ready()) {
         output.disposition = ProviderMappingDisposition::kFailOpen;
         output.reason = ProviderMappingReason::kBindingInvalid;
         return output;
     }
-    if (!RequiresCommittedReverse(request.operation)) {
+    if (!RequiresCommittedReverse(
+            request.operation, request.binding->reverse_mode)) {
         output.disposition = ProviderMappingDisposition::kRewrite;
         output.reason = ProviderMappingReason::kReady;
         return output;
@@ -224,8 +380,11 @@ bool ProviderJavaDispatchMatchesBinding(
         case ProviderJavaIdentifierKind::kNone:
             break;
     }
-    return !request.file_path.value().empty()
-        && request.file_path.value() == binding.backing_target_path;
+    if (request.file_path.value().empty()) return false;
+    if (binding.reverse_mode == ProviderRouteReverseMode::kStaticUnique) {
+        return true;  // Materialization already proved membership and tail parity.
+    }
+    return request.file_path.value() == binding.backing_target_path;
 }
 
 ProviderMappingRequestV1 BuildProviderMappingRequest(
@@ -239,6 +398,7 @@ ProviderMappingRequestV1 BuildProviderMappingRequest(
     output.operation = ProviderJavaDispatchMappingOperation(request);
     output.profile_match = profile_match;
     output.supported_operations = supported_operations;
+    output.identifier_kind = request.identifier.kind;
     output.binding = binding != nullptr
             && ProviderJavaDispatchMatchesBinding(request, *binding)
         ? binding : nullptr;

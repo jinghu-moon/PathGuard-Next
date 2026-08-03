@@ -12,6 +12,11 @@ _Static_assert(sizeof(((struct PathGuardLsplantMappingRequestV1*)0)->operations)
                == sizeof(uint64_t));
 _Static_assert(sizeof(((struct PathGuardLsplantMappingFactsV1*)0)->binding_id)
                == sizeof(uint64_t));
+_Static_assert(PATHGUARD_PROVIDER_ROUTE_SNAPSHOT_VERSION == 2);
+_Static_assert(sizeof(((struct PathGuardProviderRouteBindingV1*)0)->binding_id)
+               == sizeof(uint64_t));
+_Static_assert(sizeof(((struct PathGuardProviderRouteBindingV1*)0)
+                      ->identity_handle_type) == sizeof(int32_t));
 
 static int resolve_for_c_parser(
         const struct PathGuardLsplantMappingRequestV1* request,
@@ -31,7 +36,12 @@ int pathguard_provider_lsplant_bridge_api_c_test(void) {
         (uint16_t)sizeof(struct PathGuardLsplantMappingRuntimeV1),
         resolve_for_c_parser,
         NULL,
+        NULL,
+        NULL,
+        NULL,
     };
+    PathGuardLsplantPublishMappingV1 publish = NULL;
     return runtime.resolver == NULL
-        || runtime.version != PATHGUARD_LSPLANT_BRIDGE_API_VERSION;
+        || runtime.version != PATHGUARD_LSPLANT_BRIDGE_API_VERSION
+        || publish != NULL;
 }

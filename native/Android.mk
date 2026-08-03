@@ -3,6 +3,7 @@ ROOT_PATH := $(LOCAL_PATH)/..
 CORE_SOURCES := \
     ../core/src/export_worker.cpp \
     ../core/src/failure_policy.cpp \
+    ../core/src/namespace_projection.cpp \
     ../core/src/path.cpp \
     ../core/src/pattern.cpp \
     ../core/src/pattern_runtime.cpp \

@@ -13,6 +13,9 @@ file(READ "${SOURCE_DIR}/provider-adapter/native/CMakeLists.txt" lsplant_cmake)
 file(READ "${SOURCE_DIR}/core/src/provider_mapping.cpp" provider_mapping)
 file(READ "${SOURCE_DIR}/core/include/pathguard/provider_route_snapshot_registry.h" provider_registry_header)
 file(READ "${SOURCE_DIR}/core/src/provider_route_snapshot_registry.cpp" provider_registry)
+file(READ "${SOURCE_DIR}/core/include/pathguard/provenance_protocol.h" provenance_protocol)
+file(READ "${SOURCE_DIR}/core/src/provenance_broker.cpp" provenance_broker)
+file(READ "${SOURCE_DIR}/core/src/route_provenance.cpp" route_provenance)
 file(READ "${SOURCE_DIR}/provider-adapter/hooker/src/dev/pathguard/providerhook/ProviderHooker.java" lsplant_hooker)
 file(READ "${SOURCE_DIR}/tests/baseline/pattern-v6/run-provider-hooker-dispatcher-host-test.ps1" hooker_dispatcher_test)
 foreach(contract IN ITEMS
@@ -25,6 +28,18 @@ foreach(contract IN ITEMS
     message(FATAL_ERROR "production hook misses ${contract}")
   endif()
 endforeach()
+if(NOT provenance_protocol MATCHES "kVersion = 4" OR
+   NOT provenance_protocol MATCHES "kIdentityHandleCapacity = 128" OR
+   NOT provenance_broker MATCHES "IdentityKind::kFileHandle" OR
+   NOT route_provenance MATCHES "kFormat = 3")
+  message(FATAL_ERROR "versioned FILE_HANDLE provenance transport is incomplete")
+endif()
+if(NOT hook MATCHES "SYS_name_to_handle_at" OR
+   NOT lsplant_bridge MATCHES "SYS_name_to_handle_at" OR
+   NOT entry MATCHES "PATHGUARD_PROVIDER_ROUTE_IDENTITY_FILE_HANDLE" OR
+   NOT provider_registry MATCHES "identity_handle_type")
+  message(FATAL_ERROR "FILE_HANDLE capture/snapshot/PFD verification is incomplete")
+endif()
 if(NOT hooker_dispatcher_test MATCHES "ProviderHookerDispatcherTest")
   message(FATAL_ERROR "ProviderHooker dispatcher host test is missing")
 endif()
@@ -96,6 +111,10 @@ foreach(contract IN ITEMS
     "pathguard_lsplant_install_passthrough_v1"
     "pathguard_lsplant_wait_passthrough_v1"
     "pathguard_lsplant_configure_mapping_v1"
+    "pathguard_lsplant_publish_mapping_v1"
+    "SetProvenanceTransactionsAvailable"
+    "BuildProviderBootstrapRecord"
+    "BootstrapExternalIdentity"
     "StartProviderBridgeWait"
     "provider_bridge_self_tested_hooks"
     "status\.provider_bridge"
@@ -157,6 +176,7 @@ foreach(contract IN ITEMS
     "PathGuardLsplantMappingFactsV1"
     "PATHGUARD_LSPLANT_MAPPING_BINDING_NONE"
     "pathguard_lsplant_configure_mapping_v1"
+    "pathguard_lsplant_publish_mapping_v1"
     "Provider native dispatcher installed as pass-through")
    if(NOT lsplant_hooker MATCHES "${contract}" AND
       NOT lsplant_bridge MATCHES "${contract}" AND
@@ -199,6 +219,7 @@ foreach(contract IN ITEMS
     "pathguard_lsplant_initialize_v1"
     "pathguard_lsplant_install_passthrough_v1"
     "pathguard_lsplant_wait_passthrough_v1"
+    "pathguard_lsplant_publish_mapping_v1"
     "libc\\+\\+_shared\.so")
   if(NOT lsplant_elf MATCHES "${contract}")
     message(FATAL_ERROR "LSPlant ELF guard misses ${contract}")

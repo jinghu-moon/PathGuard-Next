@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "pathguard/provider_route_snapshot_abi.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -10,6 +12,7 @@ extern "C" {
 #define PATHGUARD_LSPLANT_BRIDGE_API_VERSION UINT16_C(1)
 #define PATHGUARD_LSPLANT_MAPPING_IDENTIFIER_CAPACITY UINT16_C(1024)
 #define PATHGUARD_LSPLANT_MAPPING_FILE_PATH_CAPACITY UINT16_C(4096)
+#define PATHGUARD_LSPLANT_EXTERNAL_IDENTITY_CAPACITY UINT16_C(1024)
 
 enum PathGuardLsplantProviderKind {
     PATHGUARD_LSPLANT_PROVIDER_UNKNOWN = 0,
@@ -74,6 +77,11 @@ enum PathGuardLsplantMappingBindingState {
     PATHGUARD_LSPLANT_MAPPING_BINDING_SNAPSHOT = 1,
 };
 
+enum PathGuardLsplantExternalPathKind {
+    PATHGUARD_LSPLANT_EXTERNAL_PATH_ABSOLUTE = 1,
+    PATHGUARD_LSPLANT_EXTERNAL_PATH_RELATIVE = 2,
+};
+
 struct PathGuardLsplantMappingRequestV1 {
     uint16_t version;
     uint16_t size;
@@ -107,15 +115,37 @@ typedef int (*PathGuardLsplantMappingResolverV1)(
     struct PathGuardLsplantMappingFactsV1* facts,
     void* user_data);
 
+struct PathGuardLsplantExternalIdentityV1 {
+    uint16_t version;
+    uint16_t size;
+    uint8_t identifier_kind;
+    uint8_t path_kind;
+    uint8_t reserved[2];
+    uint16_t file_path_size;
+    uint16_t identifier_size;
+    uint8_t file_path[PATHGUARD_LSPLANT_MAPPING_FILE_PATH_CAPACITY];
+    uint8_t identifier[PATHGUARD_LSPLANT_EXTERNAL_IDENTITY_CAPACITY];
+};
+
+typedef int (*PathGuardLsplantExternalIdentitySinkV1)(
+    const struct PathGuardLsplantExternalIdentityV1* identity,
+    void* user_data);
+
 struct PathGuardLsplantMappingRuntimeV1 {
     uint16_t version;
     uint16_t size;
     PathGuardLsplantMappingResolverV1 resolver;
     void* user_data;
+    const struct PathGuardProviderRouteSnapshotV1* snapshot;
+    PathGuardLsplantExternalIdentitySinkV1 external_identity_sink;
+    void* external_identity_user_data;
 };
 
 typedef int (*PathGuardLsplantConfigureMappingV1)(
     const struct PathGuardLsplantMappingRuntimeV1* config);
+
+typedef int (*PathGuardLsplantPublishMappingV1)(
+    const struct PathGuardProviderRouteSnapshotV1* snapshot);
 
 #ifdef __cplusplus
 }

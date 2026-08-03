@@ -35,6 +35,25 @@ pathguard::ProviderRouteBindingV1 CompleteBinding() {
     return binding;
 }
 
+pathguard::ProviderRouteBindingV1 StaticBinding() {
+    pathguard::ProviderRouteBindingV1 binding;
+    binding.context = {10437, 0, 1, 7, 43, 0, 0};
+    binding.reverse_mode = pathguard::ProviderRouteReverseMode::kStaticUnique;
+    binding.namespace_id = "abcdefghijklmnopqrstuvwxyz";
+    binding.visible_source_path =
+        "/storage/emulated/0/Pictures/source/a.jpg";
+    binding.backing_target_path =
+        "/storage/emulated/0/Download/images/_pg/v1/"
+        "ns_abcdefghijklmnopqrstuvwxyz/a.jpg";
+    binding.visible_source_root =
+        "/storage/emulated/0/Pictures/source";
+    binding.backing_target_root =
+        "/storage/emulated/0/Download/images/_pg/v1/"
+        "ns_abcdefghijklmnopqrstuvwxyz";
+    binding.stable_document_id = "primary:Pictures/source/a.jpg";
+    return binding;
+}
+
 pathguard::ProviderMappingRequestV1 CompleteRequest(
         const pathguard::ProviderRouteBindingV1* binding) {
     pathguard::ProviderMappingRequestV1 request;
@@ -178,6 +197,26 @@ int main() {
     assert(decision.disposition == ProviderMappingDisposition::kUnsupported);
     assert(decision.reason == ProviderMappingReason::kReverseMissing);
 
+    binding = StaticBinding();
+    request = CompleteRequest(&binding);
+    request.operation = ProviderMappingOperation::kReverseLookup;
+    request.reverse = {};
+    decision = EvaluateProviderMapping(request);
+    assert(decision.rewrite());
+    assert(decision.reason == ProviderMappingReason::kReady);
+
+    binding.backing_target_path =
+        "/storage/emulated/0/Download/images/_pg/v1/"
+        "ns_zyxwvutsrqponmlkjihgfedcba/a.jpg";
+    request = CompleteRequest(&binding);
+    request.operation = ProviderMappingOperation::kReverseLookup;
+    request.reverse = {};
+    decision = EvaluateProviderMapping(request);
+    assert(decision.disposition == ProviderMappingDisposition::kFailOpen);
+    assert(decision.reason == ProviderMappingReason::kBindingInvalid);
+
+    binding = CompleteBinding();
+
     request = CompleteRequest(&binding);
     request.profile_match.reason =
         ProviderAdapterProfileReason::kBuildMismatch;
@@ -255,6 +294,62 @@ int main() {
     assert(decision.rewrite());
 
     binding = CompleteBinding();
+
+    auto static_template = StaticBinding();
+    static_template.visible_source_path = static_template.visible_source_root;
+    static_template.backing_target_path = static_template.backing_target_root;
+    static_template.stable_document_id = "primary:Pictures/source";
+    auto static_request = JavaRequest(
+        ProviderJavaDispatchRole::kForwardDocumentPath,
+        kOperationOpenRead, ProviderJavaIdentifierKind::kDocumentId,
+        "primary:Pictures/source/folder/a.jpg");
+    ProviderRouteBindingV1 materialized;
+    assert(MaterializeStaticProviderRouteBinding(
+        static_request, static_template, &materialized));
+    assert(materialized.visible_source_path
+           == "/storage/emulated/0/Pictures/source/folder/a.jpg");
+    assert(materialized.backing_target_path
+           == "/storage/emulated/0/Download/images/_pg/v1/"
+              "ns_abcdefghijklmnopqrstuvwxyz/folder/a.jpg");
+
+    static_request = JavaRequest(
+        ProviderJavaDispatchRole::kQuery, kOperationProviderQuery,
+        ProviderJavaIdentifierKind::kFilePath, "unused");
+    const std::string physical =
+        "/storage/emulated/0/Download/images/_pg/v1/"
+        "ns_abcdefghijklmnopqrstuvwxyz/folder/a.jpg";
+    static_request.identifier = {};
+    static_request.identifier.kind = ProviderJavaIdentifierKind::kFilePath;
+    static_request.file_path.size = static_cast<std::uint16_t>(physical.size());
+    std::copy(physical.begin(), physical.end(),
+              static_request.file_path.bytes.begin());
+    assert(MaterializeStaticProviderRouteBinding(
+        static_request, static_template, &materialized));
+    assert(materialized.visible_source_path
+           == "/storage/emulated/0/Pictures/source/folder/a.jpg");
+    assert(materialized.stable_document_id
+           == "primary:Pictures/source/folder/a.jpg");
+    std::string relative_path;
+    std::string display_name;
+    assert(BuildProviderVisibleMediaPath(
+        materialized, &relative_path, &display_name));
+    assert(relative_path == "Pictures/source/folder/");
+    assert(display_name == "a.jpg");
+    auto root_file = materialized;
+    root_file.visible_source_path = "/storage/emulated/0/a.jpg";
+    assert(BuildProviderVisibleMediaPath(
+        root_file, &relative_path, &display_name));
+    assert(relative_path.empty());
+    assert(display_name == "a.jpg");
+    root_file.visible_source_path = "/storage/emulated/10/a.jpg";
+    assert(!BuildProviderVisibleMediaPath(
+        root_file, &relative_path, &display_name));
+    auto static_mapping_request = BuildProviderMappingRequest(
+        static_request,
+        {0x616c696f74682d6d, ProviderAdapterProfileReason::kMatched},
+        kProviderCompositeOperationsV1, &materialized, {}, true);
+    assert(static_mapping_request.binding == &materialized);
+    assert(EvaluateProviderMapping(static_mapping_request).rewrite());
 
     auto java_request = JavaRequest(
         ProviderJavaDispatchRole::kQuery, kOperationProviderQuery,

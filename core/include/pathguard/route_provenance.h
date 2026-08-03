@@ -27,9 +27,15 @@ enum class Event : std::uint8_t {
     kMaterialized = 2,
     kCommit = 3,
     kAbort = 4,
+    kExternalBind = 5,
 };
 
-enum class Operation : std::uint8_t { kCreate = 1, kRename = 2, kDelete = 3 };
+enum class Operation : std::uint8_t {
+    kCreate = 1,
+    kRename = 2,
+    kDelete = 3,
+    kBindExternal = 4,
+};
 enum class IdentityKind : std::uint8_t { kFileHandle = 1, kStatxBirthTime = 2 };
 
 struct TransactionId {
@@ -51,6 +57,7 @@ struct ObjectIdentity {
     IdentityKind kind = IdentityKind::kFileHandle;
     std::string volume;
     std::vector<std::uint8_t> handle;
+    std::int32_t handle_type = 0;
     std::uint64_t inode = 0;
     std::int64_t birth_seconds = 0;
     std::uint32_t birth_nanoseconds = 0;
@@ -70,6 +77,8 @@ struct RouteRecord {
     RouteScope scope;
     ObjectIdentity identity;
     std::string logical_source_path;
+    std::string provider_uri;
+    std::string stable_document_id;
     std::uint64_t rule_id = 0;
     std::uint64_t content_generation = 0;
     std::uint64_t created_plan_generation = 0;
@@ -136,9 +145,18 @@ public:
     Error Materialize(TransactionId transaction, const ObjectIdentity& identity);
     Error Commit(TransactionId transaction);
     Error Abort(TransactionId transaction);
+    Error BindExternalIdentity(
+        TransactionId transaction, const RouteScope& scope,
+        const RouteKey& key, const ObjectIdentity& identity,
+        std::uint64_t current_plan_generation,
+        std::string provider_uri, std::string stable_document_id);
     ResolveResult ResolveReverse(const RouteScope& scope, const RouteKey& key,
                                  const ObjectIdentity& identity,
                                  std::uint64_t current_plan_generation) const;
+    std::uint64_t snapshot_generation() const {
+        return next_sequence_ == 0 ? 0 : next_sequence_ - 1;
+    }
+    bool CommittedAt(std::size_t index, RouteRecord* output) const;
     std::size_t committed_count() const { return committed_.size(); }
     std::size_t pending_count() const { return pending_.size(); }
 private:

@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "pathguard/provider_adapter_profile.h"
+#include "pathguard/provider_route_snapshot_abi.h"
 
 namespace pathguard {
 
@@ -44,5 +46,9 @@ private:
     std::vector<ProviderRouteSnapshotBindingV1> bindings_;
     std::vector<ProviderRouteSnapshotReverseV1> reverse_records_;
 };
+
+std::unique_ptr<ProviderRouteSnapshotRegistryV1>
+DecodeProviderRouteSnapshotV1(
+    const PathGuardProviderRouteSnapshotV1& snapshot) noexcept;
 
 }  // namespace pathguard

@@ -1,0 +1,55 @@
+{
+  "comparison_report_format": 1,
+  "change_id": "p6-provider-namespace-v1-20260803",
+  "before_commit": "working_tree_before_0.1.45",
+  "after_commit": "working_tree",
+  "environment": {
+    "device": "Xiaomi M2012K11AC (alioth)",
+    "android": "13 / API 33 / MIUI V14.0.8.0.TKHCNXM",
+    "kernel": "4.19.157-perf-g9607d8651312",
+    "root": "Magisk 30600",
+    "selinux": "Enforcing",
+    "module": "0.1.46-dev / versionCode 47"
+  },
+  "module_abi_hashes": {
+    "universal_zip_sha256": "d397801cf41597c62ce745fc9bee5b712b6847ec420e3388de365648416e6ed2",
+    "provider_status": "build/device-evidence/provider-namespace-v1/20260803-113951/provider-status.txt"
+  },
+  "rules_source_hash": "not_applicable: existing LocalSend rules",
+  "policy_hash": "content_generation=12564052008163896148",
+  "scenario_id": "V-69-namespace-projection-device-phase-1",
+  "steps": [
+    "Install 0.1.46-dev and perform the three LocalSend receive operations",
+    "Collect namespace tree, flat target, logical sources, Provider status and filtered logcat",
+    "Map namespace IDs to canonical source roots and verify same-name physical coexistence",
+    "Collect corrected shell MediaStore and root DocumentsProvider diagnostic views",
+    "Restart both Providers and verify PID rotation, status republication, namespace tree and file hashes",
+    "Delete both test1.jpg objects, receive them again through the two logical sources and verify new timestamps and stable Namespace ownership",
+    "Attempt caller-scoped query and open as LocalSend UID 10382; Android rejected the shell process before Provider acquisition because it lacked ACCESS_CONTENT_PROVIDERS_EXTERNALLY",
+    "Uninstall pathguard_next, reboot and verify zero module, daemon, mount and Provider hook runtime residue while preserving four physical user-data files",
+    "Receive collision.txt twice; observe LocalSend rename the second object before Provider create, leaving exact collision not_observed",
+    "Create an isolated unknown Namespace fixture, restart LocalSend to refresh a physically deleted backing mount, verify known logical visibility and unknown logical ENOENT, then remove the fixture"
+  ],
+  "expected_result": "Shared target root uses distinct static Namespace paths and same-name files coexist without flat target collision",
+  "before_actual": "0.1.44-dev used the prior production boundary and did not provide Namespace Projection evidence",
+  "after_actual": "0.1.46-dev produced ns_57xfxvj54rskidat5ak4krdeye for Download/localsend-source and ns_vzn4kspwdxed2tgosk2o4z6bpu for Pictures; both test1.jpg files coexisted, both Providers republished healthy state after PID rotation, and delete-recreate returned each new object to the same Namespace. Caller-scoped query/open could not be constructed with the existing app and shell probe: su 10382 content query/read was rejected before Provider acquisition for missing ACCESS_CONTENT_PROVIDERS_EXTERNALLY, so both are unsupported/not_observed on this device setup. After module uninstall and reboot, module/daemon/mount/Provider-hook residue counts were zero while four physical user-data files remained. LocalSend renamed the second collision.txt to collision (1).txt before Provider create, so exact collision is not_observed. An isolated unknown Namespace remained physical and returned ENOENT from the refreshed LocalSend logical mount while a known Namespace file was visible. External deletion of an active physical Namespace by Solid Explorer left the old mount marked //deleted until LocalSend restart; only restart recovery is claimed.",
+  "classification": "not_observed",
+  "evidence_paths": [
+    "tests/baseline/pattern-v6/p6-provider-namespace-v1-20260803/V-69-namespace-projection-device.md",
+    "build/device-evidence/provider-lsplant-v1/20260802-235131/provider-status.txt",
+    "build/device-evidence/provider-namespace-v1/20260802-235239/namespace-tree.txt",
+    "build/device-evidence/provider-namespace-v1/20260802-235239/flat-target.txt",
+    "build/device-evidence/provider-namespace-v1/20260803-000719/media-namespace-query.txt",
+    "build/device-evidence/provider-namespace-v1/20260803-000719/documents-download.txt",
+    "build/device-evidence/provider-namespace-v1/20260803-113633/namespace-tree.txt",
+    "build/device-evidence/provider-namespace-v1/20260803-113951/provider-status.txt",
+    "build/device-evidence/provider-namespace-v1/20260803-113951/namespace-tree.txt",
+    "build/device-evidence/provider-namespace-v1/20260803-120326/provider-status.txt",
+    "build/device-evidence/provider-namespace-v1/20260803-120326/namespace-tree.txt",
+    "tests/baseline/pattern-v6/p6-provider-namespace-v1-20260803/V-69-uninstall-residual.txt",
+    "tests/baseline/pattern-v6/p6-provider-namespace-v1-20260803/V-69-collision-unknown-namespace.txt",
+    "build/device-evidence/provider-namespace-v1/20260803-181921/provider-status.txt",
+    "build/device-evidence/provider-lsplant-v1/20260803-181924/provider-status.txt"
+  ],
+  "reviewer_conclusion": "Current-device supported scope is complete: physical Namespace isolation, forward/mount scope, Provider restart, delete-recreate, uninstall residue and unknown-Namespace mount exclusion passed. Exact collision and caller-scoped Provider Cursor/open are unsupported/not_observed with the existing LocalSend/probe and were skipped. External physical deletion leaves an active mount stale until app restart and is recorded as a production lifecycle boundary. Unsupported strong-identity cases are skipped."
+}

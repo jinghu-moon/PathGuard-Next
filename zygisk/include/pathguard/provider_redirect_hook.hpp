@@ -7,6 +7,7 @@
 
 #include "pathguard/action_admission.h"
 #include "pathguard/provider_redirect_lifecycle.hpp"
+#include "pathguard/provenance_protocol.h"
 #include "pathguard/storage_path_adapter.h"
 #include "zygisk.hpp"
 
@@ -28,5 +29,21 @@ struct PolicyConfig {
 
 InstallResult Install(zygisk::Api* api, JNIEnv* env,
                       const PolicyConfig& config);
+
+// Available after Provider Binder identity hooks are installed. Unknown or
+// Provider-process identity is returned as -1 so callers remain fail-open.
+int32_t CurrentCallingUid() noexcept;
+
+// Keeps provenance coordination aligned with companion/snapshot availability.
+// Forward path routing remains fail-open while this gate is disabled.
+void SetProvenanceTransactionsAvailable(bool available) noexcept;
+
+bool BuildProvenanceRecordForRoute(
+    const storage_path_adapter::RewriteResult& rewrite,
+    int32_t caller_uid, const char* logical_path, const char* target_path,
+    provenance_protocol::Record* output) noexcept;
+
+bool CaptureProvenanceIdentity(
+    int fd, provenance_protocol::Identity* output) noexcept;
 
 }  // namespace pathguard::provider_redirect

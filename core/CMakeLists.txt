@@ -1,6 +1,7 @@
 add_library(pathguard_core STATIC
   src/failure_policy.cpp
   src/export_worker.cpp
+  src/namespace_projection.cpp
   src/path.cpp
   src/pattern.cpp
   src/pattern_runtime.cpp

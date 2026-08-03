@@ -24,6 +24,14 @@ add_executable(pathguard_path_test
 target_link_libraries(pathguard_path_test PRIVATE pathguard_core)
 add_test(NAME pathguard_path_test COMMAND pathguard_path_test)
 
+add_executable(pathguard_namespace_projection_test
+  unit/namespace_projection_test.cpp)
+target_include_directories(pathguard_namespace_projection_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit)
+target_link_libraries(pathguard_namespace_projection_test PRIVATE pathguard_core)
+add_test(NAME pathguard_namespace_projection_test
+  COMMAND pathguard_namespace_projection_test)
+
 add_executable(pathguard_validation_test unit/validation_test.cpp)
 target_link_libraries(pathguard_validation_test PRIVATE pathguard_core)
 add_test(NAME pathguard_validation_test COMMAND pathguard_validation_test)

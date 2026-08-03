@@ -1,0 +1,18 @@
+V-69 Namespace Projection uninstall residual check
+time=2026-08-03 12:15:01 +08:00
+device=Xiaomi M2012K11AC (alioth)
+build_fingerprint=Redmi/alioth/alioth:13/TKQ1.220829.002/V14.0.8.0.TKHCNXM:user/release-keys
+boot_completed=1
+module_path=/data/adb/modules/pathguard_next
+module_directory_count=0
+pathguardd_pid_count=0
+localsend_pid_count=0
+mediaprovider_pid=4847
+externalstorageprovider_pid=9426
+global_mount_match_count=0
+all_process_mount_match_count=0
+mediaprovider_pathguard_lsplant_map_count=0
+externalstorageprovider_pathguard_lsplant_map_count=0
+persisted_physical_file_count=4
+persisted_physical_files=ns_57xfxvj54rskidat5ak4krdeye/test.txt,ns_57xfxvj54rskidat5ak4krdeye/test1.jpg,ns_vzn4kspwdxed2tgosk2o4z6bpu/test.jpg,ns_vzn4kspwdxed2tgosk2o4z6bpu/test1.jpg
+result=pass
