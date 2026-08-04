@@ -2,9 +2,9 @@
 
 > 状态：已实施（设备矩阵与明确 unsupported 边界除外）
 >
-> 文档版本：0.9
+> 文档版本：1.0
 >
-> 日期：2026-08-02
+> 日期：2026-08-03
 >
 > 适用范围：Android 12+、Magisk Zygisk / KernelSU + ZygiskNext
 
@@ -53,10 +53,11 @@ mount 内部接口和 plan 表达允许随统一 IR 重构；
 | 层级 | 当前状态 | 本文用法 |
 | --- | --- | --- |
 | 历史 before 基线 | rules TOML format 1；policy format v5/schema 2；literal deny/redirect；`file_picker`；prefix mapper | 仅用于前后对比，不形成接口兼容承诺 |
-| 当前实现 | rules TOML format 2；policy format 6/schema 3；Selector/Action/Glob v1；五执行域 capability admission；Shared Target Namespace Projection；provenance/status v2 | Host/NDK 自动化完成；设备未观察项和 unsupported 能力以任务清单为准 |
+| 当前实现 | rules TOML format 2；policy format 6/schema 3；Selector/Action/Glob v1；五执行域 capability admission；扁平 target 路径重定向 | Host/NDK 自动化完成；设备未观察项和 unsupported 能力以任务清单为准 |
 | 已接受目标 | ADR-0010～0015 的后端策略、snapshot、capability、Glob v1 和有界反选 | 作为当前目标设计；发现与最新需求/平台事实冲突时必须修订 |
 | 已接受目标 | ADR-0016 policy format 6/schema 3 | format 6 首版编码统一 Selector/Action、PatternTable 和有界 selector 差集；不增加 NOT token |
-| 可选高级能力 | ADR-0017 route provenance | 仅用于必须保留扁平 target 且证明历史对象来源的规则；不阻塞默认 Namespace Projection |
+| 已归档实验 | Shared Target Namespace Projection | `0.1.45-dev`/`0.1.46-dev` 已验证，但用户可见 `_pg/v1/ns_*` 违背简单直观的产品目标，不进入生产路径 |
+| 可选高级能力 | Private Audit v1 | 规则以 `audit = true` 显式启用；私有旁路记录，不参与路径布局、重定向成功与否或文件可用性 |
 
 本文保留的 Phase P0～P5 和 format 1/v5 描述是实施时的设计与 before 基线，不代表当前生产入口。
 任何 capability 仍只有在对应代码、probe 和 conformance test 同时成立后才能报告 active。
@@ -85,7 +86,7 @@ mount 内部接口和 plan 表达允许随统一 IR 重构；
 | C1 | app-scoped literal deny | 目标 UID/user 对受限目录得到 `EACCES`，其他应用不受影响 |
 | C2 | app-scoped literal redirect | 目标应用访问 visible path 时实际落到 backing path，读写/rename/delete 一致 |
 | C3 | LocalSend/Provider 代写 | 最低闭环为 Binder caller UID 归因正确且接收文件落到规则目标；只有 bit 17 经复合 probe 置位时才额外承诺 Provider query/insert/reverse 与实际 FD 一致，否则该视图明确 unsupported |
-| C4 | 多源到同一目标 | 每个合法源都能前向写入；同名碰撞确定性 reject；反向歧义不伪装成唯一映射 |
+| C4 | 多源到同一目标 | 每个合法源都写入同一扁平 target；PathGuard 不改名、不覆盖调用方 flag，反向歧义不伪装成唯一映射 |
 | C5 | 故障隔离 | 未命中 UID 透传；能力缺失 fail-open；active deny 和 collision 不被错误 fail-open |
 | C6 | 新增 glob 路由/deny | 按文件名、后缀和目录分量匹配，作用域、优先级和执行域符合本文语义 |
 
@@ -394,7 +395,7 @@ deny_rules = [
 | `to` | redirect/export 必选 | 目标目录，必须位于允许的 storage root 内 |
 | `priority` | 否 | 有符号 32 位整数，默认 0；数值越大优先级越高 |
 | `preserve` | 否 | 首版固定为 `relative`，保留匹配项相对 root 的 tail |
-| `collision` | 否 | redirect/export 的碰撞策略；首版只允许 `reject` |
+| `collision` | 否 | 路由器双操作冲突策略；首版只允许 `reject`，不用于替应用重命名文件 |
 | `enforcement` | glob deny 必选 | `provider` 或 `complete`，禁止隐式扩大保障范围 |
 
 format 2 用 `provider = { enabled = true }` 表达用户意图，替代含义过宽的
@@ -845,88 +846,91 @@ deny 与其他动作重叠不是配置冲突：只要 deny 声明的 enforcement
 多源到同一目标是核心场景 C4，前向路由不因目标 tail 语言可能重叠而在编译期拒绝：
 
 - 每个源使用 `preserve = "relative"`，目标目录不在任一 source root 内；
-- 多个 source 可以共享同一个声明 target root，但不得共享同一个扁平物理叶子命名空间；
-- 反向映射不能按规则声明顺序或 visible path 字典序编造来源。
+- 多个 source 共享同一个扁平物理 target，不插入 `_pg`、NamespaceId、RuleId 或来源标签目录；
+- PathGuard 只把每次路径操作的 source 前缀替换为 target 前缀，并保持相对 tail；
+- 同一次用户操作中的 `exists/stat/open/create/rename/delete` 必须看到同一个重定向后目录；
+- 反向映射不能按规则声明顺序、文件名、时间或 inode 猜测来源。
 
-默认生产布局为 Shared Target Namespace Projection：
-
-```text
-logical:  <source-root>/<tail>
-physical: <target-root>/_pg/v1/ns_<namespace-id>/<tail>
-```
-
-`NamespaceId` 是编译产物，不是 RuleId。它使用域分离 SHA-256 对 canonical projection
-identity 求摘要，取前 128 bit 并编码为 26 字符小写 Base32。identity 只包含 layout version、
-package/user scope、logical source root、声明 target root 和 relative-tail transform；不包含 priority、
-collision、enforcement、plan generation 或其他运行策略。同一投影在 mount/Provider 等执行域中
-必须得到同一个 NamespaceId，策略调整不得触发物理身份变化。摘要碰撞是编译硬失败。
-
-物理路径本身携带当前逻辑归属，因此 reverse 是静态函数：
+默认生产布局：
 
 ```text
-<target-root>/_pg/v1/ns_A/<tail> -> <source-A>/<tail>
-<target-root>/_pg/v1/ns_B/<tail> -> <source-B>/<tail>
+Download/localsend-source/report.txt  -> Download/localsend-redirect/report.txt
+Pictures/photo.jpg                    -> Download/localsend-redirect/photo.jpg
 ```
 
-Provider 对外投影必须覆盖同一行的 `_data`、`relative_path`、`_display_name` 和
-`document_id`：前两者恢复 source 的逻辑路径，后两者保持与该路径一致；URI 打开仍以
-Provider 自己的行定位和物理 backing path 为准，不能信任调用方回传的 `_data`。若行没有
-可信的物理路径或 document identity，Cursor 保持原结果并 fail-open。
+文件名、扩展名和同名处理属于发起操作的应用或 Android Provider。PathGuard 不主动追加 `(1)`、
+不强加 `O_EXCL`/`RENAME_NOREPLACE`、不把普通 rename 改成 no-replace，也不覆盖调用方原本传入的
+flags。调用方选择覆盖、报错或自动改名时，PathGuard 只透传该语义到真实 target。LocalSend 在当前
+真机的顺序重名场景已观察到自动生成 `collision (1).txt`，这是 LocalSend 的行为，不是 PathGuard
+保证。应用自身“先检查、后创建”的并发命名竞态不在 PathGuard 保证范围内。
 
-这证明的是 namespace ownership，不证明文件的历史创建者。跨 Namespace move 会改变文件的
-当前逻辑归属；删除后重建同名文件不会继承数据库 owner。未知 layout、未知 NamespaceId、非法
-tail 或 generation/scope 不一致时保持 physical-only/fail-open，不猜来源。
+规则字段 `collision = "reject"` 仍用于路由器内部无法安全合并的双操作/同目标决策，不代表
+PathGuard 对普通单文件 create 主动施加文件系统碰撞策略。两者必须在状态和测试中分开。
 
-`_pg` 是保留组件，用户规则的 source/target 不得占用。Namespace backing 目录通过
-`openat2(RESOLVE_BENEATH/NO_SYMLINKS)` 或同等强度的逐组件 `openat + O_NOFOLLOW` 创建和校验；
-外部文件管理器若在 scoped app 存活期间直接删除活动 Namespace backing，Linux bind mount 会继续
-引用已 unlink 的 dentry，并在 mountinfo 中显示 `//deleted`。重新创建同路径不会让存量 mount 热重绑定；
-当前实现只承诺目标进程重启后重新校验并挂载，不宣称活动 mount 自动恢复。诊断必须显式报告该状态，
-不得把 Provider 已重建物理目录等同于 app mount 已恢复。
-mount 与 Provider 对同一 source/target 投影必须共享物理 Namespace。当前项目未发布且没有用户
-数据，因此不实现旧扁平布局迁移、adopt/migrate CLI、Legacy Namespace、自动 GC 或迁移 UI。
+Provider 代写仍需要 native Provider path adapter 在名称分配和文件操作期间看到同一个 target
+视图，但不需要把 target 伪装回历史 source。PathGuard 不改写 Cursor 为来源视图，不维护
+MediaStore 虚拟别名；URI open 继续以 Provider 自己的行和 `_id` 定位，不信任调用方回传的
+`_data`。Provider adapter 故障不得阻塞 app-path/mount 能完成的普通 redirect。
 
-反向能力分为两层：
+历史 route provenance 不是生产重定向的承重结构。它不再启动事务服务，不生成 route binding，
+也不参与物理布局、路由选择、命名、碰撞行为或文件是否可用；ADR-0017 的事务实现只保留为
+研究/测试资产。
 
-1. **默认静态投影**：共享 target root 下按 Namespace 分区，完全不依赖 FILE_HANDLE、BTIME、
-   inode、xattr、SQLite 或 WAL；
-2. **可选来源追踪**：只有显式要求扁平 target 和历史对象来源时，成功 create/rename 事务提交
-   route provenance，至少包含
-   identity/attribution scope 与 identity epoch、稳定 target object identity、target relative path、
-   RuleId、原始 logical path 和 generations。query/open/reverse scan 使用该记录恢复来源。
+当前版本实现独立的 Private Audit v1。redirect 规则只有显式设置 `audit = true` 才会在成功的
+已 Hook 文件操作之后，向固定容量异步队列尽力提交 `upsert/rename/delete` 事件。文件操作线程
+不执行 IPC 或 WAL I/O；队列满、worker 创建失败、companion/daemon 不可用、WAL 写入失败或存储
+达到上限，都只会丢弃审计事件并记录诊断，绝不修改原操作的返回值、`errno` 或用户文件。
 
-来源追踪属于 daemon 单写的 redirect router 共享服务，不进入 Pattern Engine，也不改变 glob
-语法。精确事务和持久格式由
-[ADR-0017](adr/0017-route-provenance-transactions.md) 冻结：mutation 前 durable prepare，文件系统
-成功后记录 strong identity，再 durable commit，最后才向 create/rename 调用方返回成功；delete
-使用 prepare + tombstone。跨文件系统与 store 无法形成真正 ACID 事务，无法补偿的中间状态必须
-保留为 unowned/ambiguous，不能自动删除文件或伪造来源。
+审计 worker 禁止在 Zygote `preSpecialize` 的 hook 安装阶段创建。`0.1.49-dev` 曾在该阶段直接
+`pthread_create`，导致 `selinux_android_setcontext()` 返回 `EPERM`，应用在 Activity 初始化前
+`SIGABRT`，表现为 LocalSend 启动白屏。worker 现在只允许由 specialize 完成后的首个真实审计
+事件惰性启动；启动失败只丢弃该事件，redirect 继续工作。生产结构守卫必须阻止安装路径重新调用
+`StartAuditWorker()`。
 
-可选 provenance 的 durable target identity 优先使用可连接 file handle/FID；fallback 只接受经过 probe 的稳定 volume
-identity + inode + `statx` birth time。`(st_dev, st_ino, ctime)` 会随正常写入变化，只能用于诊断或
-同 boot 快速拒绝，不能恢复跨重启 owner。强 identity 不可用时仅 provenance mode 不准入，
-不影响 Namespace Projection。
+Magisk `connectCompanion()` 仅允许在 `preAppSpecialize()` 调用；而预连接 socket 即使通过
+`exemptFd()` 保留到 specialization 之后，Provider SELinux 域向 `zygote` socket 执行 `write` 仍会
+被拒绝。Private Audit 因此在 pre-specialize 创建固定容量 memfd 共享队列，并通过 SCM_RIGHTS
+交给 root companion；specialize 后 Provider 只做有界内存复制和原子入队，不创建审计线程、不执行
+socket IPC。root companion 校验 PID/start-time/目标 UID 后独立消费并转发 daemon。队列满、进程退出、
+daemon 不可用或记录无效只增加 drop/failure 并释放资源，不影响文件 I/O。
 
-当前 v5 `RestoreAbsolutePath` 对歧义选择 canonical visible source 的行为记录为前测事实，但在
-v6 中计划内删除。policy reload 只按当前 scope 中语义相同的 RuleId rebind；无关规则改变不能让
-有效记录整体失效，RuleId/target/scope/identity epoch 变化则进入 stale/ambiguous。新文件的
-provenance 完整时，显式扁平模式必须保持 Provider query 与实际 FD 一致；
-扁平历史/外部文件缺少 provenance 时，返回 `AmbiguousReverse` 并保持真实 target
-视图或明确省略虚拟别名，不能伪造来源。Provider composite admission 必须把 provenance
-prepare/commit/reload 测试纳入独立 provenance substatus。bit 17 只表示 Provider adapter family
-基础可用，Namespace Projection 与 provenance 使用独立 operation substatus，二者不能相互代替。
+审计由 daemon 单写，数据仅位于模块私有目录：
 
-如果多个源可能把不同文件映射到同一个目标 basename，策略必须显式指定：
-
-```toml
-collision = "reject"   # 首版唯一允许值
+```text
+/data/adb/modules/pathguard_next/run/audit.sock    mode 0600
+/data/adb/modules/pathguard_next/run/audit-v1.wal mode 0600
 ```
 
-`collision = "reject"` 是默认值，处理同一 Namespace 中已经存在同名实体的动态碰撞。不同
-Namespace 的同名文件可以共存。首版不自动覆盖、不追加随机后缀。需要覆盖或版本化命名时，应
-增加独立的目标模板和事务语义。运行时 collision 返回 `DecisionReason::Collision`，并记录
-source、target、两个 RuleId 和 plan generation；Provider adapter 将其映射为稳定 errno，
-CLI/status 保留诊断 ID，避免用户只看到无来源的“保存失败”。
+WAL 使用版本化 frame、CRC32、严格长度校验和断尾修复，限制为 64 MiB/200000 个当前路径记录。
+记录包含 caller UID/user、RuleId、source/target/previous target、policy generation、实时/启动时钟，
+以及可获得的 dev/inode/size/mode/mtime/ctime、STATX_BTIME 和 file handle。置信度依次为
+`path_only`、`inode_metadata`、`birth_time`、`file_handle`；高级身份不可用时自动降级，不影响
+redirect。设备重启后，本次 daemon 会话的新事件可覆盖 WAL 恢复记录，避免重置后的 boottime
+被误判为旧事件。
+
+该审计是事实记录而不是绝对 provenance：当前只覆盖统一 path hook 实际观察到的操作。纯 mount
+路径、direct syscall、未 Hook 的外部文件管理器修改或掉队事件可能导致缺失/陈旧记录。LocalSend
+关闭“保存到相册”时使用 SAF，真实文件 I/O 由 `com.android.externalstorage` 代写；保存到相册的
+路径也由 Provider 执行。因此默认示例为每个文件 selector 显式编译 app-path 和 Provider 两个
+action，只在实际执行 Provider I/O 的 action 上设置 `audit = true`。审计仍只接受成功的写 open、
+create、truncate、rename、link、metadata mutation 和 delete，后续只读 access/stat/realpath/open
+不会生成来源记录。目录 mount 规则不声明审计。root 用户可用
+`pathguardctl audit /data/adb/modules/pathguard_next [--json]` 读取 daemon 快照；CLI
+不直接打开活动 WAL。审计当前没有普通用户 UI，也不得用于恢复来源视图、隐藏文件或决定 I/O。
+
+文件型 app-path redirect 的准入只要求 `lookup/stat`、`access`、读写 open、create、rename 和
+unlink。`truncate`、watch、目录遍历、mkdir、hard-link、rmdir、canonical/readlink 和 metadata
+hook 仍按运行时事实报告，但某个非核心 hook 未被目标进程导入时，不得使正常文件 redirect 整体
+失效。完整 VFS/目录语义继续使用各自更强的 operation contract。
+
+不为 Private Audit 增加 LocalSend/Flutter 专属 late PLT hook。`0.1.51-dev` 和 `0.1.52-dev` 已证明
+specialize 后对 `libflutter.so` 的增量 `pltHookCommit()` 在当前环境固定返回 false；更重要的是，
+真实用户链路通过 SAF/Provider 代写，追踪 Flutter runtime 不是必要观测路径。该实验代码已移除，
+避免高级审计扩大核心重定向的进程内 hook 面。
+
+Shared Target Namespace Projection 已在 `0.1.45-dev`/`0.1.46-dev` 完成实验验证，但因 `_pg/v1/ns_*`
+直接暴露物理实现、增加用户浏览层级且产品并不需要历史来源视图，现已归档。项目未发布且没有
+用户数据，因此不实现该实验布局的迁移 reader、adopt/GC、兼容 UI 或存量转换工具。
 
 ## 7. 执行后端
 
@@ -1272,9 +1276,10 @@ work profile 必须为每个 user 生成独立计划。Provider 的
 成功。编译错误在发布前拒绝整份新策略并继续使用上一份有效 snapshot，不进入运行时。对 glob
 deny，能力未通过 admission 时规则状态必须是 `inactive/unsupported`，不能显示为“已禁止”。
 
-用户规则的确定性结果不属于内部失败：active deny 返回 `EACCES`；`collision = "reject"`
-发现目标实体已存在时返回 `EEXIST`；静态多对一歧义在编译期拒绝。适配器必须区分
-`DecisionReason` 与内部错误，不能把用户要求的拒绝再 fail-open。
+用户规则的确定性结果不属于内部失败：active deny 返回 `EACCES`；路由器检测到同一次双操作
+会把两个不同对象折叠为同一 target 时返回 `EEXIST`。普通 create/rename 的目标已存在语义由
+调用方 flags 和 Android/文件系统决定，PathGuard 不主动改写。适配器必须区分 `DecisionReason`
+与内部错误，不能把用户要求的拒绝再 fail-open。
 
 未来若支持 `failure = closed`，必须只对显式 deny 或已证明安全的 provider operation 开放；
 不能用 closed 弥补动态 Hook 覆盖不完整的问题。
@@ -1337,13 +1342,15 @@ deny，能力未通过 admission 时规则状态必须是 `inactive/unsupported`
 
 ### Phase P3：Provider/MediaStore
 
-1. 实现已接受的 ADR-0017，保持 daemon 单写 store、事务状态机、恢复矩阵和 GC 边界一致。
-2. Provider 使用 Binder caller UID 建立 route scope。
-3. 补齐 query、insert、create、rename、delete、scan 的正向/反向映射。
-4. 补齐 provider-scope glob deny 的全操作拒绝矩阵。
-5. 实现 route provenance 的事务、持久化、identity 校验和 daemon/Provider 重启恢复。
-6. 为多源到同一目标生成 `_pg/v1/ns_<id>` 静态投影；provenance 作为可选扁平布局能力；删除
-   v5 canonical source fallback。
+1. Provider 使用 Binder caller UID 建立 route scope，native path adapter 与 app-path 使用同一
+   扁平 target 映射和相对 tail 语义。
+2. 补齐 Provider 代写所需的 path create/open/rename/delete 操作，不改写应用命名策略，不构造
+   历史 source 视图。
+3. 补齐 provider-scope glob deny 的全操作拒绝矩阵。
+4. LSPlant 产物保留为未来 `hide.media_query`/`hide.saf` 的可选 Provider visibility adapter；当前
+   redirect 不加载 Java hook，不依赖 LSPlant 初始化或 route snapshot。
+5. Namespace Projection 与事务 route provenance 从当前生产入口移除，既有实现只保留为归档实验
+   和独立测试资产；显式 `audit = true` 使用的是职责隔离的异步 Private Audit v1。
 7. 按 ADR-0012 实现 Provider 所属的 bit 16～17；path I/O、query、insert/create、rename/delete、
    reverse scan 作为 action mask/substatus 分别报告，不再使用一个 bool 表示 Provider 整体能力。
 8. 在真实设备上验证 LocalSend/SAF、MediaStore 相册保存、文件管理器和浏览器四类 glob
@@ -1472,8 +1479,8 @@ evidence paths / reviewer conclusion
 - 1/16/64/256 条 pattern 的 P50/P95/P99；
 - 同 root 64 candidates、32 个退化 pattern 和 1000 条应拒绝 pattern 的最坏情况；
 - Provider 线程不发生每次匹配堆分配；
-- 分别测量 static-unique reverse 与 provenance prepare/commit 的 P50/P95/P99 和持久化开销；
-  provenance 不允许异步到“文件已对调用方成功但来源尚未提交”的窗口；
+- Private Audit v1 启用时分别测量入队 P50/P95/P99、队列 drop 和 daemon WAL 持久化开销；
+  文件操作线程不得等待审计提交，审计缺失是显式降级而不是 I/O 失败；
 - 高并发创建和 rename 不死锁、不重复创建、不崩溃；
 - Deny、Redirect、Collision、Unsupported/CapabilityMissing 和内部失败进入有界、限速、异步
   审计；显式 observe 按独立采样策略记录；
@@ -1489,8 +1496,8 @@ bypass、candidate/transition 上限）从 P0 起强制；性能 gate 使用固�
    方案都是错误建模。
 2. libc Hook 不能覆盖静态链接、直接 syscall 或未覆盖的 native 入口；因此必须公开
    capability 状态，不能把 partial hook 标成全功能 active。
-3. 多源共享 target root 使用 Namespace Projection；不允许默认共享扁平叶子命名空间。只有显式
-   provenance 模式才依赖 strong identity，来源记录缺失、陈旧或不匹配时不得恢复虚假 source。
+3. 多源共享同一扁平 target root；PathGuard 不负责命名、自动改名或历史来源恢复。来源审计若未来
+   启用必须是私有旁路能力，缺失、陈旧或错误不得影响文件 I/O。
 4. glob deny 只有在声明的 enforcement scope 完整可用时才能标为 active；provider scope
    不能冒充完整文件系统 deny。
 5. fanotify move 只能作为用户显式选择的异步 export，不作为 redirect fallback。
@@ -1502,6 +1509,8 @@ bypass、candidate/transition 上限）从 P0 起强制；性能 gate 使用固�
    `!pattern` 简写、顺序反转或运行时 NOT token。
 9. format 2/v6 是破坏性切换，不提供生产兼容 reader 或自动迁移工具；安全来自完整 change set、
    格式拒绝和 C1～C6 前后重放，不来自长期维护旧协议。
+10. LocalSend 或其他应用自身的并发同名竞态不在 PathGuard 保证范围；PathGuard 只保证同一次
+    操作中的路径调用被一致重定向，并透传调用方原始文件操作语义。
 
 ## 13. 评审意见吸收决策
 

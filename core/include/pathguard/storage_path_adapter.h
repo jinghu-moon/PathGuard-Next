@@ -36,6 +36,7 @@ struct RewriteResult {
     uint32_t matcher_invocations = 0;
     uint8_t collision_mode = 0;
     uint8_t reverse_mode = 0;
+    uint32_t action_options = 0;
     uint32_t user_id = 0;
     uint64_t content_generation = 0;
     uint64_t plan_generation = 0;
@@ -113,6 +114,18 @@ inline bool ParseLogicalPath(const char* path, LogicalPath* output) {
         && SafePathComponents(output->relative, output->relative_size);
 }
 
+inline bool CanonicalizeStoragePath(const char* path, char* output,
+                                    size_t capacity) {
+    if (output == nullptr || capacity == 0) return false;
+    LogicalPath logical;
+    if (!ParseLogicalPath(path, &logical)) return false;
+    const int written = snprintf(
+        output, capacity, "/storage/emulated/%u/%.*s/%.*s", logical.user_id,
+        static_cast<int>(logical.root_size), logical.root,
+        static_cast<int>(logical.relative_size), logical.relative);
+    return written > 0 && static_cast<size_t>(written) < capacity;
+}
+
 inline bool AppendTarget(const LogicalPath& logical,
                          const policy_v6_view::StringRef& target,
                          size_t relative_offset,
@@ -185,6 +198,7 @@ inline RewriteResult Rewrite(
     result.matcher_invocations = routed.matcher_invocations;
     result.collision_mode = routed.collision_mode;
     result.reverse_mode = routed.reverse_mode;
+    result.action_options = routed.options;
     result.user_id = logical.user_id;
     result.content_generation = policy.content_generation();
     result.plan_generation = package.plan_generation;

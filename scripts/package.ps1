@@ -1,6 +1,7 @@
 param(
     [string[]]$Abi = @('arm64-v8a', 'armeabi-v7a'),
-    [switch]$AllowMissingNative
+    [switch]$AllowMissingNative,
+    [switch]$WithoutLsplant
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +38,9 @@ if ($Abi.Count -eq 1) {
 } else {
     $archiveName = "pathguard-next-v$version-universal.zip"
 }
+if ($WithoutLsplant) {
+    $archiveName = $archiveName -replace '\.zip$', '-no-lsplant.zip'
+}
 $zip = Join-Path $dist $archiveName
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 $archive = [System.IO.Compression.ZipFile]::Open($zip, 'Create')
@@ -51,18 +55,24 @@ try {
         Add-File $archive (Join-Path $module "zygisk/$item.so") "zygisk/$item.so"
         Add-File $archive (Join-Path $module "bin/$item/pathguardd") "bin/$item/pathguardd"
         Add-File $archive (Join-Path $module "bin/$item/pathguardctl") "bin/$item/pathguardctl"
-        Add-File $archive (Join-Path $module "provider/$item/libpathguard_lsplant.so") `
-            "provider/$item/libpathguard_lsplant.so"
+        if (-not $WithoutLsplant) {
+            Add-File $archive (Join-Path $module "provider/$item/libpathguard_lsplant.so") `
+                "provider/$item/libpathguard_lsplant.so"
+        }
     }
-    Add-File $archive (Join-Path $module 'provider/provider-hooker.dex') `
-        'provider/provider-hooker.dex'
+    if (-not $WithoutLsplant) {
+        Add-File $archive (Join-Path $module 'provider/provider-hooker.dex') `
+            'provider/provider-hooker.dex'
+    }
     Add-File $archive (Join-Path $module 'THIRD_PARTY_NOTICES.md') `
         'THIRD_PARTY_NOTICES.md'
-    Add-File $archive (Join-Path $root 'third_party/lsplant/LICENSE') `
-        'licenses/LSPlant-LGPL-3.0.txt'
-    Add-File $archive (Join-Path $root 'third_party/dobby/LICENSE') `
-        'licenses/Dobby-Apache-2.0.txt'
-    Add-File $archive (Join-Path $root 'third_party/xdl/LICENSE') `
-        'licenses/xDL-MIT.txt'
+    if (-not $WithoutLsplant) {
+        Add-File $archive (Join-Path $root 'third_party/lsplant/LICENSE') `
+            'licenses/LSPlant-LGPL-3.0.txt'
+        Add-File $archive (Join-Path $root 'third_party/dobby/LICENSE') `
+            'licenses/Dobby-Apache-2.0.txt'
+        Add-File $archive (Join-Path $root 'third_party/xdl/LICENSE') `
+            'licenses/xDL-MIT.txt'
+    }
 } finally { $archive.Dispose() }
 Write-Host "Created: $zip"

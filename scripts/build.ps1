@@ -2,6 +2,7 @@ param(
     [string[]]$Abi = @('arm64-v8a', 'armeabi-v7a'),
     [switch]$AllowMissingNative,
     [switch]$SkipNative,
+    [switch]$WithoutLsplant,
     [ValidateRange(0, 10000)]
     [int]$ZygiskTestMountDelayMs = 0,
     [ValidateRange(0, 10000)]
@@ -19,8 +20,10 @@ if ($LASTEXITCODE -ne 0) { throw "Host tests failed with exit code $LASTEXITCODE
 
 if (-not $SkipNative) {
     & (Join-Path $root 'scripts/build-native.ps1') -Abi $Abi `
+        -WithoutLsplant:$WithoutLsplant `
         -ZygiskTestMountDelayMs $ZygiskTestMountDelayMs `
         -ZygiskTestPreLeaseDelayMs $ZygiskTestPreLeaseDelayMs
 }
 
-& (Join-Path $root 'scripts/package.ps1') -Abi $Abi -AllowMissingNative:$AllowMissingNative
+& (Join-Path $root 'scripts/package.ps1') -Abi $Abi `
+    -AllowMissingNative:$AllowMissingNative -WithoutLsplant:$WithoutLsplant

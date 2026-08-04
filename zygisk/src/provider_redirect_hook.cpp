@@ -1,4 +1,5 @@
 #include "pathguard/provider_redirect_hook.hpp"
+#include "pathguard/audit_protocol.h"
 #include "pathguard/path_hook_contract.h"
 #include "pathguard/provider_caller_uid.hpp"
 #include "pathguard/provider_route_context.h"
@@ -18,6 +19,7 @@
 #include <linux/stat.h>
 #include <limits.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -206,9 +208,16 @@ uint64_t g_transaction_sequence = 0;
 uint32_t g_transaction_atfork_state = 0;
 zygisk::Api* g_api = nullptr;
 
+audit_protocol::SharedQueue* g_audit_queue = nullptr;
+
+void ResetAuditStateAfterFork() {
+    g_audit_queue = nullptr;
+}
+
 void ResetTransactionStateAfterFork() {
     g_transaction_nonce = 0;
     g_transaction_sequence = 0;
+    ResetAuditStateAfterFork();
 }
 
 bool InitializeTransactionAtFork() {
@@ -368,6 +377,18 @@ void LogRewrite(const char* operation, int32_t uid,
          operation, uid, from, to);
 }
 
+void LogOpenRewrite(const char* operation, int32_t uid, int flags,
+                    OperationMask operations, const char* from,
+                    const char* to) {
+    if (__atomic_fetch_add(&g_rewrite_log_count, 1, __ATOMIC_RELAXED) >= 64) return;
+    const bool mutating = (operations
+        & (kOperationCreate | kOperationOpenWrite)) != 0
+        || (flags & O_TRUNC) != 0;
+    LOGI("provider virtual path: op=%s caller_uid=%d flags=0x%x mutating=%d "
+         "from=%s to=%s",
+         operation, uid, flags, mutating ? 1 : 0, from, to);
+}
+
 template <size_t Capacity>
 bool CopyWireText(char (&output)[Capacity], const char* input, size_t size) {
     if (input == nullptr || size == 0 || size >= Capacity) return false;
@@ -518,6 +539,178 @@ bool CaptureIdentity(int fd, provenance_protocol::Identity* output) {
     return true;
 }
 
+uint64_t ClockNanoseconds(clockid_t clock) {
+    timespec value{};
+    return clock_gettime(clock, &value) == 0 && value.tv_sec >= 0
+        ? static_cast<uint64_t>(value.tv_sec) * UINT64_C(1000000000)
+            + static_cast<uint32_t>(value.tv_nsec)
+        : 0;
+}
+
+bool CaptureAuditIdentity(int fd, audit_protocol::Identity* output,
+                          audit_protocol::Confidence* confidence) {
+    if (fd < 0 || output == nullptr || confidence == nullptr) return false;
+    *output = {};
+    struct stat value {};
+    if (fstat(fd, &value) != 0) return false;
+    output->device = (static_cast<uint64_t>(major(value.st_dev)) << 32)
+        | static_cast<uint32_t>(minor(value.st_dev));
+    output->inode = value.st_ino;
+    output->size = value.st_size < 0 ? 0 : static_cast<uint64_t>(value.st_size);
+    output->mode = value.st_mode;
+    output->modified_seconds = value.st_mtim.tv_sec;
+    output->modified_nanoseconds = value.st_mtim.tv_nsec;
+    output->changed_seconds = value.st_ctim.tv_sec;
+    output->changed_nanoseconds = value.st_ctim.tv_nsec;
+
+    struct statx extended {};
+    if (syscall(SYS_statx, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                STATX_BASIC_STATS | STATX_BTIME, &extended) == 0) {
+        if ((extended.stx_mask & STATX_BTIME) != 0) {
+            output->has_birth_time = 1;
+            output->birth_seconds = extended.stx_btime.tv_sec;
+            output->birth_nanoseconds = extended.stx_btime.tv_nsec;
+        }
+    }
+
+    char descriptor_path[64]{};
+    const int descriptor_size = snprintf(
+        descriptor_path, sizeof(descriptor_path), "/proc/self/fd/%d", fd);
+    KernelFileHandle handle{};
+    handle.handle_bytes = sizeof(handle.bytes);
+    int mount_id = 0;
+    if (descriptor_size > 0
+        && static_cast<size_t>(descriptor_size) < sizeof(descriptor_path)
+        && syscall(SYS_name_to_handle_at, AT_FDCWD, descriptor_path,
+                   &handle, &mount_id, AT_SYMLINK_FOLLOW) == 0
+        && handle.handle_bytes != 0
+        && handle.handle_bytes <= sizeof(handle.bytes)) {
+        output->handle_type = handle.handle_type;
+        output->handle_size = static_cast<uint16_t>(handle.handle_bytes);
+        memcpy(output->handle, handle.bytes, handle.handle_bytes);
+        *confidence = audit_protocol::Confidence::kFileHandle;
+    } else if (output->device != 0 && output->inode != 0
+               && output->has_birth_time != 0) {
+        *confidence = audit_protocol::Confidence::kBirthTime;
+    } else if (output->device != 0 && output->inode != 0) {
+        *confidence = audit_protocol::Confidence::kInodeMetadata;
+    } else {
+        *confidence = audit_protocol::Confidence::kPathOnly;
+    }
+    return true;
+}
+
+bool BuildAuditRequest(
+        const storage_path_adapter::RewriteResult& rewrite, int32_t uid,
+        const char* logical_path, const char* target_path,
+        audit_protocol::Operation operation, const char* previous_target_path,
+        audit_protocol::Request* output) {
+    if (output == nullptr || uid < 10000 || rewrite.rule_id == 0
+        || logical_path == nullptr || target_path == nullptr
+        || (rewrite.action_options
+            & binary_format::kActionOptionPrivateAudit) == 0) {
+        return false;
+    }
+    *output = {};
+    output->command = audit_protocol::Command::kObserve;
+    output->record.caller_uid = uid;
+    output->record.user_id = rewrite.user_id;
+    output->record.rule_id = rewrite.rule_id;
+    output->record.content_generation = rewrite.content_generation;
+    output->record.plan_generation = rewrite.plan_generation;
+    output->record.observed_realtime_ns = ClockNanoseconds(CLOCK_REALTIME);
+    output->record.observed_boottime_ns = ClockNanoseconds(CLOCK_BOOTTIME);
+    output->record.operation = operation;
+    output->record.confidence = audit_protocol::Confidence::kPathOnly;
+    return output->record.observed_realtime_ns != 0
+        && storage_path_adapter::CanonicalizeStoragePath(
+            logical_path, output->record.logical_source,
+            sizeof(output->record.logical_source))
+        && storage_path_adapter::CanonicalizeStoragePath(
+            target_path, output->record.target_path,
+            sizeof(output->record.target_path))
+        && (previous_target_path == nullptr
+            || storage_path_adapter::CanonicalizeStoragePath(
+                previous_target_path, output->record.previous_target_path,
+                sizeof(output->record.previous_target_path)));
+}
+
+void EnqueueAudit(const audit_protocol::Request& request) {
+    audit_protocol::SharedQueue* queue = g_audit_queue;
+    if (queue == nullptr) return;
+    uint64_t tail = __atomic_load_n(&queue->tail, __ATOMIC_ACQUIRE);
+    while (true) {
+        const uint64_t head = __atomic_load_n(&queue->head, __ATOMIC_ACQUIRE);
+        if (tail - head >= audit_protocol::kQueueCapacity) {
+            const uint64_t dropped = __atomic_add_fetch(
+                &queue->dropped, UINT64_C(1), __ATOMIC_RELAXED);
+            if ((dropped & (dropped - 1)) == 0) {
+                LOGE("private audit queue full: dropped=%llu",
+                     static_cast<unsigned long long>(dropped));
+            }
+            return;
+        }
+        if (__atomic_compare_exchange_n(&queue->tail, &tail, tail + 1,
+                                        false, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE)) {
+            break;
+        }
+    }
+    audit_protocol::QueueSlot& slot =
+        queue->slots[tail % audit_protocol::kQueueCapacity];
+    slot.request = request;
+    __atomic_store_n(&slot.ready, 1u, __ATOMIC_RELEASE);
+    const uint64_t enqueued = __atomic_add_fetch(
+        &queue->enqueued, UINT64_C(1), __ATOMIC_RELAXED);
+    if (enqueued == 1) LOGI("private audit queue active");
+}
+
+void AttachAuditIdentity(int fd, audit_protocol::Request* request) {
+    if (request == nullptr || fd < 0) return;
+    audit_protocol::Confidence confidence =
+        audit_protocol::Confidence::kPathOnly;
+    if (CaptureAuditIdentity(fd, &request->record.identity, &confidence)) {
+        request->record.confidence = confidence;
+    }
+}
+
+void ObserveAuditPath(
+        const storage_path_adapter::RewriteResult& rewrite, int32_t uid,
+        const char* logical_path, const char* target_path,
+        audit_protocol::Operation operation, const char* previous_target_path,
+        int identity_fd) {
+    audit_protocol::Request request;
+    if (!BuildAuditRequest(rewrite, uid, logical_path, target_path, operation,
+                           previous_target_path, &request)) {
+        return;
+    }
+    AttachAuditIdentity(identity_fd, &request);
+    EnqueueAudit(request);
+}
+
+bool PolicyRequestsAudit(const RuntimePolicySnapshot& runtime) {
+    for (uint32_t scope_index = 0; scope_index < runtime.scope_count;
+         ++scope_index) {
+        policy_v6_view::PackageRef package;
+        if (!runtime.policy.PackageAt(runtime.scopes[scope_index].package_index,
+                                      &package)) {
+            continue;
+        }
+        for (uint32_t action_index = 0; action_index < package.action_count;
+             ++action_index) {
+            policy_v6_view::ActionRef action;
+            if (runtime.policy.ActionAt(package.first_action + action_index,
+                                        &action)
+                && action.kind == 1
+                && (action.options
+                    & binary_format::kActionOptionPrivateAudit) != 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool SendTransactionStep(provenance_protocol::Request* request,
                          provenance_protocol::Command command) {
     request->command = command;
@@ -594,6 +787,22 @@ auto WithPath(const char* operation_name, OperationMask operation,
         return FailureValue(static_cast<Return*>(nullptr));
     }
     using Return = decltype(function(dirfd, path));
+    audit_protocol::Request pending_delete_audit;
+    bool pending_delete_audit_ready = false;
+    if constexpr (__is_same(Return, int)) {
+        if ((operation & (kOperationUnlink | kOperationRmdir)) != 0
+            && BuildAuditRequest(
+                rewrite, uid, absolute, rewritten,
+                audit_protocol::Operation::kDelete, nullptr,
+                &pending_delete_audit)) {
+            const int identity_fd = openat(
+                pinned.parent_fd, pinned.basename,
+                O_PATH | O_NOFOLLOW | O_CLOEXEC);
+            AttachAuditIdentity(identity_fd, &pending_delete_audit);
+            if (identity_fd >= 0) close(identity_fd);
+            pending_delete_audit_ready = true;
+        }
+    }
     if constexpr (__is_same(Return, int)) {
         const bool transactional_create = ProvenanceTransactionsAvailable()
             && rewrite.reverse_mode == 2
@@ -707,6 +916,22 @@ auto WithPath(const char* operation_name, OperationMask operation,
     }
     const auto value = function(AT_FDCWD, pinned_path);
     const int call_errno = errno;
+    if constexpr (__is_same(Return, int)) {
+        if (value == 0 && pending_delete_audit_ready) {
+            EnqueueAudit(pending_delete_audit);
+        } else if (value == 0
+            && (operation & (kOperationCreate | kOperationMkdir
+                             | kOperationTruncate
+                             | kOperationMetadataMutation)) != 0) {
+            const int identity_fd = openat(
+                pinned.parent_fd, pinned.basename,
+                O_PATH | O_NOFOLLOW | O_CLOEXEC);
+            ObserveAuditPath(
+                rewrite, uid, absolute, rewritten,
+                audit_protocol::Operation::kUpsert, nullptr, identity_fd);
+            if (identity_fd >= 0) close(identity_fd);
+        }
+    }
     CloseSecureResolvedPath(&pinned);
     errno = call_errno;
     return value;
@@ -739,7 +964,7 @@ int WithOpenPath(const char* operation_name, int dirfd, const char* path,
         errno = saved_errno;
         return function(dirfd, path, flags);
     }
-    LogRewrite(operation_name, uid, absolute, rewritten);
+    LogOpenRewrite(operation_name, uid, flags, operation, absolute, rewritten);
     SecureResolvedPath pinned = ResolveStoragePathParent(
         rewritten, (flags & O_CREAT) != 0, &g_resolver_probe);
     if (!pinned.ok()) {
@@ -765,6 +990,14 @@ int WithOpenPath(const char* operation_name, int dirfd, const char* path,
         const int value = function(AT_FDCWD, pinned_path,
                                    open_plan.effective_flags);
         const int call_errno = errno;
+        const bool mutating = (operation
+            & (kOperationCreate | kOperationOpenWrite)) != 0
+            || (flags & O_TRUNC) != 0;
+        if (value >= 0 && mutating) {
+            ObserveAuditPath(
+                rewrite, uid, absolute, rewritten,
+                audit_protocol::Operation::kUpsert, nullptr, value);
+        }
         CloseSecureResolvedPath(&pinned);
         errno = call_errno;
         return value;
@@ -1220,6 +1453,40 @@ int WithTwoPaths(const char* operation, OperationMask operation_mask,
         new_changed ? AT_FDCWD : new_dirfd,
         new_changed ? new_pinned_path : plan.second);
     const int call_errno = errno;
+    if (value == 0) {
+        const bool old_audit = old_changed
+            && (old_result.action_options
+                & binary_format::kActionOptionPrivateAudit) != 0;
+        const bool new_audit = new_changed
+            && (new_result.action_options
+                & binary_format::kActionOptionPrivateAudit) != 0;
+        if (operation_mask == kOperationRename) {
+            if (new_audit) {
+                const int identity_fd = openat(
+                    new_pinned.parent_fd, new_pinned.basename,
+                    O_PATH | O_NOFOLLOW | O_CLOEXEC);
+                ObserveAuditPath(
+                    new_result, new_uid, new_absolute, new_rewritten,
+                    old_audit ? audit_protocol::Operation::kRename
+                              : audit_protocol::Operation::kUpsert,
+                    old_audit ? old_rewritten : nullptr, identity_fd);
+                if (identity_fd >= 0) close(identity_fd);
+            }
+            if (old_audit && !new_audit) {
+                ObserveAuditPath(
+                    old_result, old_uid, old_absolute, old_rewritten,
+                    audit_protocol::Operation::kDelete, nullptr, -1);
+            }
+        } else if (operation_mask == kOperationHardLink && new_audit) {
+            const int identity_fd = openat(
+                new_pinned.parent_fd, new_pinned.basename,
+                O_PATH | O_NOFOLLOW | O_CLOEXEC);
+            ObserveAuditPath(
+                new_result, new_uid, new_absolute, new_rewritten,
+                audit_protocol::Operation::kUpsert, nullptr, identity_fd);
+            if (identity_fd >= 0) close(identity_fd);
+        }
+    }
     CloseSecureResolvedPath(&old_pinned);
     CloseSecureResolvedPath(&new_pinned);
     errno = call_errno;
@@ -1972,6 +2239,7 @@ InstallResult Install(zygisk::Api* api, JNIEnv* env,
         ? AdapterState::kActive : AdapterState::kInactive;
     domain.observed_operations = result.observed_operations;
     runtime->capabilities = g_capabilities;
+    const bool audit_requested = PolicyRequestsAudit(*runtime);
     const bool published = config.domain == AdmissionDomain::kProvider
         ? g_provider_policy_domain.Publish(
             runtime, sizeof(*runtime) + config.policy_size)
@@ -2006,15 +2274,18 @@ InstallResult Install(zygisk::Api* api, JNIEnv* env,
     if (ShouldEnableHooks(result)) {
         __atomic_store_n(&g_hooks_enabled, 1, __ATOMIC_RELEASE);
     }
+    g_audit_queue = config.audit_queue;
     LOGI("path policy installed: scopes=%u domain=%u caller_scope=%s "
-         "binder_jni=%d late_loader=%d attempted=%d committed=%d active=%d",
+         "binder_jni=%d late_loader=%d attempted=%d committed=%d active=%d "
+         "audit_configured=%d audit_worker=lazy",
          config.scope_count, static_cast<unsigned>(config.domain),
          needs_binder ? "binder_uid" : "process_uid",
          result.identity_hooks ? 1 : 0,
          g_android_dlopen_ext != nullptr || g_dlopen != nullptr ? 1 : 0,
-         result.hook_registration_attempted ? 1 : 0,
-         result.hooks_committed ? 1 : 0,
-         result.virtualization_active ? 1 : 0);
+          result.hook_registration_attempted ? 1 : 0,
+          result.hooks_committed ? 1 : 0,
+          result.virtualization_active ? 1 : 0,
+          audit_requested ? 1 : 0);
     return result;
 }
 

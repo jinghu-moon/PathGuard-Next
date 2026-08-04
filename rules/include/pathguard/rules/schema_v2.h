@@ -64,6 +64,7 @@ struct ActionRuleInputV2 {
     RuleEnforcement enforcement = RuleEnforcement::kNone;
     ExportMode export_mode = ExportMode::kCopy;
     bool media_scan = false;
+    bool audit = false;
 };
 
 struct ProviderIntentV2 {
@@ -106,6 +107,7 @@ struct CanonicalActionV2 {
     RuleEnforcement enforcement = RuleEnforcement::kNone;
     ExportMode export_mode = ExportMode::kCopy;
     bool media_scan = false;
+    bool audit = false;
 };
 
 struct CanonicalAppPolicyV2 {

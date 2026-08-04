@@ -40,6 +40,7 @@
 #include "pathguard/policy_pattern_runtime.h"
 #include "pathguard/policy_v6_view.h"
 #include "pathguard/provenance_protocol.h"
+#include "pathguard/audit_protocol.h"
 #include "pathguard/runtime_status.h"
 #include "pathguard/runtime_status_builder.h"
 #include "pathguard/secure_path_resolver.h"
@@ -978,6 +979,36 @@ bool LoadProviderPolicy(int module_dir, PathPolicyMapping* output) {
     return output->scope_count > 0;
 }
 
+bool ProviderPolicyRequestsAudit(const PathPolicyMapping& mapping) {
+    pathguard::policy_v6_view::PolicyV6View policy;
+    if (mapping.mapping == nullptr
+        || !policy.Initialize(static_cast<const uint8_t*>(mapping.mapping),
+                              mapping.size)) {
+        return false;
+    }
+    for (uint32_t scope_index = 0; scope_index < mapping.scope_count;
+         ++scope_index) {
+        pathguard::policy_v6_view::PackageRef package;
+        if (!policy.PackageAt(mapping.scopes[scope_index].package_index,
+                              &package)) {
+            continue;
+        }
+        for (uint32_t action_index = 0;
+             action_index < package.action_count; ++action_index) {
+            pathguard::policy_v6_view::ActionRef action;
+            if (policy.ActionAt(package.first_action + action_index, &action)
+                && action.domain == kProviderDomain
+                && action.kind == kRedirectAction
+                && (action.options
+                    & pathguard::binary_format::kActionOptionPrivateAudit)
+                    != 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 struct ProviderRouteSnapshotData {
     pathguard::provenance_protocol::Record record{};
     char visible_source[PATH_MAX]{};
@@ -1284,7 +1315,9 @@ bool ProviderRecordMatchesPolicy(
             if (policy.ActionAt(package.first_action + action_index, &action)
                 && action.rule_id == record.rule_id
                 && action.domain == kProviderDomain
-                && action.kind == kRedirectAction) {
+                && action.kind == kRedirectAction
+                && action.reverse
+                    == PATHGUARD_PROVIDER_ROUTE_REVERSE_PROVENANCE) {
                 *package_index = scope.package_index;
                 return true;
             }
@@ -3584,6 +3617,63 @@ SharedRuntimeStatus* MapSharedRuntimeStatus(int shared_fd) {
     return state;
 }
 
+pathguard::audit_protocol::SharedQueue* CreateSharedAuditQueue(
+        uid_t uid, int* shared_fd) {
+    if (shared_fd == nullptr) return nullptr;
+    *shared_fd = static_cast<int>(syscall(
+        SYS_memfd_create, "pathguard-audit", MFD_CLOEXEC));
+    if (*shared_fd < 0
+        || ftruncate(*shared_fd,
+                     sizeof(pathguard::audit_protocol::SharedQueue)) != 0) {
+        if (*shared_fd >= 0) close(*shared_fd);
+        *shared_fd = -1;
+        return nullptr;
+    }
+    void* mapping = mmap(
+        nullptr, sizeof(pathguard::audit_protocol::SharedQueue),
+        PROT_READ | PROT_WRITE, MAP_SHARED, *shared_fd, 0);
+    if (mapping == MAP_FAILED) {
+        close(*shared_fd);
+        *shared_fd = -1;
+        return nullptr;
+    }
+    auto* queue = static_cast<pathguard::audit_protocol::SharedQueue*>(mapping);
+    memset(queue, 0, sizeof(*queue));
+    queue->magic = pathguard::audit_protocol::kQueueMagic;
+    queue->version = pathguard::audit_protocol::kQueueVersion;
+    queue->pid = getpid();
+    queue->uid = uid;
+    if (!ReadProcessStartTime(queue->pid, &queue->process_start_time)) {
+        munmap(queue, sizeof(*queue));
+        close(*shared_fd);
+        *shared_fd = -1;
+        return nullptr;
+    }
+    return queue;
+}
+
+pathguard::audit_protocol::SharedQueue* MapSharedAuditQueue(int shared_fd) {
+    struct stat file_stat {};
+    if (shared_fd < 0 || fstat(shared_fd, &file_stat) != 0
+        || file_stat.st_size != static_cast<off_t>(
+            sizeof(pathguard::audit_protocol::SharedQueue))) {
+        return nullptr;
+    }
+    void* mapping = mmap(
+        nullptr, sizeof(pathguard::audit_protocol::SharedQueue),
+        PROT_READ | PROT_WRITE, MAP_SHARED, shared_fd, 0);
+    if (mapping == MAP_FAILED) return nullptr;
+    auto* queue = static_cast<pathguard::audit_protocol::SharedQueue*>(mapping);
+    if (queue->magic != pathguard::audit_protocol::kQueueMagic
+        || queue->version != pathguard::audit_protocol::kQueueVersion
+        || queue->reserved != 0 || queue->pid <= 0 || queue->uid < 10000
+        || queue->process_start_time == 0) {
+        munmap(queue, sizeof(*queue));
+        return nullptr;
+    }
+    return queue;
+}
+
 bool WaitForRuntimeStatus(SharedRuntimeStatus* state, int timeout_ms) {
     if (state == nullptr || timeout_ms <= 0) return false;
     const uint64_t deadline = pathguard::perf::NowNs()
@@ -3761,6 +3851,58 @@ bool SendRuntimeStatusBootstrap(int fd, uid_t uid, int shared_fd,
         == static_cast<ssize_t>(sizeof(header));
 }
 
+bool SendAuditQueueBootstrap(
+        int fd, int shared_fd,
+        const pathguard::audit_protocol::SharedQueue& queue) {
+    if (fd < 0 || shared_fd < 0) return false;
+    pathguard::audit_protocol::QueueHello hello;
+    hello.pid = queue.pid;
+    hello.uid = queue.uid;
+    hello.process_start_time = queue.process_start_time;
+    char control[CMSG_SPACE(sizeof(shared_fd))]{};
+    iovec hello_iov{&hello, sizeof(hello)};
+    msghdr message{};
+    message.msg_iov = &hello_iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
+    cmsghdr* descriptor = CMSG_FIRSTHDR(&message);
+    descriptor->cmsg_level = SOL_SOCKET;
+    descriptor->cmsg_type = SCM_RIGHTS;
+    descriptor->cmsg_len = CMSG_LEN(sizeof(shared_fd));
+    memcpy(CMSG_DATA(descriptor), &shared_fd, sizeof(shared_fd));
+    return sendmsg(fd, &message, MSG_NOSIGNAL)
+        == static_cast<ssize_t>(sizeof(hello));
+}
+
+bool ReceiveAuditQueueBootstrap(
+        int fd, pathguard::audit_protocol::QueueHello* hello,
+        int* shared_fd) {
+    if (hello == nullptr || shared_fd == nullptr) return false;
+    *shared_fd = -1;
+    char control[CMSG_SPACE(sizeof(*shared_fd))]{};
+    iovec hello_iov{hello, sizeof(*hello)};
+    msghdr message{};
+    message.msg_iov = &hello_iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
+    if (recvmsg(fd, &message, MSG_WAITALL)
+        != static_cast<ssize_t>(sizeof(*hello))) {
+        return false;
+    }
+    for (cmsghdr* descriptor = CMSG_FIRSTHDR(&message); descriptor != nullptr;
+         descriptor = CMSG_NXTHDR(&message, descriptor)) {
+        if (descriptor->cmsg_level == SOL_SOCKET
+            && descriptor->cmsg_type == SCM_RIGHTS
+            && descriptor->cmsg_len >= CMSG_LEN(sizeof(*shared_fd))) {
+            memcpy(shared_fd, CMSG_DATA(descriptor), sizeof(*shared_fd));
+            break;
+        }
+    }
+    return *shared_fd >= 0;
+}
+
 bool ReceiveBootstrap(int fd, BootstrapHeader* header, int* shared_fd,
                       int* module_dir_fd) {
     if (header == nullptr || shared_fd == nullptr || module_dir_fd == nullptr) {
@@ -3863,74 +4005,11 @@ public:
                 return;
             }
             path_policy_ = provider_policy;
-            provider_lsplant_ready_ = PrepareProviderLsplant(
-                module_dir, media_provider, &provider_bridge_probe_,
-                &provider_lsplant_handle_, &provider_lsplant_initialize_,
-                &provider_lsplant_install_, &provider_lsplant_wait_,
-                &provider_lsplant_configure_,
-                &provider_lsplant_publish_,
-                &provider_hooker_dex_);
-            if (provider_lsplant_ready_) {
-                ProviderRouteSnapshotOwned* initial_routes = LoadProviderRouteSnapshot(
-                    api_, path_policy_);
-                provider_provenance_available_ = initial_routes != nullptr
-                    && initial_routes->provenance_available;
-                provider_mapping_resolver_.routes = &provider_route_domain_;
-                provider_mapping_resolver_.profile_id =
-                    provider_bridge_probe_.provider_profile_id;
-                PathGuardLsplantMappingRuntimeV1 mapping_runtime{};
-                mapping_runtime.version =
-                    PATHGUARD_LSPLANT_BRIDGE_API_VERSION;
-                mapping_runtime.size = sizeof(mapping_runtime);
-                mapping_runtime.resolver = ResolveProviderMapping;
-                mapping_runtime.user_data = &provider_mapping_resolver_;
-                mapping_runtime.snapshot = initial_routes == nullptr
-                    ? nullptr : &initial_routes->snapshot;
-                mapping_runtime.external_identity_sink =
-                    EnqueueProviderExternalIdentity;
-                mapping_runtime.external_identity_user_data =
-                    &provider_external_identity_queue_;
-                int configure_result = initial_routes == nullptr
-                    ? ENOMEM : provider_lsplant_configure_(&mapping_runtime);
-                if (configure_result == 0) {
-                    if (!provider_route_domain_.Publish(
-                            initial_routes,
-                            ProviderRouteSnapshotBytes(*initial_routes))) {
-                        configure_result = ENOMEM;
-                    } else {
-                        __atomic_store_n(
-                            &provider_route_generation_,
-                            initial_routes->snapshot.generation,
-                            __ATOMIC_RELEASE);
-                        __atomic_store_n(
-                            &provider_provenance_generation_,
-                            initial_routes->provenance_generation,
-                            __ATOMIC_RELEASE);
-                        initial_routes = nullptr;
-                    }
-                }
-                ReleaseProviderRouteSnapshot(initial_routes);
-                if (configure_result != 0) {
-                    provider_bridge_probe_.bridge_errno = configure_result;
-                    provider_lsplant_ready_ = false;
-                    provider_provenance_available_ = false;
-                }
-                PathGuardLsplantBridgeResultV1 bridge_result{};
-                const int init_result = provider_lsplant_ready_
-                    ? provider_lsplant_initialize_(env_, &bridge_result)
-                    : provider_bridge_probe_.bridge_errno;
-                provider_bridge_probe_.lsplant_initialized =
-                    init_result == 0 && bridge_result.lsplant_initialized != 0;
-                provider_bridge_probe_.bridge_errno = init_result;
-                provider_lsplant_ready_ =
-                    provider_bridge_probe_.lsplant_initialized;
-                if (!provider_lsplant_ready_) {
-                    provider_provenance_available_ = false;
-                    provider_mapping_resolver_.routes = nullptr;
-                    ReleaseModuleBytes(&provider_hooker_dex_);
-                    dlclose(provider_lsplant_handle_);
-                    provider_lsplant_handle_ = nullptr;
-                }
+            // Redirect uses the native path adapter only. LSPlant remains a
+            // packaged optional adapter for a future explicit visibility plan;
+            // provider-enabled redirect rules must not activate Java hooks.
+            if (ProviderPolicyRequestsAudit(path_policy_)) {
+                PreparePrivateAuditQueue();
             }
             PrepareProviderRuntimeStatus(module_dir, provider_uid_);
             if (module_dir >= 0) close(module_dir);
@@ -4495,6 +4574,36 @@ private:
         close(companion);
     }
 
+    void PreparePrivateAuditQueue() {
+        const int companion = api_->connectCompanion();
+        if (companion < 0) {
+            LOGE("private audit queue companion connection failed");
+            return;
+        }
+        SetSocketTimeout(companion, kCompanionIoTimeoutMs);
+        int shared_fd = -1;
+        pathguard::audit_protocol::SharedQueue* queue =
+            CreateSharedAuditQueue(provider_uid_, &shared_fd);
+        pathguard::audit_protocol::QueueHello response;
+        const bool prepared = queue != nullptr
+            && SendAuditQueueBootstrap(companion, shared_fd, *queue)
+            && ReadFully(companion, &response, sizeof(response))
+            && response.magic == pathguard::audit_protocol::kQueueMagic
+            && response.version == pathguard::audit_protocol::kQueueVersion
+            && response.reserved == 0 && response.pid == queue->pid
+            && response.uid == queue->uid
+            && response.process_start_time == queue->process_start_time;
+        if (shared_fd >= 0) close(shared_fd);
+        close(companion);
+        if (!prepared) {
+            LOGE("private audit queue bootstrap failed: errno=%d", errno);
+            if (queue != nullptr) munmap(queue, sizeof(*queue));
+            return;
+        }
+        provider_audit_queue_ = queue;
+        LOGI("private audit shared queue prepared");
+    }
+
     void InstallPreparedProviderHooks() {
         if (!provider_redirect_required_ || path_policy_.mapping == nullptr) {
             return;
@@ -4506,6 +4615,7 @@ private:
             path_policy_.scope_count,
             pathguard::AdmissionDomain::kProvider,
             pathguard::provider_redirect::IdentityMode::kBinderCallerUid,
+            provider_audit_queue_,
         };
         provider_install_result_ = pathguard::provider_redirect::Install(
             api_, env_, config);
@@ -4576,6 +4686,7 @@ private:
     bool mount_request_sent_ = false;
     SharedMountState* mount_shared_state_ = nullptr;
     SharedRuntimeStatus* provider_status_shared_ = nullptr;
+    pathguard::audit_protocol::SharedQueue* provider_audit_queue_ = nullptr;
     ProcessPlan media_plan_;
     jint media_uid_ = 0;
     PathPolicyMapping path_policy_;
@@ -4630,6 +4741,144 @@ bool ForwardProvenanceRequest(int client) {
     close(broker);
     return handled && send(client, &response, sizeof(response), MSG_NOSIGNAL)
         == static_cast<ssize_t>(sizeof(response));
+}
+
+bool ForwardAuditRequest(int client) {
+    pathguard::audit_protocol::Request request;
+    if (recv(client, &request, sizeof(request), MSG_WAITALL)
+            != static_cast<ssize_t>(sizeof(request))
+        || request.magic != pathguard::audit_protocol::kMagic
+        || request.version != pathguard::audit_protocol::kVersion) {
+        return false;
+    }
+    const int broker = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (broker < 0) return false;
+    SetSocketTimeout(broker, kCompanionIoTimeoutMs);
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    constexpr const char* socket_path =
+        pathguard::audit_protocol::kAndroidSocketPath;
+    static_assert(sizeof(address.sun_path)
+                  > sizeof(pathguard::audit_protocol::kAndroidSocketPath));
+    memcpy(address.sun_path, socket_path,
+           sizeof(pathguard::audit_protocol::kAndroidSocketPath));
+    pathguard::audit_protocol::Response response;
+    const bool handled = connect(
+            broker, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0
+        && send(broker, &request, sizeof(request), MSG_NOSIGNAL)
+            == static_cast<ssize_t>(sizeof(request))
+        && recv(broker, &response, sizeof(response), MSG_WAITALL)
+            == static_cast<ssize_t>(sizeof(response))
+        && response.magic == pathguard::audit_protocol::kMagic
+        && response.version == pathguard::audit_protocol::kVersion;
+    close(broker);
+    return handled && send(client, &response, sizeof(response), MSG_NOSIGNAL)
+        == static_cast<ssize_t>(sizeof(response));
+}
+
+bool ForwardAuditRecord(const pathguard::audit_protocol::Request& request) {
+    const int broker = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (broker < 0) return false;
+    SetSocketTimeout(broker, kCompanionIoTimeoutMs);
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    constexpr const char* socket_path =
+        pathguard::audit_protocol::kAndroidSocketPath;
+    memcpy(address.sun_path, socket_path,
+           sizeof(pathguard::audit_protocol::kAndroidSocketPath));
+    pathguard::audit_protocol::Response response;
+    const bool handled = connect(
+            broker, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0
+        && send(broker, &request, sizeof(request), MSG_NOSIGNAL)
+            == static_cast<ssize_t>(sizeof(request))
+        && recv(broker, &response, sizeof(response), MSG_WAITALL)
+            == static_cast<ssize_t>(sizeof(response))
+        && response.magic == pathguard::audit_protocol::kMagic
+        && response.version == pathguard::audit_protocol::kVersion
+        && response.error == pathguard::audit_protocol::Error::kNone;
+    close(broker);
+    return handled;
+}
+
+void ServeAuditQueue(int client) {
+    pathguard::audit_protocol::QueueHello hello;
+    int shared_fd = -1;
+    if (!ReceiveAuditQueueBootstrap(client, &hello, &shared_fd)
+        || hello.magic != pathguard::audit_protocol::kQueueMagic
+        || hello.version != pathguard::audit_protocol::kQueueVersion
+        || hello.reserved != 0 || hello.pid <= 0 || hello.uid < 10000
+        || hello.process_start_time == 0) {
+        if (shared_fd >= 0) close(shared_fd);
+        return;
+    }
+    pathguard::audit_protocol::SharedQueue* queue =
+        MapSharedAuditQueue(shared_fd);
+    close(shared_fd);
+    uint64_t current_start_time = 0;
+    const bool identity_valid = queue != nullptr
+        && queue->pid == hello.pid && queue->uid == hello.uid
+        && queue->process_start_time == hello.process_start_time
+        && ReadProcessStartTime(hello.pid, &current_start_time)
+        && current_start_time == hello.process_start_time;
+    if (!identity_valid || !WriteFully(client, &hello, sizeof(hello))) {
+        if (queue != nullptr) munmap(queue, sizeof(*queue));
+        return;
+    }
+    close(client);
+    LOGI("private audit shared queue active: pid=%d uid=%u",
+         hello.pid, hello.uid);
+    uint32_t idle_checks = 0;
+    bool target_identity_observed = false;
+    while (true) {
+        const uint64_t head = __atomic_load_n(&queue->head, __ATOMIC_ACQUIRE);
+        const uint64_t tail = __atomic_load_n(&queue->tail, __ATOMIC_ACQUIRE);
+        if (head == tail) {
+            usleep(10000);
+            if (++idle_checks < 100) continue;
+            idle_checks = 0;
+            current_start_time = 0;
+            if (!ReadProcessStartTime(hello.pid, &current_start_time)
+                || current_start_time != hello.process_start_time) {
+                break;
+            }
+            if (ReadProcessUid(hello.pid, static_cast<uid_t>(hello.uid))) {
+                target_identity_observed = true;
+            }
+            continue;
+        }
+        idle_checks = 0;
+        auto& slot = queue->slots[
+            head % pathguard::audit_protocol::kQueueCapacity];
+        if (__atomic_load_n(&slot.ready, __ATOMIC_ACQUIRE) == 0) {
+            current_start_time = 0;
+            if (!ReadProcessStartTime(hello.pid, &current_start_time)
+                || current_start_time != hello.process_start_time) {
+                break;
+            }
+            sched_yield();
+            continue;
+        }
+        current_start_time = 0;
+        const bool uid_valid = ReadProcessUid(
+            hello.pid, static_cast<uid_t>(hello.uid));
+        if (uid_valid) target_identity_observed = true;
+        const bool process_valid = target_identity_observed && uid_valid
+            && ReadProcessStartTime(hello.pid, &current_start_time)
+            && current_start_time == hello.process_start_time;
+        const bool delivered = process_valid && slot.request.magic
+                == pathguard::audit_protocol::kMagic
+            && slot.request.version == pathguard::audit_protocol::kVersion
+            && ForwardAuditRecord(slot.request);
+        __atomic_add_fetch(delivered ? &queue->delivered : &queue->failed,
+                           UINT64_C(1), __ATOMIC_RELAXED);
+        if (delivered
+            && __atomic_load_n(&queue->delivered, __ATOMIC_RELAXED) == 1) {
+            LOGI("private audit delivery active");
+        }
+        __atomic_store_n(&slot.ready, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&queue->head, head + 1, __ATOMIC_RELEASE);
+    }
+    munmap(queue, sizeof(*queue));
 }
 
 void ReceiveRuntimeStatusSubmission(int client) {
@@ -4696,6 +4945,14 @@ void CompanionHandler(int client) {
             == static_cast<ssize_t>(sizeof(request_magic))
         && request_magic == pathguard::provenance_protocol::kMagic) {
         ForwardProvenanceRequest(client);
+        return;
+    }
+    if (request_magic == pathguard::audit_protocol::kMagic) {
+        ForwardAuditRequest(client);
+        return;
+    }
+    if (request_magic == pathguard::audit_protocol::kQueueMagic) {
+        ServeAuditQueue(client);
         return;
     }
     if (request_magic == kStatusSubmissionMagic) {

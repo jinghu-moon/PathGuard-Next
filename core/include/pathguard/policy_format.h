@@ -12,6 +12,7 @@ inline constexpr uint16_t kFormatVersion = 6;
 inline constexpr uint16_t kSchemaVersion = 3;
 inline constexpr uint8_t kOperationMaskVersion = 1;
 inline constexpr uint32_t kInvalidId = UINT32_MAX;
+inline constexpr uint32_t kActionOptionPrivateAudit = UINT32_C(1) << 8;
 
 inline constexpr size_t kHeaderSize = 128;
 inline constexpr size_t kPackageSize = 64;

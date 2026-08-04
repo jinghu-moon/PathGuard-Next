@@ -1,6 +1,7 @@
 LOCAL_PATH := $(call my-dir)
 ROOT_PATH := $(LOCAL_PATH)/..
 CORE_SOURCES := \
+    ../core/src/audit_broker.cpp \
     ../core/src/export_worker.cpp \
     ../core/src/failure_policy.cpp \
     ../core/src/namespace_projection.cpp \
@@ -9,6 +10,7 @@ CORE_SOURCES := \
     ../core/src/pattern_runtime.cpp \
     ../core/src/policy_v6.cpp \
     ../core/src/route_provenance.cpp \
+    ../core/src/route_audit.cpp \
     ../core/src/provenance_broker.cpp \
     ../core/src/topology.cpp \
     ../core/src/version.cpp
@@ -99,7 +101,7 @@ include $(BUILD_EXECUTABLE)
 include $(CLEAR_VARS)
 LOCAL_MODULE := pathguardd
 LOCAL_SRC_FILES := ../daemon/src/main.cpp $(CORE_SOURCES) \
-    ../daemon/src/rules_control.cpp ../daemon/src/provenance_server.cpp \
+    ../daemon/src/audit_server.cpp ../daemon/src/rules_control.cpp \
     ../daemon/src/provider_process_lifecycle.cpp \
     $(DIRECTORY_RESOLVER_SOURCE) $(MOUNT_INFO_SNAPSHOT_SOURCE) \
     $(MOUNT_EXECUTOR_SOURCE)

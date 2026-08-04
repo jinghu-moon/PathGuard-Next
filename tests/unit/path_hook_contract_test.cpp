@@ -55,7 +55,7 @@ int main() {
     assert(admitted_create.coordinate_provenance);
     redirect.reverse_mode = 0;
     assert(PlanCanonicalPath(redirect)
-           == CanonicalPathDisposition::kAmbiguousReverse);
+           == CanonicalPathDisposition::kStaticLogicalPath);
     redirect.reverse_mode = 1;
     first = PlanOperand("/source/a", "/target/a", redirect);
     auto second = PlanOperand("/source/b", "/target/b", redirect);

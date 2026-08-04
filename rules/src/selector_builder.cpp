@@ -1,4 +1,5 @@
 #include "pathguard/rules/selector_builder.h"
+#include "pathguard/policy_format.h"
 
 #include <algorithm>
 #include <map>
@@ -91,14 +92,18 @@ ExecutionDomain SelectDomain(const CanonicalActionV2& action) {
     return ExecutionDomain::kAppPath;
 }
 
-void SetRequirements(PlanAction* action) {
+void SetRequirements(const CanonicalActionV2& source, PlanAction* action) {
     if (action == nullptr) return;
     switch (action->domain) {
         case ExecutionDomain::kMount:
             break;
         case ExecutionDomain::kAppPath:
             action->required_capabilities = kCapabilityAppPathAdapter;
-            action->required_operations = kAppPathOperationsV1;
+            action->required_operations =
+                    source.action == RuleActionKind::kRedirect
+                    && source.selector.object_type == SelectorObjectType::kFile
+                ? kAppPathFileRedirectOperationsV1
+                : kAppPathOperationsV1;
             break;
         case ExecutionDomain::kProvider:
             action->required_capabilities = kCapabilityProviderCallerUid
@@ -194,8 +199,10 @@ PatternPlanBuildResult BuildPatternPlan(
             action.target = source.target;
             action.priority = source.priority;
             action.options = static_cast<std::uint32_t>(source.export_mode)
-                | (source.media_scan ? UINT32_C(1) << 2 : 0);
-            SetRequirements(&action);
+                | (source.media_scan ? UINT32_C(1) << 2 : 0)
+                | (source.audit
+                    ? pathguard::binary_format::kActionOptionPrivateAudit : 0);
+            SetRequirements(source, &action);
             std::uint64_t rule_hash = UINT64_C(14695981039346656037);
             rule_hash = HashBytes(rule_hash, app.package);
             rule_hash = HashBytes(rule_hash, selector_key);

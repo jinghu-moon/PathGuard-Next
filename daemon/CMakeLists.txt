@@ -18,7 +18,7 @@ target_link_libraries(pathguard_provider_process_lifecycle PUBLIC
   pathguard_core
 )
 
-add_executable(pathguardd src/main.cpp src/provenance_server.cpp)
+add_executable(pathguardd src/main.cpp src/audit_server.cpp)
 target_link_libraries(pathguardd PRIVATE
   pathguard_core
   pathguard_provider_process_lifecycle

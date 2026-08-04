@@ -22,14 +22,12 @@ inline CanonicalPathDisposition PlanCanonicalPath(
         != storage_path_adapter::RewriteDisposition::kRedirect) {
         return CanonicalPathDisposition::kPass;
     }
-    // policy format 6: 1=static_unique, 2=provenance. A path hook has no
-    // authority to invent a source when a provenance lookup is required.
-    if (rewrite.reverse_mode == 1) {
-        return CanonicalPathDisposition::kStaticLogicalPath;
-    }
+    // The hook is resolving a known logical source request, so returning that
+    // same logical path needs no reverse ownership claim. Only an explicitly
+    // provenance-backed route requires an object identity lookup.
     return rewrite.reverse_mode == 2
         ? CanonicalPathDisposition::kProvenanceLookup
-        : CanonicalPathDisposition::kAmbiguousReverse;
+        : CanonicalPathDisposition::kStaticLogicalPath;
 }
 
 inline bool ShouldCoordinateProvenanceMutation(

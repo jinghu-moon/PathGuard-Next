@@ -6,6 +6,7 @@
 #include <sys/types.h>
 
 #include "pathguard/action_admission.h"
+#include "pathguard/audit_protocol.h"
 #include "pathguard/provider_redirect_lifecycle.hpp"
 #include "pathguard/provenance_protocol.h"
 #include "pathguard/storage_path_adapter.h"
@@ -25,6 +26,9 @@ struct PolicyConfig {
     uint32_t scope_count = 0;
     AdmissionDomain domain = AdmissionDomain::kAppPath;
     IdentityMode identity_mode = IdentityMode::kProcessUid;
+    // The mapping is owned by the process module and remains valid for the
+    // lifetime of installed hooks. Audit failure never affects redirect.
+    audit_protocol::SharedQueue* audit_queue = nullptr;
 };
 
 InstallResult Install(zygisk::Api* api, JNIEnv* env,

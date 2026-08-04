@@ -52,6 +52,10 @@ inline constexpr OperationMask kKnownOperationMaskV1 =
     (UINT64_C(1) << 23) - 1;
 inline constexpr OperationMask kProviderCompositeOperationsV1 =
     UINT64_C(0x000ffeff);
+inline constexpr OperationMask kAppPathFileRedirectOperationsV1 =
+    kOperationLookupStat | kOperationAccess | kOperationOpenRead
+    | kOperationOpenWrite | kOperationCreate | kOperationRename
+    | kOperationUnlink;
 inline constexpr OperationMask kAppPathOperationsV1 = UINT64_C(0x0000ffff);
 inline constexpr OperationMask kCompleteVfsOperationsV1 = UINT64_C(0x000fffff);
 

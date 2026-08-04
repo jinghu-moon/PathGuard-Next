@@ -2,6 +2,7 @@ param(
     [string[]]$Abi = @('arm64-v8a', 'armeabi-v7a'),
     [string]$NdkRoot = '',
     [int]$Api = 31,
+    [switch]$WithoutLsplant,
     [ValidateRange(0, 10000)]
     [int]$ZygiskTestMountDelayMs = 0,
     [ValidateRange(0, 10000)]
@@ -92,8 +93,10 @@ foreach ($item in $Abi) {
     if ($LASTEXITCODE -ne 0) { throw "Zygisk ELF isolation failed for $item" }
 }
 
-& (Join-Path $root 'scripts/build-provider-lsplant.ps1') -Abi $Abi
-if ($LASTEXITCODE -ne 0) { throw 'Provider LSPlant bridge build failed' }
+if (-not $WithoutLsplant) {
+    & (Join-Path $root 'scripts/build-provider-lsplant.ps1') -Abi $Abi
+    if ($LASTEXITCODE -ne 0) { throw 'Provider LSPlant bridge build failed' }
+}
 
 if ($HostParityProbe) {
     & (Join-Path $root 'scripts/verify-rules-compiler-android.ps1') `

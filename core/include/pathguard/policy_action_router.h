@@ -44,6 +44,7 @@ struct Result {
     uint32_t matcher_invocations = 0;
     uint8_t collision_mode = 0;
     uint8_t reverse_mode = 0;
+    uint32_t options = 0;
     size_t relative_offset = 0;
 };
 
@@ -260,6 +261,7 @@ inline Result Route(const policy_v6_view::PolicyV6View& policy,
                 output.admission = admission;
                 output.collision_mode = action.collision;
                 output.reverse_mode = action.reverse;
+                output.options = action.options;
                 output.relative_offset = selector_relative_offset;
                 if (action.kind == 1 && !policy.StringAt(action.target_id, &output.target)) {
                     output = {};

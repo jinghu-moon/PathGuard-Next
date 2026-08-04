@@ -353,7 +353,7 @@ private:
                       const std::string& path, ActionRuleInputV2* action) {
         bool valid = CheckFields(table,
             {"select", "to", "priority", "preserve", "collision", "enforcement",
-             "mode", "media_scan"},
+             "mode", "media_scan", "audit"},
             path);
         action->action = kind;
         const toml::node* select = table.get("select");
@@ -421,9 +421,20 @@ private:
                         : RuleEnforcement::kComplete;
                 }
             }
+            if (const toml::node* audit = table.get("audit");
+                kind == RuleActionKind::kRedirect && audit != nullptr) {
+                const auto value = audit->value<bool>();
+                if (!value) {
+                    Add(kTypeMismatch, "rules.audit_bool_required",
+                        SourceSpan(source_, audit->source()), path + "/audit");
+                    valid = false;
+                } else {
+                    action->audit = *value;
+                }
+            }
             if (kind == RuleActionKind::kExport) {
                 if (table.contains("preserve") || table.contains("collision")
-                    || table.contains("enforcement")) {
+                    || table.contains("enforcement") || table.contains("audit")) {
                     Add(kUnknownField, "rules.export_path_fields_forbidden",
                         SourceSpan(source_, table.source()), path);
                     valid = false;
@@ -455,7 +466,7 @@ private:
         } else {
             if (table.contains("to") || table.contains("preserve")
                 || table.contains("collision") || table.contains("mode")
-                || table.contains("media_scan")) {
+                || table.contains("media_scan") || table.contains("audit")) {
                 Add(kUnknownField, kind == RuleActionKind::kDeny
                         ? "rules.deny_target_fields_forbidden"
                         : "rules.observe_target_fields_forbidden",
@@ -703,6 +714,7 @@ RulesV2BuildResult BuildCanonicalPolicyV2(
                 canonical_action.enforcement = action.enforcement;
                 canonical_action.export_mode = action.export_mode;
                 canonical_action.media_scan = action.media_scan;
+                canonical_action.audit = action.audit;
                 canonical_action.selector.root = action.select.root;
                 canonical_action.selector.glob = base;
                 canonical_action.selector.object_type = action.select.object_type;

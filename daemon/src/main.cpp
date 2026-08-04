@@ -21,7 +21,7 @@
 
 #include "pathguard/path.h"
 #include "pathguard/provider_process_lifecycle.h"
-#include "pathguard/provenance_server.h"
+#include "pathguard/audit_server.h"
 #include "pathguard/rules_control.h"
 #include "pathguard/topology.h"
 
@@ -427,12 +427,12 @@ int main(int argc, char** argv) {
     }
     const pathguard::control::ReconcileResult initial = reconciler.Reconcile();
     LogReconcile("initial", initial);
-    pathguard::daemon::ProvenanceServer provenance_server(
-        (run_directory / "provenance.sock").string(),
-        (run_directory / "provenance.wal").string());
+    pathguard::daemon::AuditServer audit_server(
+        (run_directory / "audit.sock").string(),
+        (run_directory / "audit-v1.wal").string());
 #if defined(PATHGUARD_ANDROID)
-    if (!provenance_server.Start()) {
-        std::cerr << "provenance server unavailable\n" << std::flush;
+    if (!audit_server.Start()) {
+        std::cerr << "audit server unavailable\n" << std::flush;
     }
     std::thread(ReconcileProviderStartup, run_directory).detach();
 #endif

@@ -31,7 +31,7 @@ int main() {
     const RulesBuildResult migrated = CompileRules(*source, RulesLimits{});
     assert(migrated.ok());
     assert(migrated.blob->bytes.size() == 371);
-    assert(migrated.blob->content_generation == UINT64_C(2028246498201077069));
+    assert(migrated.blob->content_generation == UINT64_C(14074591159032461277));
 
     const std::string placeholder = Read(
         root / "tests/fixtures/legacy-rules/legacy-placeholders.ini");

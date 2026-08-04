@@ -13,6 +13,8 @@ deny_rules = [
 ]
 redirect_rules = [
     { select = { root = "Download", glob = "localsend-source", type = "directory" }, to = "Download/localsend-redirect" },
-    { select = { root = "Download/localsend-source", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider" },
-    { select = { root = "Pictures", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider" },
+    { select = { root = "Download/localsend-source", glob = "**", type = "file" }, to = "Download/localsend-redirect" },
+    { select = { root = "Download/localsend-source", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider", audit = true },
+    { select = { root = "Pictures", glob = "**", type = "file" }, to = "Download/localsend-redirect" },
+    { select = { root = "Pictures", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider", audit = true },
 ]

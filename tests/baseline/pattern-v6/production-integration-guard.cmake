@@ -6,6 +6,8 @@ file(READ "${SOURCE_DIR}/zygisk/include/pathguard/policy_snapshot_domain.hpp" sn
 file(READ "${SOURCE_DIR}/native/Android.mk" android_mk)
 file(READ "${SOURCE_DIR}/zygisk/src/module_entry.cpp" entry)
 file(READ "${SOURCE_DIR}/daemon/src/main.cpp" daemon)
+file(READ "${SOURCE_DIR}/daemon/src/audit_server.cpp" audit_server)
+file(READ "${SOURCE_DIR}/core/src/route_audit.cpp" route_audit)
 file(READ "${SOURCE_DIR}/scripts/package.ps1" package)
 file(READ "${SOURCE_DIR}/scripts/verify-provider-lsplant-elf.cmake" lsplant_elf)
 file(READ "${SOURCE_DIR}/provider-adapter/native/src/provider_lsplant_bridge.cpp" lsplant_bridge)
@@ -28,6 +30,12 @@ foreach(contract IN ITEMS
     message(FATAL_ERROR "production hook misses ${contract}")
   endif()
 endforeach()
+if(entry MATCHES "provider_lsplant_ready_ = PrepareProviderLsplant")
+  message(FATAL_ERROR "ordinary Provider redirect must not activate the LSPlant Java bridge")
+endif()
+if(NOT entry MATCHES "action\.reverse[\r\n ]+== PATHGUARD_PROVIDER_ROUTE_REVERSE_PROVENANCE")
+  message(FATAL_ERROR "Provider provenance records must require an explicit provenance action")
+endif()
 if(NOT provenance_protocol MATCHES "kVersion = 4" OR
    NOT provenance_protocol MATCHES "kIdentityHandleCapacity = 128" OR
    NOT provenance_broker MATCHES "IdentityKind::kFileHandle" OR
@@ -67,9 +75,42 @@ foreach(contract IN ITEMS
     message(FATAL_ERROR "production provenance hook misses ${contract}")
   endif()
 endforeach()
-if(NOT entry MATCHES "ForwardProvenanceRequest" OR
-   NOT daemon MATCHES "ProvenanceServer")
-  message(FATAL_ERROR "provenance is not connected through companion to daemon")
+if(daemon MATCHES "ProvenanceServer" OR daemon MATCHES "provenance\.sock")
+  message(FATAL_ERROR "transactional provenance must not start in production daemon")
+endif()
+foreach(contract IN ITEMS
+    "ForwardAuditRequest"
+    "ServeAuditQueue"
+    "PreparePrivateAuditQueue"
+    "CreateSharedAuditQueue"
+    "SendAuditQueueBootstrap"
+    "EnqueueAudit"
+    "kActionOptionPrivateAudit")
+  if(NOT entry MATCHES "${contract}" AND NOT hook MATCHES "${contract}")
+    message(FATAL_ERROR "private audit integration misses ${contract}")
+  endif()
+endforeach()
+if(hook MATCHES "CallAudit" OR hook MATCHES "AuditWorker" OR
+   hook MATCHES "StartAuditWorker")
+  message(FATAL_ERROR
+    "Provider private audit must enqueue shared memory without a worker or socket")
+endif()
+if(NOT entry MATCHES "SYS_memfd_create, \"pathguard-audit\"" OR
+   NOT entry MATCHES "SCM_RIGHTS" OR
+   NOT entry MATCHES "ForwardAuditRecord")
+  message(FATAL_ERROR
+    "private audit shared-memory companion transport is incomplete")
+endif()
+if(hook MATCHES "IsAppRuntimeHookTarget" OR
+   hook MATCHES "MaybeInstallAppRuntimeHooks" OR
+   hook MATCHES "app runtime hooks")
+  message(FATAL_ERROR
+    "private audit must not add app-specific late PLT hooks")
+endif()
+if(NOT daemon MATCHES "AuditServer" OR
+   NOT audit_server MATCHES "SO_PEERCRED" OR
+   NOT route_audit MATCHES "audit-v1" AND NOT daemon MATCHES "audit-v1\.wal")
+  message(FATAL_ERROR "private audit is not connected through companion to daemon")
 endif()
 if(NOT android_mk MATCHES "secure_path_resolver.cpp")
   message(FATAL_ERROR "secure resolver is not linked into Zygisk")
@@ -101,8 +142,9 @@ foreach(contract IN ITEMS
     message(FATAL_ERROR "runtime status integration misses ${contract}")
   endif()
 endforeach()
-if(entry MATCHES "exemptFd")
-  message(FATAL_ERROR "Provider runtime status must not depend on optional Zygisk FD exemption")
+if(entry MATCHES "exemptFd\(companion\)")
+  message(FATAL_ERROR
+    "private audit must not retain a zygote socket across specialization")
 endif()
 foreach(contract IN ITEMS
     "PrepareProviderLsplant"
@@ -201,6 +243,9 @@ if(NOT android_mk MATCHES "provider-adapter/native/include" OR
    NOT package MATCHES "provider/provider-hooker\.dex" OR
    NOT package MATCHES "libpathguard_lsplant\.so")
   message(FATAL_ERROR "LSPlant production package wiring is incomplete")
+endif()
+if(NOT package MATCHES "-no-lsplant\.zip")
+  message(FATAL_ERROR "LSPlant diagnostic packages must not overwrite production packages")
 endif()
 if(NOT lsplant_cmake MATCHES "provider_route_snapshot_registry\.cpp")
   message(FATAL_ERROR "Provider route snapshot registry is not linked into LSPlant")

@@ -1,4 +1,5 @@
 #include "pathguard/rules/semantic.h"
+#include "pathguard/policy_format.h"
 
 #include <algorithm>
 #include <chrono>
@@ -12,8 +13,6 @@
 #include <tuple>
 #include <utility>
 #include <vector>
-
-#include "pathguard/namespace_projection.h"
 
 namespace pathguard::rules {
 namespace {
@@ -33,23 +32,9 @@ bool HasErrors(const std::vector<Diagnostic>& diagnostics) {
                        });
 }
 
-bool HasReservedNamespaceComponent(std::string_view path) {
-    std::size_t begin = 0;
-    while (begin < path.size()) {
-        const std::size_t end = path.find('/', begin);
-        const std::string_view component = path.substr(
-            begin, end == std::string_view::npos ? path.size() - begin
-                                                 : end - begin);
-        if (component == "_pg") return true;
-        if (end == std::string_view::npos) break;
-        begin = end + 1;
-    }
-    return false;
-}
-
 using CanonicalActionKey = std::tuple<
     RuleActionKind, std::string, std::string, SelectorObjectType, std::string,
-    std::int32_t, RuleEnforcement, ExportMode, bool, std::string>;
+    std::int32_t, RuleEnforcement, ExportMode, bool, bool, std::string>;
 
 CanonicalActionKey ActionKey(const CanonicalActionV2& action) {
     std::string except_key;
@@ -60,6 +45,7 @@ CanonicalActionKey ActionKey(const CanonicalActionV2& action) {
     return {action.action, action.selector.root, action.selector.glob,
             action.selector.object_type, action.target, action.priority,
             action.enforcement, action.export_mode, action.media_scan,
+            action.audit,
             std::move(except_key)};
 }
 
@@ -85,26 +71,6 @@ void AddDiagnostic(std::vector<Diagnostic>* diagnostics,
         diagnostic.related.push_back({*related, "related_rule"});
     }
     diagnostics->push_back(std::move(diagnostic));
-}
-
-std::string ProjectionIdentityV1(
-        const pathguard::PolicyPackageV6& package,
-        std::string_view source_root, std::string_view target_root) {
-    constexpr char kDomain[] = "pathguard.namespace-projection.v1";
-    std::string identity(kDomain, sizeof(kDomain) - 1);
-    identity.push_back('\0');
-    const auto append = [&identity](std::string_view value) {
-        identity.append(value);
-        identity.push_back('\0');
-    };
-    append(package.package);
-    identity.push_back(package.all_users ? 1 : 0);
-    for (const std::uint32_t user : package.users) append(std::to_string(user));
-    identity.push_back('\0');
-    append(source_root);
-    append(target_root);
-    append("preserve-relative");
-    return identity;
 }
 
 }  // namespace
@@ -195,23 +161,10 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
         }
         std::map<std::string, std::uint32_t> selector_ids;
         for (const CanonicalActionV2& source_action : source_app.actions) {
-            if (HasReservedNamespaceComponent(source_action.selector.root)
-                || HasReservedNamespaceComponent(source_action.target)) {
-                AddDiagnostic(&output.diagnostics, kPolicyEncode,
-                              "namespace_path_reserved", {},
-                              DiagnosticSeverity::kError, limits);
-                return output;
-            }
             const std::string selector_root = source_action.selector.source_kind
                     == SelectorSourceKind::kLiteral
                 ? source_action.selector.root + "/" + source_action.selector.glob
                 : source_action.selector.root;
-            if (HasReservedNamespaceComponent(selector_root)) {
-                AddDiagnostic(&output.diagnostics, kPolicyEncode,
-                              "namespace_path_reserved", {},
-                              DiagnosticSeverity::kError, limits);
-                return output;
-            }
             std::string selector_key = selector_root;
             selector_key.push_back('\0');
             selector_key.push_back(static_cast<char>(source_action.selector.source_kind));
@@ -246,6 +199,7 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
             }
             pathguard::PolicyActionV6 action;
             action.selector_index = selector_id;
+            action.rule_id = source_action.id;
             switch (source_action.action) {
                 case RuleActionKind::kDeny:
                     action.kind = pathguard::PolicyActionKind::kDeny;
@@ -285,7 +239,12 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
             } else if (source_action.selector.source_kind == SelectorSourceKind::kGlob) {
                 action.domain = pathguard::PolicyExecutionDomain::kAppPath;
                 action.required_capabilities = kCapabilityAppPathAdapter;
-                action.required_operations = kAppPathOperationsV1;
+                action.required_operations = action.kind
+                            == pathguard::PolicyActionKind::kRedirect
+                        && source_action.selector.object_type
+                            == SelectorObjectType::kFile
+                    ? kAppPathFileRedirectOperationsV1
+                    : kAppPathOperationsV1;
             } else {
                 action.domain = pathguard::PolicyExecutionDomain::kMount;
             }
@@ -294,7 +253,10 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
                 action.target = source_action.target;
                 action.preserve = pathguard::PolicyPreserveMode::kRelative;
                 action.collision = pathguard::PolicyCollisionMode::kReject;
-                action.reverse = pathguard::PolicyReverseMode::kStaticUnique;
+                action.reverse = pathguard::PolicyReverseMode::kNone;
+                if (source_action.audit) {
+                    action.options |= pathguard::binary_format::kActionOptionPrivateAudit;
+                }
             } else if (action.kind == pathguard::PolicyActionKind::kExport) {
                 action.target = source_action.target;
                 action.preserve = pathguard::PolicyPreserveMode::kRelative;
@@ -303,53 +265,6 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
                     | (source_action.media_scan ? UINT32_C(1) << 2 : 0);
             }
             package.actions.push_back(std::move(action));
-        }
-        const std::vector<pathguard::PolicyActionV6> declared_actions =
-            package.actions;
-        std::map<std::string, std::string> namespace_identities;
-        for (std::size_t action_index = 0;
-             action_index < package.actions.size(); ++action_index) {
-            auto& action = package.actions[action_index];
-            if (action.kind != pathguard::PolicyActionKind::kRedirect) {
-                continue;
-            }
-            std::vector<std::string_view> source_roots;
-            for (const auto& candidate : declared_actions) {
-                if (candidate.kind == pathguard::PolicyActionKind::kRedirect
-                    && candidate.target == action.target
-                    && candidate.selector_index < package.selectors.size()) {
-                    const std::string& root =
-                        package.selectors[candidate.selector_index].root;
-                    if (std::find(source_roots.begin(), source_roots.end(), root)
-                        == source_roots.end()) {
-                        source_roots.emplace_back(root);
-                    }
-                }
-            }
-            action.reverse = pathguard::PolicyReverseMode::kStaticUnique;
-            if (source_roots.size() <= 1
-                || action.selector_index >= package.selectors.size()) {
-                continue;
-            }
-            const std::string declared_target = action.target;
-            const std::string& source_root =
-                package.selectors[action.selector_index].root;
-            const std::string projection_identity = ProjectionIdentityV1(
-                package, source_root, declared_target);
-            const std::string namespace_id =
-                pathguard::namespace_projection::ComputeNamespaceIdV1(
-                    projection_identity);
-            const auto [identity, inserted] = namespace_identities.emplace(
-                namespace_id, projection_identity);
-            if (!inserted && identity->second != projection_identity) {
-                AddDiagnostic(&output.diagnostics, kPolicyEncode,
-                              "namespace_id_collision", {},
-                              DiagnosticSeverity::kError, limits);
-                return output;
-            }
-            action.target =
-                pathguard::namespace_projection::BuildNamespaceTargetV1(
-                    declared_target, namespace_id);
         }
         policy.packages.push_back(std::move(package));
     }

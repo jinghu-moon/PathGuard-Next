@@ -1,4 +1,5 @@
 add_library(pathguard_core STATIC
+  src/audit_broker.cpp
   src/failure_policy.cpp
   src/export_worker.cpp
   src/namespace_projection.cpp
@@ -9,6 +10,7 @@ add_library(pathguard_core STATIC
   src/provider_mapping.cpp
   src/provider_route_snapshot_registry.cpp
   src/route_provenance.cpp
+  src/route_audit.cpp
   src/provenance_broker.cpp
   src/topology.cpp
   src/version.cpp

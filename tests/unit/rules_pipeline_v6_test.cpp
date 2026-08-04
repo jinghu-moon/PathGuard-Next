@@ -75,7 +75,9 @@ redirect_rules = [
            == (kOperationOpenRead | kOperationOpenWrite | kOperationCreate
                | kOperationLookupStat | kOperationAccess | kOperationRename
                | kOperationUnlink));
-    assert(glob_action.reverse == PolicyReverseMode::kStaticUnique);
+    assert(glob_action.reverse == PolicyReverseMode::kNone);
+    assert((glob_action.options
+            & binary_format::kActionOptionPrivateAudit) == 0);
     DeviceSnapshot provider_unobserved;
     provider_unobserved.topology_supported = true;
     const AdmissionResult deferred = AdmitPolicy(
@@ -95,7 +97,11 @@ redirect_rules = [
         app_path.policy_v6->packages.front().actions.front();
     assert(app_path_action.domain == PolicyExecutionDomain::kAppPath);
     assert(app_path_action.required_capabilities == kCapabilityAppPathAdapter);
-    assert(app_path_action.required_operations == kAppPathOperationsV1);
+    assert(app_path_action.required_operations
+           == kAppPathFileRedirectOperationsV1);
+    assert((app_path_action.required_operations & kOperationTruncate) == 0);
+    assert((app_path_action.required_operations & kOperationWatch) == 0);
+    assert((app_path_action.required_operations & ~UINT64_C(0x0000bfff)) == 0);
 
     const RulesBuildResult reordered = Compile(R"(format=2
 [apps."org.localsend.localsend_app"]
@@ -116,7 +122,7 @@ redirect_rules = [
     assert(brace_same_source.ok());
     assert(brace_same_source.policy_v6->packages.front().actions.size() == 2);
     for (const auto& action : brace_same_source.policy_v6->packages.front().actions) {
-        assert(action.reverse == PolicyReverseMode::kStaticUnique);
+        assert(action.reverse == PolicyReverseMode::kNone);
     }
 
     const RulesBuildResult distinct_sources = Compile(R"(format = 2
@@ -128,14 +134,63 @@ redirect_rules = [
 ]
 )");
     assert(distinct_sources.ok());
-    std::vector<std::string> namespace_targets;
+    std::vector<std::string> flat_targets;
     for (const auto& action : distinct_sources.policy_v6->packages.front().actions) {
-        assert(action.reverse == PolicyReverseMode::kStaticUnique);
-        assert(action.target.starts_with("Download/images/_pg/v1/ns_"));
-        namespace_targets.push_back(action.target);
+        assert(action.reverse == PolicyReverseMode::kNone);
+        assert(action.target == "Download/images");
+        flat_targets.push_back(action.target);
     }
-    assert(namespace_targets.size() == 2);
-    assert(namespace_targets[0] != namespace_targets[1]);
+    assert(flat_targets.size() == 2);
+    assert(flat_targets[0] == flat_targets[1]);
+
+    const RulesBuildResult audited = Compile(R"(format = 2
+[apps."com.example.audit"]
+users = [0]
+redirect_rules = [
+  { select = { root = "Pictures", glob = "**/*.jpg", type = "file" }, to = "Download/images", audit = true },
+]
+)");
+    assert(audited.ok());
+    const auto& audited_action =
+        audited.policy_v6->packages.front().actions.front();
+    assert(audited_action.reverse == PolicyReverseMode::kNone);
+    assert((audited_action.options
+            & binary_format::kActionOptionPrivateAudit) != 0);
+    assert(audited_action.required_operations
+           == kAppPathFileRedirectOperationsV1);
+
+    const RulesBuildResult audited_app_and_provider = Compile(R"(format = 2
+[apps."com.example.audit"]
+users = [0]
+redirect_rules = [
+  { select = { root = "Pictures", glob = "**/*.jpg", type = "file" }, to = "Download/images" },
+  { select = { root = "Pictures", glob = "**/*.jpg", type = "file" }, to = "Download/images", enforcement = "provider", audit = true },
+]
+)");
+    assert(audited_app_and_provider.ok());
+    bool found_plain_app_path = false;
+    bool found_audited_provider = false;
+    for (const auto& action :
+         audited_app_and_provider.policy_v6->packages.front().actions) {
+        const bool private_audit = (action.options
+            & binary_format::kActionOptionPrivateAudit) != 0;
+        found_plain_app_path |=
+            action.domain == PolicyExecutionDomain::kAppPath && !private_audit;
+        found_audited_provider |=
+            action.domain == PolicyExecutionDomain::kProvider && private_audit;
+    }
+    assert(found_plain_app_path);
+    assert(found_audited_provider);
+
+    const RulesBuildResult invalid_audit = Compile(R"(format = 2
+[apps."com.example.audit"]
+users = [0]
+redirect_rules = [
+  { select = { root = "Pictures", glob = "**/*.jpg", type = "file" }, to = "Download/images", audit = "yes" },
+]
+    )");
+    assert(!invalid_audit.ok());
+    assert(HasCode(invalid_audit, kTypeMismatch));
 
     const RulesBuildResult distinct_sources_reordered = Compile(R"(format = 2
 [apps."com.example.multi"]
@@ -163,9 +218,9 @@ redirect_rules = [
          distinct_sources_priority.policy_v6->packages.front().actions) {
         priority_targets.push_back(action.target);
     }
-    std::sort(namespace_targets.begin(), namespace_targets.end());
+    std::sort(flat_targets.begin(), flat_targets.end());
     std::sort(priority_targets.begin(), priority_targets.end());
-    assert(priority_targets == namespace_targets);
+    assert(priority_targets == flat_targets);
 
     const RulesBuildResult cross_domain = Compile(R"(format = 2
 [apps."org.localsend.localsend_app"]
@@ -185,8 +240,8 @@ redirect_rules = [
     for (const auto& action : cross_package.actions) {
         const std::string& root =
             cross_package.selectors[action.selector_index].root;
-        assert(action.target.starts_with(
-            "Download/localsend-redirect/_pg/v1/ns_"));
+        assert(action.target == "Download/localsend-redirect");
+        assert(action.reverse == PolicyReverseMode::kNone);
         if (action.domain == PolicyExecutionDomain::kMount) {
             mount_target = action.target;
         } else if (root == "Download/localsend-source") {
@@ -197,17 +252,16 @@ redirect_rules = [
     }
     assert(!mount_target.empty());
     assert(mount_target == download_provider_target);
-    assert(mount_target != pictures_provider_target);
+    assert(mount_target == pictures_provider_target);
 
-    const RulesBuildResult reserved_namespace = Compile(R"(format = 2
+    const RulesBuildResult user_owned_pg_path = Compile(R"(format = 2
 [apps."com.example.reserved"]
 users = [0]
 redirect_rules = [
   { select = { root = "Pictures/_pg", glob = "**", type = "file" }, to = "Download/out" },
 ]
 )");
-    assert(!reserved_namespace.ok());
-    assert(HasCode(reserved_namespace, kPolicyEncode));
+    assert(user_owned_pg_path.ok());
 
     const RulesBuildResult old = Compile(
         "format = 1\n[apps.\"com.example.app\"]\nredirect=[]\n");

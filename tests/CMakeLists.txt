@@ -252,6 +252,12 @@ target_include_directories(pathguard_provenance_broker_test PRIVATE
 target_link_libraries(pathguard_provenance_broker_test PRIVATE pathguard_core)
 add_test(NAME pathguard_provenance_broker_test
   COMMAND pathguard_provenance_broker_test)
+add_executable(pathguard_route_audit_test unit/route_audit_test.cpp)
+target_include_directories(pathguard_route_audit_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pathguard_route_audit_test PRIVATE pathguard_core)
+add_test(NAME pathguard_route_audit_test
+  COMMAND pathguard_route_audit_test)
 add_executable(pathguard_failure_policy_test
   unit/failure_policy_test.cpp)
 target_include_directories(pathguard_failure_policy_test PRIVATE

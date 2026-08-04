@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -7,10 +8,18 @@
 #include <vector>
 
 #include "pathguard/policy_v6.h"
+#include "pathguard/audit_protocol.h"
+#include "pathguard/route_audit.h"
 #include "pathguard/rules/diagnostic.h"
 #include "pathguard/rules/semantic.h"
 #include "pathguard/rules/source.h"
 #include "pathguard/rules/tools.h"
+
+#if defined(PATHGUARD_ANDROID)
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -159,6 +168,205 @@ static int PrintStatus(const fs::path& module_dir, const char* pid,
         if (Read(entry, &text)) std::cout << "[" << entry.stem().string() << "]\n" << text;
     }
     return error ? 1 : 0;
+}
+
+static const char* AuditOperationName(pathguard::audit::Operation operation) {
+    using pathguard::audit::Operation;
+    switch (operation) {
+        case Operation::kUpsert: return "upsert";
+        case Operation::kRename: return "rename";
+        case Operation::kDelete: return "delete";
+    }
+    return "unknown";
+}
+
+static const char* AuditConfidenceName(pathguard::audit::Confidence confidence) {
+    using pathguard::audit::Confidence;
+    switch (confidence) {
+        case Confidence::kPathOnly: return "path_only";
+        case Confidence::kInodeMetadata: return "inode_metadata";
+        case Confidence::kBirthTime: return "birth_time";
+        case Confidence::kFileHandle: return "file_handle";
+    }
+    return "unknown";
+}
+
+static bool LoadAuditSnapshot(
+        const fs::path& module_dir, std::vector<pathguard::audit::Record>* records,
+        std::uint64_t* generation) {
+    if (records == nullptr || generation == nullptr) return false;
+#if defined(PATHGUARD_ANDROID)
+    const auto call = [](const pathguard::audit_protocol::Request& request,
+                         pathguard::audit_protocol::Response* response) {
+        const int socket_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        if (socket_fd < 0) return false;
+        timeval timeout{0, 500000};
+        setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                   sizeof(timeout));
+        setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout));
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        std::memcpy(address.sun_path,
+                    pathguard::audit_protocol::kAndroidSocketPath,
+                    sizeof(pathguard::audit_protocol::kAndroidSocketPath));
+        const bool ok = connect(
+                socket_fd, reinterpret_cast<sockaddr*>(&address),
+                sizeof(address)) == 0
+            && send(socket_fd, &request, sizeof(request), MSG_NOSIGNAL)
+                == static_cast<ssize_t>(sizeof(request))
+            && recv(socket_fd, response, sizeof(*response), MSG_WAITALL)
+                == static_cast<ssize_t>(sizeof(*response))
+            && response->magic == pathguard::audit_protocol::kMagic
+            && response->version == pathguard::audit_protocol::kVersion
+            && response->error == pathguard::audit_protocol::Error::kNone;
+        close(socket_fd);
+        return ok;
+    };
+    pathguard::audit_protocol::Request request;
+    request.command = pathguard::audit_protocol::Command::kSnapshotInfo;
+    pathguard::audit_protocol::Response response;
+    if (!call(request, &response)) return false;
+    const std::uint64_t expected_generation = response.snapshot_generation;
+    const std::uint32_t count = response.snapshot_count;
+    records->clear();
+    records->reserve(count);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        request = {};
+        request.command = pathguard::audit_protocol::Command::kSnapshotRecord;
+        request.snapshot_index = index;
+        if (!call(request, &response)
+            || response.snapshot_generation != expected_generation) {
+            return false;
+        }
+        const auto& wire = response.record;
+        pathguard::audit::Record record;
+        record.operation = static_cast<pathguard::audit::Operation>(wire.operation);
+        record.confidence = static_cast<pathguard::audit::Confidence>(wire.confidence);
+        record.caller_uid = wire.caller_uid;
+        record.user_id = wire.user_id;
+        record.rule_id = wire.rule_id;
+        record.content_generation = wire.content_generation;
+        record.plan_generation = wire.plan_generation;
+        record.observed_realtime_ns = wire.observed_realtime_ns;
+        record.observed_boottime_ns = wire.observed_boottime_ns;
+        record.sequence = wire.sequence;
+        record.logical_source_path = wire.logical_source;
+        record.target_path = wire.target_path;
+        record.previous_target_path = wire.previous_target_path;
+        record.identity.device = wire.identity.device;
+        record.identity.inode = wire.identity.inode;
+        record.identity.size = wire.identity.size;
+        record.identity.mode = wire.identity.mode;
+        record.identity.modified_seconds = wire.identity.modified_seconds;
+        record.identity.modified_nanoseconds = wire.identity.modified_nanoseconds;
+        record.identity.changed_seconds = wire.identity.changed_seconds;
+        record.identity.changed_nanoseconds = wire.identity.changed_nanoseconds;
+        record.identity.has_birth_time = wire.identity.has_birth_time != 0;
+        record.identity.birth_seconds = wire.identity.birth_seconds;
+        record.identity.birth_nanoseconds = wire.identity.birth_nanoseconds;
+        record.identity.handle_type = wire.identity.handle_type;
+        record.identity.handle.assign(
+            wire.identity.handle,
+            wire.identity.handle + wire.identity.handle_size);
+        records->push_back(std::move(record));
+    }
+    *generation = expected_generation;
+    return true;
+#else
+    pathguard::audit::FileJournal journal(
+        (module_dir / "run" / "audit-v1.wal").string());
+    pathguard::audit::Store store(&journal);
+    if (store.Recover() != pathguard::audit::Error::kNone) return false;
+    records->clear();
+    records->reserve(store.current_count());
+    for (std::size_t index = 0; index < store.current_count(); ++index) {
+        pathguard::audit::Record record;
+        if (!store.CurrentAt(index, &record)) return false;
+        records->push_back(std::move(record));
+    }
+    *generation = store.generation();
+    return true;
+#endif
+}
+
+static int PrintAudit(const fs::path& module_dir, bool json) {
+    std::vector<pathguard::audit::Record> records;
+    std::uint64_t generation = 0;
+    if (!LoadAuditSnapshot(module_dir, &records, &generation)) {
+        std::cerr << "cannot read private audit store\n";
+        return 1;
+    }
+    if (json) {
+        std::cout << "{\"schema\":\"pathguard.private-audit.v1\",\"generation\":"
+                  << generation << ",\"records\":[";
+    } else {
+        std::cout << "generation=" << generation
+                  << "\nrecord_count=" << records.size() << '\n';
+    }
+    for (std::size_t index = 0; index < records.size(); ++index) {
+        const pathguard::audit::Record& record = records[index];
+        if (json) {
+            if (index != 0) std::cout << ',';
+            std::cout << "{\"operation\":"
+                      << JsonEscape(AuditOperationName(record.operation))
+                      << ",\"confidence\":"
+                      << JsonEscape(AuditConfidenceName(record.confidence))
+                      << ",\"caller_uid\":" << record.caller_uid
+                      << ",\"user_id\":" << record.user_id
+                      << ",\"rule_id\":" << record.rule_id
+                      << ",\"sequence\":" << record.sequence
+                      << ",\"content_generation\":"
+                      << record.content_generation
+                      << ",\"plan_generation\":"
+                      << record.plan_generation
+                      << ",\"logical_source\":"
+                      << JsonEscape(record.logical_source_path)
+                      << ",\"target\":" << JsonEscape(record.target_path)
+                      << ",\"previous_target\":"
+                      << JsonEscape(record.previous_target_path)
+                      << ",\"device\":" << record.identity.device
+                      << ",\"inode\":" << record.identity.inode
+                      << ",\"size\":" << record.identity.size
+                      << ",\"mode\":" << record.identity.mode
+                      << ",\"modified_seconds\":"
+                      << record.identity.modified_seconds
+                      << ",\"modified_nanoseconds\":"
+                      << record.identity.modified_nanoseconds
+                      << ",\"changed_seconds\":"
+                      << record.identity.changed_seconds
+                      << ",\"changed_nanoseconds\":"
+                      << record.identity.changed_nanoseconds
+                      << ",\"has_birth_time\":"
+                      << (record.identity.has_birth_time ? "true" : "false")
+                      << ",\"birth_seconds\":"
+                      << record.identity.birth_seconds
+                      << ",\"birth_nanoseconds\":"
+                      << record.identity.birth_nanoseconds
+                      << ",\"handle_type\":"
+                      << record.identity.handle_type
+                      << ",\"handle_size\":"
+                      << record.identity.handle.size()
+                      << ",\"observed_realtime_ns\":"
+                      << record.observed_realtime_ns
+                      << ",\"observed_boottime_ns\":"
+                      << record.observed_boottime_ns << '}';
+        } else {
+            std::cout << "[" << index << "] operation="
+                      << AuditOperationName(record.operation)
+                      << " confidence="
+                      << AuditConfidenceName(record.confidence)
+                      << " uid=" << record.caller_uid
+                      << " rule_id=" << record.rule_id
+                      << " source=" << record.logical_source_path
+                      << " target=" << record.target_path
+                      << " dev=" << record.identity.device
+                      << " ino=" << record.identity.inode
+                      << " size=" << record.identity.size << '\n';
+        }
+    }
+    if (json) std::cout << "]}\n";
+    return 0;
 }
 
 static pathguard::rules::RulesBuildResult CompileRulesFile(
@@ -599,7 +807,8 @@ int main(int argc, char** argv) {
                      "       pathguardctl explain --path <rules.toml> <package> <path>\n"
                      "       pathguardctl reload <module-dir>\n"
                      "       pathguardctl explain <policy.bin> <package> [--json]\n"
-                     "       pathguardctl status <module-dir> [pid] [--json]\n";
+                     "       pathguardctl status <module-dir> [pid] [--json]\n"
+                     "       pathguardctl audit <module-dir> [--json]\n";
         return 2;
     }
     const std::string command = argv[1];
@@ -632,6 +841,14 @@ int main(int argc, char** argv) {
             else { std::cerr << "unexpected status argument\n"; return 2; }
         }
         return PrintStatus(argv[2], pid, json);
+    }
+    if (command == "audit") {
+        if (argc < 3 || argc > 4
+            || (argc == 4 && std::string_view(argv[3]) != "--json")) {
+            std::cerr << "usage: pathguardctl audit <module-dir> [--json]\n";
+            return 2;
+        }
+        return PrintAudit(argv[2], argc == 4);
     }
     if (command == "explain") {
         if (argc < 4) { std::cerr << "missing policy.bin or package\n"; return 2; }

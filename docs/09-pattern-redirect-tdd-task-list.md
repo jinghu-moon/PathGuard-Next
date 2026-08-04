@@ -1,13 +1,14 @@
 # PathGuard Next Pattern Redirect TDD 执行清单
 
 > 状态：原 pattern v6 当前设备范围已闭环；2026-08-01 根据用户决策启动 Provider contract
-> adapter（方案 B）后续工作，T-34～R-58 的生产实现及 V-64 alioth/Android 13 公共操作基线已完成，
-> bit 17 在真实 adapter profile、虚拟映射、FD identity、reverse 和 restart 全部通过前保持
-> `unsupported`。2026-08-02 已启动并完成 Shared Target Namespace Projection 的 Host/双 ABI
-> 实现：多源共享 target root 编译为 `_pg/v1/ns_<id>`，mount/Provider 同投影共享 Namespace，
-> static reverse 不再依赖 strong identity；真机 V-69 已在 `0.1.45-dev`/`0.1.46-dev` 完成当前设备
-> 可构造范围，caller-scoped query/open 与 exact collision 按设备/应用入口不满足记为
-> `unsupported/not_observed`；活动 Namespace 被外部删除后只验证进程重启恢复，不宣称热恢复。
+> adapter（方案 B）后续工作，T-34～R-58 的实现及 V-64 alioth/Android 13 公共操作基线已完成。
+> 2026-08-02 的 Shared Target Namespace Projection 已在 `0.1.45-dev`/`0.1.46-dev` 完成 Host、
+> 双 ABI 和当前设备实验，但用户可见 `_pg/v1/ns_*` 不符合最终产品语义，现归档为实验，不进入
+> 生产。2026-08-03 最终方案切换为多源共享扁平 target：PathGuard 只做一致路径重定向，不负责
+> 自动命名、文件碰撞策略、MediaStore 来源视图或事务 provenance。LSPlant 正常包继续携带，但普通
+> redirect 不激活 Java bridge；它仅保留为未来独立 `hide.media_query`/`hide.saf` adapter 的候选。
+> bit 17 与事务 provenance 均保持 `unsupported/inactive`，不阻塞 redirect。`0.1.48-dev` 新增
+> 规则显式启用、私有且非阻塞的 Private Audit v1；它只记录已观察事实，不提供反向路径语义。
 > 原 V-46 `adapter-only` 决策形成合法阻断，fanotify/Export
 > 因当前设备 `CONFIG_FANOTIFY` disabled 按用户授权跳过并保持 unsupported/not_observed。第二部分已有单设备
 > LocalSend/Provider 生命周期补充证据；2026-08-01 已增加一台 Android 16/myron/SukiSU Ultra
@@ -2022,7 +2023,7 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
   publication/mutation-recovery 子矩阵按当前设备不满足记为 `unsupported/not_observed` 并跳过；
   bit 17 继续强制清零。
 
-### T-59～R-59 [生产] Shared Target Namespace Projection
+### T-59～R-59 [归档实验] Shared Target Namespace Projection
 
 - **任务描述**：多 source 共享声明 target root 时，编译器为每个 canonical projection 生成
   `target/_pg/v1/ns_<SHA256-128-base32>`；Namespace 身份与 Rule 策略解耦，mount/Provider 同投影
@@ -2031,14 +2032,15 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
 - **验收标准**：规则重排和 priority 变化不改变 Namespace；不同 source Namespace 不同；同一
   source 的 mount/Provider Namespace 相同；`_pg` 用户规则拒绝；unknown/unsafe path fail-open；
   static reverse 在无 FILE_HANDLE/BTIME 时通过；provenance 原矩阵保持独立。
-- **执行结果**：Host/双 ABI 实现完成。MSVC Release CTest `84/84`、Clang UBSan static
+- **执行结果**：实验实现与验证完成后归档，不进入生产。MSVC Release CTest `84/84`、Clang UBSan static
   CTest `84/84` 通过，新增
   Namespace SHA-256/Base32、编译稳定性、跨执行域一致、snapshot static decode、无需 strong
   identity 的 reverse 和双向 materialization 测试；NDK r27d Zygisk 双 ABI、零 STL ELF 隔离及
-  NDK 29 LSPlant 双 ABI/ELF guard 通过。当前项目未发布，不实现旧布局迁移、adopt/migrate CLI、
-  Legacy Namespace、GC 或迁移 UI。
+  NDK 29 LSPlant 双 ABI/ELF guard 通过。用户反馈物理文件落在 `_pg/v1/ns_*` 使目录更难理解，
+  且产品不需要把历史来源暴露为目录结构，因此编译器已停止生成该布局。项目未发布、没有用户
+  数据，不实现迁移、兼容 reader、adopt/GC 或迁移 UI。
 
-### V-69 [真机] Namespace Projection 当前设备验收
+### V-69 [真机/归档证据] Namespace Projection 当前设备验收
 
 - **任务描述**：第一阶段安装 `0.1.45-dev`，重启后分别从 Download/localsend-source 与 Pictures 创建同名
   TXT/JPG，确认物理文件进入同一 target root 下不同 `ns_*`；验证 LocalSend、MediaStore/
@@ -2073,6 +2075,101 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
   `//deleted`，重启 LocalSend 后恢复；当前不宣称热恢复。V-69 当前设备可构造范围完成。当前设备不支持的
   strong identity 场景仍按
   `unsupported/not_observed` 跳过。
+
+### T-60～R-60 [生产] 扁平 target 与 redirect/LSPlant 解耦
+
+- **任务描述**：普通 redirect 将 `source/<tail>` 直接重写为 `target/<tail>`，policy action 使用
+  `reverse=none`；删除 Namespace 注入和 `_pg` 保留路径限制。PathGuard 透传调用方 open/rename
+  flags，不自动追加文件名、不主动施加 `O_EXCL`/`RENAME_NOREPLACE`。Provider native path adapter
+  继续处理 Binder caller UID 下的代写路径，但普通 redirect 不初始化 LSPlant Java bridge、Provider
+  route snapshot 或 provenance transaction。
+- **验收标准**：多 source 编译为同一声明 target；无 `_pg/v1/ns_*`；逻辑 source 的 canonical path
+  无需 reverse identity；`reverse=none` 不创建 static/provenance route binding；LSPlant 缺失或初始化
+  失败不影响 redirect；正常包仍包含 LSPlant，`-WithoutLsplant` 只生成独立诊断包。Host/NDK/ELF
+  全绿后进入 V-70。
+- **碰撞边界**：应用或 Android Provider 决定覆盖、报错或自动改名。LocalSend 顺序重名已观察到
+  `collision (1).txt`；该行为不升级为 PathGuard 契约。LocalSend 自身先查后建的并发竞态不在
+  PathGuard 保证范围。
+- **执行结果**：离线实现完成。MSVC Release CTest `84/84`、Clang UBSan static CTest `84/84`、
+  NDK r27d arm64-v8a/armeabi-v7a、Zygisk ELF isolation、NDK 29 LSPlant 双 ABI/ELF 均通过。
+  正常 `0.1.47-dev` 通用包包含 LSPlant bridge/Hooker DEX，但普通 Provider redirect 不调用
+  `PrepareProviderLsplant`；无 LSPlant 对照包使用独立 `-no-lsplant.zip` 文件名。真机结果归 V-70。
+
+### V-70 [真机] 扁平 target 最终验收
+
+- **任务描述**：安装正常含 LSPlant 但 redirect 不激活 Java bridge 的候选并重启。关闭“保存到相册”
+  接收 TXT/JPG，开启后接收 JPG，再顺序接收同名文件；检查 LocalSend 结果、物理 target、源目录、
+  双 Provider/zygisk 日志和 runtime status。
+- **验收标准**：全部文件直接位于 `Download/localsend-redirect/`，无 `_pg`；正常文件可打开；调用方
+  自动改名结果原样保留；无 LSPlant/JNI hook 安装或故障影响 redirect。若 JPG UI 仍报错但文件存在，
+  以日志定位调用链，不重新引入 Namespace/来源视图。
+- **执行结果**：当前设备可执行范围完成。`0.1.47-dev` 重启后，关闭相册模式接收
+  `test.txt`/`test1.jpg`，开启相册模式连续接收两个同名 `test2.jpg`；物理 target 顶层得到四个
+  文件，其中重名结果为 `test2.jpg`/`test2 (1).jpg`，无 `_pg` 文件。LocalSend 三个 session 均
+  报告 `Received all files`。双 Provider native redirect 和两条 action 均 active，bridge library/
+  LSPlant/Hooker 状态全 false，直接 maps 复核无 LSPlant。证据与首轮 collector 缺陷说明见
+  `tests/baseline/pattern-v6/p6-provider-flat-v1-20260803/V-70-flat-target-device.md`。
+
+### T-61～R-61 [高级能力] 私有旁路审计 v1
+
+- **任务描述**：为 redirect 增加显式 `audit = true` 选项，但保持 `reverse=none`。成功的已 Hook
+  create/write-open/truncate/metadata/rename/link/delete 操作只向固定容量异步队列尽力提交事实；
+  companion 代理到 daemon 单写 `audit.sock`，由 CRC WAL 保存当前 target 索引。旧事务
+  `ProvenanceServer` 不再进入 daemon 生产启动或链接入口。
+- **数据合同**：记录 UID/user、RuleId、source/target/previous target、content/plan generation、
+  realtime/boottime 及 dev/inode/size/mode/mtime/ctime；可用时增加 STATX_BTIME/file handle，并以
+  `path_only < inode_metadata < birth_time < file_handle` 表达置信度。WAL/socket 位于模块私有
+  `run/`，权限 0600；CLI 通过 socket 快照读取，禁止与 daemon 并发直读活动 WAL。
+- **故障边界**：队列满、worker/IPC/daemon/WAL 失败只增加 drop/failure，不改变原文件操作的
+  返回值、`errno`、命名、碰撞语义或文件。64 MiB/200000 当前记录上限属于审计降级门，不得反向
+  阻断 redirect。设备重启后的新事件必须能覆盖 WAL 中旧 boottime 记录。
+- **覆盖边界**：只声明统一 path hook 实际观察到的事实。目录 mount、direct syscall、外部未 Hook
+  rename/delete 和丢队列事件可能缺失。默认规则为两个文件 selector 分别声明 app-path 与 Provider
+  action；LocalSend 真实保存链路使用 SAF/Provider 代写，因此只在 Provider action 上启用审计。
+  后续只读扫描不记为来源，mount 目录 action 也不启用审计。记录不得用于反向路径投影或用户文件
+  可用性判断。
+- **离线验收**：规则 bool/编码、broker wire、upsert/rename/delete、WAL replay/断尾、append 失败
+  不更新 store、跨重启 boottime、Host 全量 CTest、NDK r27d 双 ABI和 Zygisk ELF 门全部通过后，
+  进入 V-71。
+- **执行结果**：MSVC Release CTest `85/85`、Clang UBSan static CTest `85/85`、NDK r27d
+  arm64-v8a/armeabi-v7a、Zygisk ELF isolation 及 NDK 29 LSPlant 双 ABI全部通过。已生成
+  `dist/pathguard-next-v0.1.48-dev-universal.zip`；真机观察结论仅归 V-71。
+
+### V-71 [真机] Private Audit v1 观察验证
+
+- **任务描述**：安装 `0.1.48-dev` 并重启，先重放 V-70 的扁平 target 场景，再至少执行一次
+  “保存到相册”的 Provider 文件操作；运行
+  `collect_flat_redirect_status.ps1` 和 `collect_private_audit_status.ps1`。
+- **验收标准**：文件仍直接位于 `localsend-redirect/` 且没有 `_pg`；daemon 快照至少包含一个
+  `Pictures/` 逻辑 source 和扁平 target 记录；audit socket/WAL 仅位于模块私有目录。删除 daemon
+  socket、制造 IPC/WAL 不可用时，文件接收仍按原应用语义成功。mount-only 操作没有记录时记为
+  设计内 `not_observed`，不得伪造来源或据此判定 redirect 失败。
+- **当前状态**：`0.1.48-dev` 首轮设备证据为 `generation=0`：daemon socket 和两个 Provider
+  audit action 均 active，但 LocalSend 实际写入由 mount namespace 完成，Provider hook 随后只观察到
+  只读 `open/access/stat`，因此按合同没有可提交事件。`0.1.49-dev` 已改为显式 app-path 审计 action，
+  并保留无审计的 Provider 兼容 action，但该候选在 `preSpecialize` 安装阶段创建 audit pthread，
+  触发 `selinux_android_setcontext()` `EPERM` 和进程 `SIGABRT`，表现为 LocalSend 白屏；该版本不得
+  继续验收。`0.1.50-dev` 禁止安装阶段启动 worker，改为首个真实事件惰性启动；同时将文件型
+  app-path redirect 的 required operations 收窄到实际 I/O 合同。设备观测值 `0xbfff` 缺失的是
+  `kOperationTruncate=0x4000`，不是 `kOperationWatch=0x8000`。先验收 LocalSend 可正常启动，再
+  重放文件接收和私有审计 collector。`0.1.50-dev` 已证明白屏修复和两条 app-path action 准入，
+  但审计仍为 0：LocalSend 采用 mount backend，进程启动期的固定 Java runtime hook 未覆盖
+  specialize 后加载的 Flutter engine。APK/进程 maps 证据确认 `libflutter.so` 常驻并导入
+  open/openat/write/renameat/unlinkat；`0.1.51-dev`/`0.1.52-dev` 曾尝试仅对 `libflutter.so` 增量
+  注册既有 path hooks，但两版均稳定得到 `images=1 registrations=16 committed=0`。最新完整日志
+  随后确认 LocalSend 的真实保存 URI 为 ExternalStorageProvider SAF document，实际创建由
+  `com.android.externalstorage` 完成；Provider path hook 已观察到对应 open，只是默认配置错误地把
+  `audit=true` 放在 app-path action，而 Provider action 未启用审计。`0.1.53-dev` 将 audit option
+  移到实际执行 I/O 的 Provider action，并删除非必要的 Flutter late-hook 实验代码。当前设备
+  `CONFIG_FANOTIFY` disabled 不再影响这条真实 SAF 验证路径。`0.1.53-dev` 后续日志已确认真实
+  mutating open 成功进入异步队列，但交付仍失败且 daemon 未收到请求；根因是 worker 在
+  post-specialize 阶段调用了 Magisk 明确限定只能用于 pre-specialize 的 `connectCompanion()`。
+  `0.1.54-dev` 的预连接 FD 成功保留且队列事件被观察到，但首次发送仍得到 `EACCES`；内核 AVC
+  明确记录 `platform_app`/`mediaprovider_app` 向 `zygote` `unix_stream_socket` 的 `{ write }` 被拒绝。
+  因此预连接 socket 方案已否决。下一候选改为 pre-specialize 创建 memfd 固定容量共享队列并以
+  SCM_RIGHTS 交给 root companion；specialize 后 Provider 仅原子入队，不创建 worker、不执行 IPC，
+  由 companion 校验进程身份后消费并转发 daemon。`0.1.55-dev` 已通过 Host Release/Clang UBSan
+  static 各 `85/85`、NDK r27d 与 LSPlant 双 ABI构建；WAL/记录等待新候选真机复验。
 
 ## 参考依据
 

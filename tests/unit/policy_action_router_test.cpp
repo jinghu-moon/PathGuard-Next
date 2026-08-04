@@ -53,7 +53,7 @@ redirect_rules = [
     assert(result.disposition == policy_action_router::Disposition::kRedirect);
     assert(result.target.Equals("Download/Images", sizeof("Download/Images") - 1));
     assert(result.collision_mode == 1);
-    assert(result.reverse_mode == 1);
+    assert(result.reverse_mode == 0);
 
     request.relative_path = "Trips/private/secret.jpg";
     request.relative_size = sizeof("Trips/private/secret.jpg") - 1;
@@ -197,5 +197,27 @@ redirect_rules = [
         capabilities, &scratch, rewritten, sizeof(rewritten));
     assert(absolute.disposition == storage_path_adapter::RewriteDisposition::kPass);
     assert(absolute.rule_id == 0);
+
+    char canonical[4096]{};
+    assert(storage_path_adapter::CanonicalizeStoragePath(
+        "/storage/emulated/0/Pictures/test.jpg", canonical,
+        sizeof(canonical)));
+    assert(std::string_view(canonical)
+           == "/storage/emulated/0/Pictures/test.jpg");
+    assert(storage_path_adapter::CanonicalizeStoragePath(
+        "/mnt/user/0/emulated/0/Pictures/test.jpg", canonical,
+        sizeof(canonical)));
+    assert(std::string_view(canonical)
+           == "/storage/emulated/0/Pictures/test.jpg");
+    assert(!storage_path_adapter::CanonicalizeStoragePath(
+        "/mnt/user/10/emulated/0/Pictures/test.jpg", canonical,
+        sizeof(canonical)));
+    assert(!storage_path_adapter::CanonicalizeStoragePath(
+        "/storage/emulated/0/Pictures/../escape.jpg", canonical,
+        sizeof(canonical)));
+    char too_small[16]{};
+    assert(!storage_path_adapter::CanonicalizeStoragePath(
+        "/storage/emulated/0/Pictures/test.jpg", too_small,
+        sizeof(too_small)));
     return 0;
 }
