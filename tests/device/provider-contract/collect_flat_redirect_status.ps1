@@ -2,7 +2,7 @@ param(
     [string]$OutputDirectory = 'build/device-evidence/provider-flat-v1',
     [ValidateRange(1, 32)]
     [int]$RequireFlatFileCount = 3,
-    [string]$ExpectedVersion = '0.1.56-dev'
+    [string]$ExpectedVersion = '0.1.58-dev'
 )
 
 $ErrorActionPreference = 'Stop'

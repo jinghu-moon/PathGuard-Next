@@ -17,7 +17,7 @@ namespace pathguard::audit {
 namespace {
 
 constexpr std::uint32_t kMagic = UINT32_C(0x41414750);  // PGAA
-constexpr std::uint16_t kFormat = 1;
+constexpr std::uint16_t kFormat = 2;
 constexpr std::size_t kHeaderSize = 32;
 constexpr std::size_t kMaxPayload = 16 * 1024;
 constexpr std::size_t kMaxRecords = 200000;
@@ -92,8 +92,11 @@ bool ValidPath(const std::string& value) {
 bool ValidRecord(const Record& record) {
     const auto operation = static_cast<std::uint8_t>(record.operation);
     const auto confidence = static_cast<std::uint8_t>(record.confidence);
+    const auto identity_phase = static_cast<std::uint8_t>(
+        record.identity_phase);
     return operation >= 1 && operation <= 3
         && confidence >= 1 && confidence <= 4
+        && identity_phase >= 1 && identity_phase <= 2
         && record.caller_uid >= 10000 && record.rule_id != 0
         && record.observed_realtime_ns != 0
         && ValidPath(record.logical_source_path)
@@ -122,6 +125,25 @@ bool IsOlderThan(const Record& candidate, const Record& current,
         return candidate.observed_boottime_ns < current.observed_boottime_ns;
     }
     return candidate.observed_realtime_ns < current.observed_realtime_ns;
+}
+
+bool SameObject(const ObjectIdentity& expected,
+                const ObjectIdentity& observed) {
+    if (expected.device == 0 || expected.inode == 0
+        || observed.device == 0 || observed.inode == 0
+        || expected.device != observed.device
+        || expected.inode != observed.inode) {
+        return false;
+    }
+    if (!expected.handle.empty() && !observed.handle.empty()) {
+        return expected.handle_type == observed.handle_type
+            && expected.handle == observed.handle;
+    }
+    if (expected.has_birth_time && observed.has_birth_time) {
+        return expected.birth_seconds == observed.birth_seconds
+            && expected.birth_nanoseconds == observed.birth_nanoseconds;
+    }
+    return true;
 }
 
 bool PutBytes(std::vector<std::uint8_t>* out, const std::uint8_t* data,
@@ -231,6 +253,7 @@ std::vector<std::uint8_t> Encode(const Record& record) {
     }
     frame[24] = static_cast<std::uint8_t>(record.operation);
     frame[25] = static_cast<std::uint8_t>(record.confidence);
+    frame[26] = static_cast<std::uint8_t>(record.identity_phase);
     frame.insert(frame.end(), payload.begin(), payload.end());
     Set32(&frame, 12, binary_format::Crc32(frame.data(), frame.size()));
     return frame;
@@ -246,13 +269,14 @@ bool Decode(std::vector<std::uint8_t> bytes, Record* record) {
     const std::uint32_t expected = Read32(bytes.data() + 12);
     Set32(&bytes, 12, 0);
     if (binary_format::Crc32(bytes.data(), bytes.size()) != expected) return false;
-    for (std::size_t i = 26; i < kHeaderSize; ++i) {
+    for (std::size_t i = 27; i < kHeaderSize; ++i) {
         if (bytes[i] != 0) return false;
     }
     *record = {};
     record->sequence = Read64(bytes.data() + 16);
     record->operation = static_cast<Operation>(bytes[24]);
     record->confidence = static_cast<Confidence>(bytes[25]);
+    record->identity_phase = static_cast<IdentityPhase>(bytes[26]);
     Reader reader(bytes.data() + kHeaderSize, bytes.size() - kHeaderSize);
     std::uint32_t caller_uid = 0;
     std::uint8_t has_birth = 0;
@@ -404,46 +428,64 @@ Error FileJournal::Replay(std::vector<Record>* records) {
     return Error::kNone;
 }
 
+bool Store::ShouldApplyAt(std::string_view target_path,
+                          const Record& record) const {
+    const auto latest = latest_.find(target_path);
+    return latest == latest_.end()
+        || !IsOlderThan(record, latest->second, recovered_through_sequence_);
+}
+
+std::size_t Store::AdditionalStateEntries(const Record& record) const {
+    if (record.operation == Operation::kRename
+        && !ShouldApplyAt(record.previous_target_path, record)) {
+        return 0;
+    }
+    std::size_t additional = latest_.contains(record.target_path) ? 0 : 1;
+    if (record.operation == Operation::kRename
+        && record.previous_target_path != record.target_path
+        && !latest_.contains(record.previous_target_path)) {
+        ++additional;
+    }
+    return additional;
+}
+
 Error Store::Apply(const Record& record) {
     if (!ValidRecord(record) || record.sequence == 0) {
         return Error::kInvalidRecord;
     }
+    if (record.operation == Operation::kRename
+        && !ShouldApplyAt(record.previous_target_path, record)) {
+        return Error::kNone;
+    }
+    if (AdditionalStateEntries(record) > kMaxRecords - latest_.size()) {
+        return Error::kStoreLimitExceeded;
+    }
     if (record.operation == Operation::kDelete) {
-        const auto current = current_.find(record.target_path);
-        if (current == current_.end()
-            || !IsOlderThan(record, current->second,
-                            recovered_through_sequence_)) {
+        if (ShouldApplyAt(record.target_path, record)) {
             current_.erase(record.target_path);
+            latest_[record.target_path] = record;
         }
         return Error::kNone;
     }
     if (record.operation == Operation::kRename) {
-        const auto previous = current_.find(record.previous_target_path);
-        if (previous == current_.end()
-            || !IsOlderThan(record, previous->second,
-                            recovered_through_sequence_)) {
-            current_.erase(record.previous_target_path);
-        }
+        current_.erase(record.previous_target_path);
+        latest_[record.previous_target_path] = record;
     }
-    if (!current_.contains(record.target_path)
-        && current_.size() >= kMaxRecords) {
-        return Error::kStoreLimitExceeded;
-    }
-    const auto current = current_.find(record.target_path);
-    if (current == current_.end()
-        || !IsOlderThan(record, current->second,
-                        recovered_through_sequence_)) {
+    if (ShouldApplyAt(record.target_path, record)) {
         current_[record.target_path] = record;
+        latest_[record.target_path] = record;
     }
     return Error::kNone;
 }
 
 Error Store::Recover() {
+    available_ = false;
     if (journal_ == nullptr) return Error::kUnavailable;
     std::vector<Record> records;
     const Error replayed = journal_->Replay(&records);
     if (replayed != Error::kNone) return replayed;
     current_.clear();
+    latest_.clear();
     next_sequence_ = 1;
     recovered_through_sequence_ = 0;
     for (const Record& record : records) {
@@ -453,26 +495,54 @@ Error Store::Recover() {
         ++next_sequence_;
     }
     recovered_through_sequence_ = next_sequence_ - 1;
+    available_ = true;
     return Error::kNone;
 }
 
 Error Store::Observe(Record record) {
-    if (journal_ == nullptr) return Error::kUnavailable;
+    if (journal_ == nullptr || !available_) return Error::kUnavailable;
     record.sequence = next_sequence_;
     if (!ValidRecord(record)) return Error::kInvalidRecord;
-    if (record.operation != Operation::kDelete
-        && !current_.contains(record.target_path)
-        && current_.size() >= kMaxRecords
-        && (record.operation != Operation::kRename
-            || !current_.contains(record.previous_target_path))) {
+    if (AdditionalStateEntries(record) > kMaxRecords - latest_.size()) {
         return Error::kStoreLimitExceeded;
     }
     const Error appended = journal_->Append(record);
-    if (appended != Error::kNone) return appended;
+    if (appended != Error::kNone) {
+        Recover();
+        return appended;
+    }
     const Error applied = Apply(record);
-    if (applied != Error::kNone) return applied;
+    if (applied != Error::kNone) {
+        Recover();
+        return applied;
+    }
     ++next_sequence_;
     return Error::kNone;
+}
+
+Error Store::Settle(std::string_view target_path, std::int32_t caller_uid,
+                    std::uint64_t observed_realtime_ns,
+                    std::uint64_t observed_boottime_ns,
+                    ObjectIdentity identity) {
+    if (caller_uid < 10000 || observed_realtime_ns == 0
+        || identity.confidence() == Confidence::kPathOnly) {
+        return Error::kInvalidRecord;
+    }
+    const auto found = current_.find(target_path);
+    if (found == current_.end() || found->second.caller_uid != caller_uid
+        || !SameObject(found->second.identity, identity)) {
+        return Error::kNone;
+    }
+    Record settled = found->second;
+    settled.operation = Operation::kUpsert;
+    settled.confidence = identity.confidence();
+    settled.identity_phase = IdentityPhase::kSettled;
+    settled.observed_realtime_ns = observed_realtime_ns;
+    settled.observed_boottime_ns = observed_boottime_ns;
+    settled.sequence = 0;
+    settled.previous_target_path.clear();
+    settled.identity = std::move(identity);
+    return Observe(std::move(settled));
 }
 
 bool Store::CurrentAt(std::size_t index, Record* output) const {

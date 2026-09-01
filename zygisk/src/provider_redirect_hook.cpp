@@ -28,6 +28,7 @@
 #include <sys/syscall.h>
 #include <sys/statvfs.h>
 #include <sys/inotify.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
@@ -90,6 +91,7 @@ using BinderClearIdentityFn = jlong (*)();
 using BinderRestoreIdentityFn = void (*)(jlong);
 using DlopenFn = void* (*)(const char*, int);
 using AndroidDlopenExtFn = void* (*)(const char*, int, const android_dlextinfo*);
+using CloseFn = int (*)(int);
 
 using FuseRequest = void*;
 struct FuseContext {
@@ -184,6 +186,7 @@ BinderClearIdentityFn g_binder_clear_identity = nullptr;
 BinderRestoreIdentityFn g_binder_restore_identity = nullptr;
 DlopenFn g_dlopen = nullptr;
 AndroidDlopenExtFn g_android_dlopen_ext = nullptr;
+CloseFn g_fuse_close = nullptr;
 FuseReqUserdataFn g_fuse_req_userdata = nullptr;
 FuseReqContextFn g_fuse_req_context = nullptr;
 FuseReplyErrFn g_fuse_reply_err = nullptr;
@@ -622,6 +625,7 @@ bool BuildAuditRequest(
     output->record.observed_boottime_ns = ClockNanoseconds(CLOCK_BOOTTIME);
     output->record.operation = operation;
     output->record.confidence = audit_protocol::Confidence::kPathOnly;
+    output->record.identity_phase = audit_protocol::IdentityPhase::kInitial;
     return output->record.observed_realtime_ns != 0
         && storage_path_adapter::CanonicalizeStoragePath(
             logical_path, output->record.logical_source,
@@ -709,6 +713,120 @@ bool PolicyRequestsAudit(const RuntimePolicySnapshot& runtime) {
         }
     }
     return false;
+}
+
+bool IsAuditedTargetPath(const RuntimePolicySnapshot& runtime, int32_t uid,
+                         const char* canonical_path) {
+    storage_path_adapter::LogicalPath logical;
+    if (uid < 10000 || canonical_path == nullptr
+        || !storage_path_adapter::ParseLogicalPath(
+            canonical_path, &logical)) {
+        return false;
+    }
+    for (uint32_t scope_index = 0; scope_index < runtime.scope_count;
+         ++scope_index) {
+        if (runtime.scopes[scope_index].caller_uid != uid) continue;
+        policy_v6_view::PackageRef package;
+        if (!runtime.policy.PackageAt(
+                runtime.scopes[scope_index].package_index, &package)) {
+            continue;
+        }
+        for (uint32_t action_index = 0; action_index < package.action_count;
+             ++action_index) {
+            policy_v6_view::ActionRef action;
+            policy_v6_view::StringRef target;
+            if (!runtime.policy.ActionAt(
+                    package.first_action + action_index, &action)
+                || action.kind != 1
+                || action.domain != static_cast<uint8_t>(runtime.domain)
+                || (action.options
+                    & binary_format::kActionOptionPrivateAudit) == 0
+                || !runtime.policy.StringAt(action.target_id, &target)) {
+                continue;
+            }
+            char target_root[PATH_MAX]{};
+            if (!storage_path_adapter::AppendTarget(
+                    logical, target, logical.relative_size,
+                    target_root, sizeof(target_root))) {
+                continue;
+            }
+            const size_t root_size = strlen(target_root);
+            if (strncmp(canonical_path, target_root, root_size) == 0
+                && canonical_path[root_size] == '/') {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool BuildSettledAuditRequest(int fd, audit_protocol::Request* output) {
+    if (fd < 0 || output == nullptr || g_audit_queue == nullptr
+        || g_policy_domain == nullptr) {
+        return false;
+    }
+    char descriptor[64]{};
+    const int descriptor_size = snprintf(
+        descriptor, sizeof(descriptor), "/proc/self/fd/%d", fd);
+    char path[PATH_MAX]{};
+    const ssize_t path_size = descriptor_size > 0
+            && static_cast<size_t>(descriptor_size) < sizeof(descriptor)
+        ? syscall(SYS_readlinkat, AT_FDCWD, descriptor,
+                  path, sizeof(path) - 1)
+        : -1;
+    if (path_size <= 0 || static_cast<size_t>(path_size) >= sizeof(path)) {
+        return false;
+    }
+    path[path_size] = '\0';
+    constexpr char kDeletedSuffix[] = " (deleted)";
+    if (static_cast<size_t>(path_size) >= sizeof(kDeletedSuffix) - 1
+        && strcmp(path + path_size - (sizeof(kDeletedSuffix) - 1),
+                  kDeletedSuffix) == 0) {
+        return false;
+    }
+    char canonical[PATH_MAX]{};
+    if (!storage_path_adapter::CanonicalizeStoragePath(
+            path, canonical, sizeof(canonical))) {
+        return false;
+    }
+    const int32_t uid = EffectiveCallingUid();
+    auto snapshot_guard = g_policy_domain->Acquire(GetThreadState());
+    if (!snapshot_guard
+        || !IsAuditedTargetPath(*snapshot_guard, uid, canonical)) {
+        return false;
+    }
+    *output = {};
+    output->command = audit_protocol::Command::kSettle;
+    output->record.caller_uid = uid;
+    output->record.observed_realtime_ns = ClockNanoseconds(CLOCK_REALTIME);
+    output->record.observed_boottime_ns = ClockNanoseconds(CLOCK_BOOTTIME);
+    output->record.operation = audit_protocol::Operation::kUpsert;
+    output->record.identity_phase = audit_protocol::IdentityPhase::kSettled;
+    audit_protocol::Confidence confidence =
+        audit_protocol::Confidence::kPathOnly;
+    if (output->record.observed_realtime_ns == 0
+        || !CaptureAuditIdentity(
+            fd, &output->record.identity, &confidence)
+        || confidence == audit_protocol::Confidence::kPathOnly) {
+        return false;
+    }
+    output->record.confidence = confidence;
+    return snprintf(output->record.target_path,
+                    sizeof(output->record.target_path), "%s", canonical) > 0;
+}
+
+int HookedFuseClose(int fd) {
+    if (g_fuse_close == nullptr) return static_cast<int>(syscall(SYS_close, fd));
+    if (__atomic_load_n(&g_fuse_install_state, __ATOMIC_ACQUIRE) != 2) {
+        return g_fuse_close(fd);
+    }
+    audit_protocol::Request settled;
+    const bool ready = BuildSettledAuditRequest(fd, &settled);
+    const int result = g_fuse_close(fd);
+    const int call_errno = errno;
+    if (result == 0 && ready) EnqueueAudit(settled);
+    errno = call_errno;
+    return result;
 }
 
 bool SendTransactionStep(provenance_protocol::Request* request,
@@ -1695,7 +1813,10 @@ int HookedInotifyAddWatch(int fd, const char* path, uint32_t mask) {
 }
 
 void CaptureFuseRequest(FuseRequest request, const FuseContext* context) {
-    if (context == nullptr) return;
+    if (__atomic_load_n(&g_fuse_install_state, __ATOMIC_ACQUIRE) != 2
+        || context == nullptr) {
+        return;
+    }
     BeginFuseRequest(GetThreadState(), request, static_cast<int32_t>(context->uid),
                      static_cast<int32_t>(getuid()));
 }
@@ -1715,6 +1836,7 @@ const FuseContext* HookedFuseReqContext(FuseRequest request) {
 }
 
 void FinishFuseRequest(FuseRequest request) {
+    if (__atomic_load_n(&g_fuse_install_state, __ATOMIC_ACQUIRE) != 2) return;
     EndFuseRequest(GetThreadState(), request);
 }
 
@@ -1845,6 +1967,24 @@ struct RegistrationContext {
     uint32_t registration_count = 0;
 };
 
+struct ImageImports {
+    const ElfW(Sym)* symbols = nullptr;
+    const char* strings = nullptr;
+    uintptr_t relocations = 0;
+    size_t string_size = 0;
+    size_t count = 0;
+    ElfW(Sxword) relocation_type = 0;
+};
+
+struct DirectPatchContext {
+    const HookSpec* specs;
+    size_t spec_count;
+    bool (*target)(const char*);
+    uint32_t image_count = 0;
+    uint32_t patch_count = 0;
+    uint32_t failure_count = 0;
+};
+
 bool AddressInImage(const dl_phdr_info& info, uintptr_t address) {
     for (ElfW(Half) index = 0; index < info.dlpi_phnum; ++index) {
         const ElfW(Phdr)& header = info.dlpi_phdr[index];
@@ -1868,6 +2008,125 @@ size_t RelocationSymbolIndex(ElfW(Xword) info) {
 #else
     return ELF32_R_SYM(info);
 #endif
+}
+
+bool ResolveImageImports(const dl_phdr_info& info, ImageImports* output) {
+    if (output == nullptr) return false;
+    const ElfW(Dyn)* dynamic = nullptr;
+    size_t dynamic_count = 0;
+    for (ElfW(Half) index = 0; index < info.dlpi_phnum; ++index) {
+        const ElfW(Phdr)& header = info.dlpi_phdr[index];
+        if (header.p_type != PT_DYNAMIC) continue;
+        dynamic = reinterpret_cast<const ElfW(Dyn)*>(
+            info.dlpi_addr + header.p_vaddr);
+        dynamic_count = header.p_memsz / sizeof(ElfW(Dyn));
+        break;
+    }
+    if (dynamic == nullptr || dynamic_count == 0) return false;
+
+    uintptr_t string_table = 0;
+    uintptr_t symbol_table = 0;
+    uintptr_t relocations = 0;
+    size_t string_size = 0;
+    size_t relocation_size = 0;
+    ElfW(Sxword) relocation_type = 0;
+    for (size_t index = 0; index < dynamic_count; ++index) {
+        const ElfW(Dyn)& entry = dynamic[index];
+        if (entry.d_tag == DT_NULL) break;
+        switch (entry.d_tag) {
+            case DT_STRTAB:
+                string_table = ResolveDynamicAddress(info, entry.d_un.d_ptr);
+                break;
+            case DT_STRSZ: string_size = entry.d_un.d_val; break;
+            case DT_SYMTAB:
+                symbol_table = ResolveDynamicAddress(info, entry.d_un.d_ptr);
+                break;
+            case DT_JMPREL:
+                relocations = ResolveDynamicAddress(info, entry.d_un.d_ptr);
+                break;
+            case DT_PLTRELSZ: relocation_size = entry.d_un.d_val; break;
+            case DT_PLTREL: relocation_type = entry.d_un.d_val; break;
+            default: break;
+        }
+    }
+    if (string_table == 0 || symbol_table == 0 || relocations == 0
+        || string_size == 0 || relocation_size == 0
+        || (relocation_type != DT_REL && relocation_type != DT_RELA)) {
+        return false;
+    }
+    const size_t entry_size = relocation_type == DT_RELA
+        ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+    *output = {
+        reinterpret_cast<const ElfW(Sym)*>(symbol_table),
+        reinterpret_cast<const char*>(string_table), relocations, string_size,
+        relocation_size / entry_size, relocation_type};
+    return true;
+}
+
+ElfW(Xword) RelocationInfoAt(const ImageImports& imports, size_t index) {
+    return imports.relocation_type == DT_RELA
+        ? reinterpret_cast<const ElfW(Rela)*>(imports.relocations)[index].r_info
+        : reinterpret_cast<const ElfW(Rel)*>(imports.relocations)[index].r_info;
+}
+
+ElfW(Addr) RelocationOffsetAt(const ImageImports& imports, size_t index) {
+    return imports.relocation_type == DT_RELA
+        ? reinterpret_cast<const ElfW(Rela)*>(imports.relocations)[index].r_offset
+        : reinterpret_cast<const ElfW(Rel)*>(imports.relocations)[index].r_offset;
+}
+
+int SegmentProtection(const dl_phdr_info& info, uintptr_t address) {
+    int protection = 0;
+    for (ElfW(Half) index = 0; index < info.dlpi_phnum; ++index) {
+        const ElfW(Phdr)& header = info.dlpi_phdr[index];
+        if (header.p_type != PT_LOAD) continue;
+        const uintptr_t begin = info.dlpi_addr + header.p_vaddr;
+        if (address < begin || address >= begin + header.p_memsz) continue;
+        if ((header.p_flags & PF_R) != 0) protection |= PROT_READ;
+        if ((header.p_flags & PF_W) != 0) protection |= PROT_WRITE;
+        if ((header.p_flags & PF_X) != 0) protection |= PROT_EXEC;
+        break;
+    }
+    if (protection == 0) return 0;
+    for (ElfW(Half) index = 0; index < info.dlpi_phnum; ++index) {
+        const ElfW(Phdr)& header = info.dlpi_phdr[index];
+        if (header.p_type != PT_GNU_RELRO) continue;
+        const uintptr_t begin = info.dlpi_addr + header.p_vaddr;
+        if (address >= begin && address < begin + header.p_memsz) {
+            protection &= ~PROT_WRITE;
+            break;
+        }
+    }
+    return protection;
+}
+
+bool PatchImportSlot(const dl_phdr_info& info, uintptr_t address,
+                     const HookSpec& spec) {
+    if (address == 0 || spec.replacement == nullptr || spec.original == nullptr) {
+        return false;
+    }
+    auto** slot = reinterpret_cast<void**>(address);
+    void* original = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+    if (original == nullptr || original == spec.replacement) return false;
+    const long page_size_value = sysconf(_SC_PAGESIZE);
+    if (page_size_value <= 0) return false;
+    const size_t page_size = static_cast<size_t>(page_size_value);
+    const uintptr_t page = address & ~(static_cast<uintptr_t>(page_size) - 1u);
+    const int protection = SegmentProtection(info, address);
+    if (protection == 0
+        || mprotect(reinterpret_cast<void*>(page), page_size,
+                    protection | PROT_WRITE) != 0) {
+        return false;
+    }
+    *spec.original = original;
+    __atomic_store_n(slot, spec.replacement, __ATOMIC_RELEASE);
+    if (mprotect(reinterpret_cast<void*>(page), page_size, protection) == 0) {
+        return true;
+    }
+    __atomic_store_n(slot, original, __ATOMIC_RELEASE);
+    *spec.original = nullptr;
+    (void)mprotect(reinterpret_cast<void*>(page), page_size, protection);
+    return false;
 }
 
 bool StatMappedImage(const char* path, struct stat* identity) {
@@ -1909,62 +2168,55 @@ int RegisterImageImports(dl_phdr_info* info, size_t, void* opaque) {
     if (!StatMappedImage(info->dlpi_name, &identity)
         || identity.st_dev == 0 || identity.st_ino == 0) return 0;
 
-    const ElfW(Dyn)* dynamic = nullptr;
-    size_t dynamic_count = 0;
-    for (ElfW(Half) index = 0; index < info->dlpi_phnum; ++index) {
-        const ElfW(Phdr)& header = info->dlpi_phdr[index];
-        if (header.p_type != PT_DYNAMIC) continue;
-        dynamic = reinterpret_cast<const ElfW(Dyn)*>(
-            info->dlpi_addr + header.p_vaddr);
-        dynamic_count = header.p_memsz / sizeof(ElfW(Dyn));
-        break;
-    }
-    if (dynamic == nullptr || dynamic_count == 0) return 0;
-
-    uintptr_t string_table = 0;
-    uintptr_t symbol_table = 0;
-    uintptr_t relocations = 0;
-    size_t string_size = 0;
-    size_t relocation_size = 0;
-    ElfW(Sxword) relocation_type = 0;
-    for (size_t index = 0; index < dynamic_count; ++index) {
-        const ElfW(Dyn)& entry = dynamic[index];
-        if (entry.d_tag == DT_NULL) break;
-        switch (entry.d_tag) {
-            case DT_STRTAB:
-                string_table = ResolveDynamicAddress(*info, entry.d_un.d_ptr);
-                break;
-            case DT_STRSZ: string_size = entry.d_un.d_val; break;
-            case DT_SYMTAB:
-                symbol_table = ResolveDynamicAddress(*info, entry.d_un.d_ptr);
-                break;
-            case DT_JMPREL:
-                relocations = ResolveDynamicAddress(*info, entry.d_un.d_ptr);
-                break;
-            case DT_PLTRELSZ: relocation_size = entry.d_un.d_val; break;
-            case DT_PLTREL: relocation_type = entry.d_un.d_val; break;
-            default: break;
-        }
-    }
-    if (string_table == 0 || symbol_table == 0 || relocations == 0
-        || string_size == 0 || relocation_size == 0
-        || (relocation_type != DT_REL && relocation_type != DT_RELA)) return 0;
+    ImageImports imports;
+    if (!ResolveImageImports(*info, &imports)) return 0;
 
     ++context->image_count;
-    const auto* symbols = reinterpret_cast<const ElfW(Sym)*>(symbol_table);
-    const auto* strings = reinterpret_cast<const char*>(string_table);
-    const size_t entry_size = relocation_type == DT_RELA
-        ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
-    const size_t count = relocation_size / entry_size;
     uint64_t registered = 0;
-    for (size_t index = 0; index < count; ++index) {
-        const ElfW(Xword) relocation_info = relocation_type == DT_RELA
-            ? reinterpret_cast<const ElfW(Rela)*>(relocations)[index].r_info
-            : reinterpret_cast<const ElfW(Rel)*>(relocations)[index].r_info;
-        const ElfW(Sym)& imported = symbols[RelocationSymbolIndex(relocation_info)];
-        if (imported.st_name >= string_size) continue;
+    for (size_t index = 0; index < imports.count; ++index) {
+        const ElfW(Sym)& imported = imports.symbols[
+            RelocationSymbolIndex(RelocationInfoAt(imports, index))];
+        if (imported.st_name >= imports.string_size) continue;
         RegisterImportedSymbol(context, identity.st_dev, identity.st_ino,
-                               strings + imported.st_name, &registered);
+                               imports.strings + imported.st_name, &registered);
+    }
+    return 0;
+}
+
+int PatchImageImports(dl_phdr_info* info, size_t, void* opaque) {
+    auto* context = static_cast<DirectPatchContext*>(opaque);
+    if (info == nullptr || info->dlpi_name == nullptr || context == nullptr
+        || context->target == nullptr || !context->target(info->dlpi_name)) {
+        return 0;
+    }
+    ImageImports imports;
+    if (!ResolveImageImports(*info, &imports)) return 0;
+
+    ++context->image_count;
+    uint64_t patched = 0;
+    for (size_t relocation_index = 0;
+         relocation_index < imports.count; ++relocation_index) {
+        const ElfW(Sym)& imported = imports.symbols[RelocationSymbolIndex(
+            RelocationInfoAt(imports, relocation_index))];
+        if (imported.st_name >= imports.string_size) continue;
+        const char* symbol = imports.strings + imported.st_name;
+        for (size_t spec_index = 0; spec_index < context->spec_count;
+             ++spec_index) {
+            const uint64_t bit = uint64_t{1} << spec_index;
+            if ((patched & bit) != 0
+                || strcmp(context->specs[spec_index].symbol, symbol) != 0) {
+                continue;
+            }
+            const uintptr_t slot = ResolveDynamicAddress(
+                *info, RelocationOffsetAt(imports, relocation_index));
+            if (PatchImportSlot(*info, slot, context->specs[spec_index])) {
+                patched |= bit;
+                ++context->patch_count;
+            } else {
+                ++context->failure_count;
+            }
+            break;
+        }
     }
     return 0;
 }
@@ -2025,14 +2277,26 @@ const HookSpec kHookSpecs[] = {
         HOOK("fuse_reply_create", HookedFuseReplyCreate, g_fuse_reply_create),
         HOOK("fuse_reply_none", HookedFuseReplyNone, g_fuse_reply_none),
 };
+const HookSpec kFuseCompletionHookSpecs[] = {
+        HOOK("close", HookedFuseClose, g_fuse_close),
+};
 #undef HOOK
 static_assert(sizeof(kHookSpecs) / sizeof(kHookSpecs[0]) <= 64);
+static_assert(sizeof(kFuseCompletionHookSpecs)
+              / sizeof(kFuseCompletionHookSpecs[0]) == 1);
 
 RegistrationContext RegisterMappedHooks(zygisk::Api* api,
                                         bool (*target)(const char*)) {
     RegistrationContext context{
         api, kHookSpecs, sizeof(kHookSpecs) / sizeof(kHookSpecs[0]), target};
     dl_iterate_phdr(RegisterImageImports, &context);
+    return context;
+}
+
+DirectPatchContext PatchMappedImports(const HookSpec* specs, size_t spec_count,
+                                      bool (*target)(const char*)) {
+    DirectPatchContext context{specs, spec_count, target};
+    dl_iterate_phdr(PatchImageImports, &context);
     return context;
 }
 
@@ -2095,7 +2359,7 @@ InstallResult RegisterHooks(zygisk::Api* api, bool binder_identity_hooks) {
 }
 
 void MaybeInstallFuseHooks(const char* path, void* handle) {
-    if (!IsFuseHookTarget(path) || g_api == nullptr) return;
+    if (!IsFuseHookTarget(path)) return;
     uint32_t expected = 0;
     if (!__atomic_compare_exchange_n(&g_fuse_install_state, &expected, 1, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
@@ -2105,19 +2369,29 @@ void MaybeInstallFuseHooks(const char* path, void* handle) {
         g_fuse_req_context = reinterpret_cast<FuseReqContextFn>(
             dlsym(handle, "fuse_req_ctx"));
     }
-    const RegistrationContext context = RegisterMappedHooks(g_api, IsFuseHookTarget);
-    const bool committed = context.registration_count != 0
-        && g_api->pltHookCommit();
+    const DirectPatchContext context = PatchMappedImports(
+        kHookSpecs, sizeof(kHookSpecs) / sizeof(kHookSpecs[0]),
+        IsFuseHookTarget);
+    const DirectPatchContext completion_context = PatchMappedImports(
+        kFuseCompletionHookSpecs,
+        sizeof(kFuseCompletionHookSpecs) / sizeof(kFuseCompletionHookSpecs[0]),
+        IsFuseHookTarget);
+    const bool committed = context.failure_count == 0
+        && completion_context.failure_count == 0
+        && completion_context.patch_count == 1;
     const bool request_scope = g_fuse_req_userdata != nullptr
         && g_fuse_req_context != nullptr && g_fuse_reply_err != nullptr
         && g_fuse_reply_create != nullptr;
     const bool active = committed && request_scope;
     __atomic_store_n(&g_fuse_install_state, active ? 2u : 3u, __ATOMIC_RELEASE);
-    LOGI("provider FUSE hooks: images=%u registrations=%u committed=%d active=%d "
-         "request=%p context=%p reply_err=%p reply_create=%p",
-         context.image_count, context.registration_count, committed ? 1 : 0,
+    LOGI("provider FUSE hooks: images=%u registrations=%u completion=%u failures=%u committed=%d active=%d "
+         "request=%p context=%p reply_err=%p reply_create=%p close=%p",
+         context.image_count, context.patch_count,
+         completion_context.patch_count,
+         context.failure_count + completion_context.failure_count,
+         committed ? 1 : 0,
          active ? 1 : 0, g_fuse_req_userdata, g_fuse_req_context,
-         g_fuse_reply_err, g_fuse_reply_create);
+         g_fuse_reply_err, g_fuse_reply_create, g_fuse_close);
 }
 
 }  // namespace

@@ -33,6 +33,11 @@ enum class Confidence : std::uint8_t {
     kFileHandle = 4,
 };
 
+enum class IdentityPhase : std::uint8_t {
+    kInitial = 1,
+    kSettled = 2,
+};
+
 struct ObjectIdentity {
     std::uint64_t device = 0;
     std::uint64_t inode = 0;
@@ -55,6 +60,7 @@ struct ObjectIdentity {
 struct Record {
     Operation operation = Operation::kUpsert;
     Confidence confidence = Confidence::kPathOnly;
+    IdentityPhase identity_phase = IdentityPhase::kInitial;
     std::int32_t caller_uid = -1;
     std::uint32_t user_id = 0;
     std::uint64_t rule_id = 0;
@@ -103,6 +109,10 @@ public:
     explicit Store(Journal* journal) : journal_(journal) {}
     Error Recover();
     Error Observe(Record record);
+    Error Settle(std::string_view target_path, std::int32_t caller_uid,
+                 std::uint64_t observed_realtime_ns,
+                 std::uint64_t observed_boottime_ns,
+                 ObjectIdentity identity);
     std::size_t current_count() const noexcept { return current_.size(); }
     std::uint64_t generation() const noexcept {
         return next_sequence_ == 0 ? 0 : next_sequence_ - 1;
@@ -110,11 +120,16 @@ public:
     bool CurrentAt(std::size_t index, Record* output) const;
     std::optional<Record> Find(std::string_view target_path) const;
 private:
+    bool ShouldApplyAt(std::string_view target_path,
+                       const Record& record) const;
+    std::size_t AdditionalStateEntries(const Record& record) const;
     Error Apply(const Record& record);
     Journal* journal_ = nullptr;
+    bool available_ = true;
     std::uint64_t next_sequence_ = 1;
     std::uint64_t recovered_through_sequence_ = 0;
     std::map<std::string, Record, std::less<>> current_;
+    std::map<std::string, Record, std::less<>> latest_;
 };
 
 }  // namespace pathguard::audit

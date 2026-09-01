@@ -2,13 +2,15 @@ param(
     [string]$OutputDirectory = 'build/device-evidence/private-audit-v1',
     [ValidateRange(1, 1000)]
     [int]$RequireRecordCount = 1,
+    [ValidateRange(0, 1000)]
+    [int]$RequireSettledCount = 1,
     [string[]]$RequireSourcePrefix = @(
         '/storage/emulated/0/Download/localsend-source/',
         '/storage/emulated/0/Pictures/'
     ),
     [string]$ExpectedTargetPrefix =
         '/storage/emulated/0/Download/localsend-redirect/',
-    [string]$ExpectedVersion = '0.1.56-dev'
+    [string]$ExpectedVersion = '0.1.58-dev'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,6 +74,10 @@ foreach ($record in $records) {
             $ExpectedTargetPrefix, [StringComparison]::Ordinal)) {
         throw "audit target escaped the flat redirect root; evidence: $output"
     }
+}
+$settled = @($records | Where-Object { $_.metadata_phase -eq 'settled' })
+if ($settled.Count -lt $RequireSettledCount) {
+    throw "observed $($settled.Count) settled audit record(s), expected at least $RequireSettledCount; evidence: $output"
 }
 foreach ($prefix in $RequireSourcePrefix) {
     $matched = @($records | Where-Object {

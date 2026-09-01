@@ -55,7 +55,31 @@ separately:
 ```
 
 This gate reads the daemon snapshot through `audit.sock`; it never opens the
-live WAL directly. It requires observed `Download/localsend-source/` and
-`Pictures/` app-path writes. Mount-only, direct-syscall, or otherwise unhooked
-file operations remain outside the audit coverage and must not be inferred
-from missing records.
+live WAL directly. For `0.1.58-dev` it requires observed
+`Download/localsend-source/` and `Pictures/` app-path writes plus at least one
+identity-verified `metadata_phase=settled` record. Mount-only, direct-syscall,
+or otherwise unhooked file operations remain outside the audit coverage and
+must not be inferred from missing records.
+
+To determine whether a real completion boundary is observable for settled
+metadata, open LocalSend first, run the bounded trace collector, and receive
+one large file before its timer expires:
+
+```powershell
+.\tests\device\provider-contract\collect_audit_completion_trace.ps1
+```
+
+The collector attaches only to LocalSend. It records bounded
+`close/fsync/fdatasync/ftruncate` events with decoded file descriptors for 45
+seconds, then stops only the trace process it created. It must never ptrace
+MediaProvider or ExternalStorageProvider: resolving decoded descriptors while
+MediaProvider is stopped can recursively enter the same FUSE daemon and
+deadlock the shared-storage stack. A remote watchdog also stops the tracer if
+the host command is interrupted.
+This evidence decides where a settled audit event can be emitted; a fixed
+delay is not accepted as a completion signal.
+
+The collector relaxes read permissions only on its own
+`/data/local/tmp/pathguard-audit-trace-*` directory and trace files. A failed
+`adb pull` or an empty local trace directory is an explicit collection failure;
+`0 files pulled` is not evidence that no completion event occurred.

@@ -191,6 +191,16 @@ static const char* AuditConfidenceName(pathguard::audit::Confidence confidence) 
     return "unknown";
 }
 
+static const char* AuditIdentityPhaseName(
+        pathguard::audit::IdentityPhase phase) {
+    using pathguard::audit::IdentityPhase;
+    switch (phase) {
+        case IdentityPhase::kInitial: return "initial";
+        case IdentityPhase::kSettled: return "settled";
+    }
+    return "unknown";
+}
+
 static bool LoadAuditSnapshot(
         const fs::path& module_dir, std::vector<pathguard::audit::Record>* records,
         std::uint64_t* generation) {
@@ -243,6 +253,8 @@ static bool LoadAuditSnapshot(
         pathguard::audit::Record record;
         record.operation = static_cast<pathguard::audit::Operation>(wire.operation);
         record.confidence = static_cast<pathguard::audit::Confidence>(wire.confidence);
+        record.identity_phase = static_cast<pathguard::audit::IdentityPhase>(
+            wire.identity_phase);
         record.caller_uid = wire.caller_uid;
         record.user_id = wire.user_id;
         record.rule_id = wire.rule_id;
@@ -312,6 +324,8 @@ static int PrintAudit(const fs::path& module_dir, bool json) {
                       << JsonEscape(AuditOperationName(record.operation))
                       << ",\"confidence\":"
                       << JsonEscape(AuditConfidenceName(record.confidence))
+                      << ",\"metadata_phase\":"
+                      << JsonEscape(AuditIdentityPhaseName(record.identity_phase))
                       << ",\"caller_uid\":" << record.caller_uid
                       << ",\"user_id\":" << record.user_id
                       << ",\"rule_id\":" << record.rule_id
@@ -356,6 +370,8 @@ static int PrintAudit(const fs::path& module_dir, bool json) {
                       << AuditOperationName(record.operation)
                       << " confidence="
                       << AuditConfidenceName(record.confidence)
+                      << " metadata_phase="
+                      << AuditIdentityPhaseName(record.identity_phase)
                       << " uid=" << record.caller_uid
                       << " rule_id=" << record.rule_id
                       << " source=" << record.logical_source_path

@@ -19,6 +19,7 @@ enum class Command : uint16_t {
     kObserve = 1,
     kSnapshotInfo = 2,
     kSnapshotRecord = 3,
+    kSettle = 4,
 };
 
 enum class Operation : uint8_t {
@@ -32,6 +33,11 @@ enum class Confidence : uint8_t {
     kInodeMetadata = 2,
     kBirthTime = 3,
     kFileHandle = 4,
+};
+
+enum class IdentityPhase : uint8_t {
+    kInitial = 1,
+    kSettled = 2,
 };
 
 enum class Error : uint8_t {
@@ -81,7 +87,8 @@ struct Record {
     uint64_t sequence = 0;
     Operation operation = Operation::kUpsert;
     Confidence confidence = Confidence::kPathOnly;
-    uint8_t reserved[6]{};
+    IdentityPhase identity_phase = IdentityPhase::kInitial;
+    uint8_t reserved[5]{};
     Identity identity{};
     char logical_source[kPathCapacity]{};
     char target_path[kPathCapacity]{};

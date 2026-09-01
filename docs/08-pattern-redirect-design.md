@@ -908,6 +908,41 @@ WAL 使用版本化 frame、CRC32、严格长度校验和断尾修复，限制�
 redirect。设备重启后，本次 daemon 会话的新事件可覆盖 WAL 恢复记录，避免重置后的 boottime
 被误判为旧事件。
 
+Private Audit 的数据库正确性与文件完成语义分开验收。WAL 必须在完整 append 失败、部分 frame、
+`fsync` 结果不确定、重复/乱序事件、rename/delete 交错和重启恢复后保持可解释状态；任何不能确定
+是否持久化的 append 都不得继续复用 sequence 并污染后续回放。CRC 正确但 sequence 缺口、完整
+frame CRC 错误和中段损坏视为 `corrupt`，只有末尾不完整 frame 可以自动截断。达到容量上限时审计
+必须显式降级，redirect 仍正常；启用生产级审计前必须提供 checkpoint/compaction 或明确的有界
+保留策略，不能让一次 64 MiB 耗尽永久停止后续审计。
+
+`dev/inode/size/mtime/ctime` 是采样时刻的 identity snapshot，不天然等于写入完成后的最终元数据。
+Provider 成功 `open` 后可能把 fd 交给另一进程继续写入，因此 open 时 `size=0` 是合法的 initial
+snapshot，但不得被 UI、CLI 或测试解释为 settled/final。最终元数据只有在观察到真实完成边界后
+才能标记为 settled；固定 sleep、猜测文件大小稳定或只在查询时临时 `stat` 都不能升级准确性声明。
+当前 settled 只观察 `libfuse_jni` 内 FUSE handle 析构时的 backing-fd close：close 前通过 fd 采样
+identity，且 canonical target 必须属于当前 caller UID 的 `audit=true` action；close 成功后才提交
+target-only settle 请求。daemon 只在已有 initial 记录的 caller UID 与 dev/inode（可用时进一步比较
+BTIME/file handle）一致时合并为完整 settled upsert。缺少 initial、队列丢失、身份不一致、未知 target
+或 Hook 不可用均保持 initial，不创建来源记录，也不影响 close 的返回值和 `errno`。
+
+MediaProvider 将 `libfuse_jni.so` 作为 APK 内 ELF 延迟加载，而当前 Magisk 环境已证明 specialize 后的
+增量 `pltHookCommit()` 固定失败。completion adapter 因此只在已拦截的 `android_dlopen_ext()` 成功返回
+后，直接修改该 ELF 自身已解析的 PLT/GOT 导入槽；不 Hook 全局 libc，不加载 LSPlant，也不触及其他
+image。写入期间临时放开目标页权限并恢复原 PT_LOAD/PT_GNU_RELRO 保护；任一必需 request/reply/close
+导入缺失、修改失败或保护恢复失败时，原子状态保持 inactive，所有已安装回调只透传原函数。
+
+该边界来自真实 SAF/MediaStore 链路和 AOSP `pf_release()` 生命周期。禁止用 ptrace 附加
+MediaProvider 验证：`strace -yy` 解析 fd 时可能递归进入被暂停的同一 FUSE daemon并自锁。设备采集器
+只跟踪 LocalSend 的有界 close/fsync 事件；在不满足上述专用 Hook 条件的设备上，settled 准确降级为
+not observed。Private Audit 的 initial/settled 状态均不得参与重定向、命名或文件可用性判断。
+仍可用于路径归属和 initial inode 关联，但不能用于内容完整性判断。
+
+数据库测试按以下层级冻结：P0 覆盖 append 结果不确定后的恢复、路径 canonical key 去重、重复/乱序
+upsert/rename/delete、跨重启时钟和 initial/settled 元数据阶段；P1 覆盖 64 MiB/200000 上限、快照读取
+期间 generation 变化的有界重试、malformed wire、非 root peer 和队列 wrap/drop；P2 才覆盖长时间
+soak、性能预算和多 ROM 差异。Private Audit 未通过 P0/P1 前只能标记为实验性高级能力，不阻塞
+扁平 redirect 发布。
+
 该审计是事实记录而不是绝对 provenance：当前只覆盖统一 path hook 实际观察到的操作。纯 mount
 路径、direct syscall、未 Hook 的外部文件管理器修改或掉队事件可能导致缺失/陈旧记录。LocalSend
 关闭“保存到相册”时使用 SAF，真实文件 I/O 由 `com.android.externalstorage` 代写；保存到相册的
@@ -915,7 +950,7 @@ redirect。设备重启后，本次 daemon 会话的新事件可覆盖 WAL 恢�
 action，只在实际执行 Provider I/O 的 action 上设置 `audit = true`。审计仍只接受成功的写 open、
 create、truncate、rename、link、metadata mutation 和 delete，后续只读 access/stat/realpath/open
 不会生成来源记录。目录 mount 规则不声明审计。root 用户可用
-`pathguardctl audit /data/adb/modules/pathguard_next [--json]` 读取 daemon 快照；CLI
+  `pathguardctl audit /data/adb/modules/pathguard_next [--json]` 读取 daemon 快照；CLI
 不直接打开活动 WAL。审计当前没有普通用户 UI，也不得用于恢复来源视图、隐藏文件或决定 I/O。
 
 文件型 app-path redirect 的准入只要求 `lookup/stat`、`access`、读写 open、create、rename 和

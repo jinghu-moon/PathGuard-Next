@@ -2168,8 +2168,90 @@ path-I/O 继续作为稳定基线；任何新增 adapter 检查失败都保持 b
   明确记录 `platform_app`/`mediaprovider_app` 向 `zygote` `unix_stream_socket` 的 `{ write }` 被拒绝。
   因此预连接 socket 方案已否决。下一候选改为 pre-specialize 创建 memfd 固定容量共享队列并以
   SCM_RIGHTS 交给 root companion；specialize 后 Provider 仅原子入队，不创建 worker、不执行 IPC，
-  由 companion 校验进程身份后消费并转发 daemon。`0.1.55-dev` 已通过 Host Release/Clang UBSan
-  static 各 `85/85`、NDK r27d 与 LSPlant 双 ABI构建；WAL/记录等待新候选真机复验。
+  由 companion 校验进程身份后消费并转发 daemon。`0.1.56-dev` 已通过 Host Release/Clang UBSan
+  各 `85/85`、NDK r27d 与 LSPlant 双 ABI构建。真机证据
+  `build/device-evidence/provider-flat-v1/20260804-220341` 与
+  `build/device-evidence/private-audit-v1/20260804-220348` 同时通过：四个文件保持扁平布局，两个来源
+  规则生成四条 canonical `/storage/emulated/0/...` 记录，WAL/socket 均为 0600，Provider 未加载
+  LSPlant。该证据只关闭路径归属、交付和持久化，不把 open 时采样到的 `size=0` 解释为最终元数据。
+
+### T-62～R-62 [P0] 冻结审计元数据阶段与 canonical key
+
+- **红测**：同一 target 分别以 `/storage/emulated/<user>` 与 `/mnt/user/<user>/emulated/<user>`
+  到达时，current index 和重启回放只能保留一个 canonical key；initial open snapshot 允许 `size=0`，
+  但任何消费者不得将其标记为 settled。真实写入完成信号尚未接入时，settled 红测必须保持失败或
+  明确 `not_observed`，禁止用固定延时变绿。
+- **绿测**：所有写入 WAL 的 source/target/previous target 在入队前 canonicalize；schema/CLI 明确
+  输出 metadata phase。只有真实 completion boundary 能产生 settled identity，无法观察时保留
+  initial/path-only 事实，不影响 redirect。
+- **重构**：canonicalization 只保留一个共享实现；元数据采样和路由、命名、文件可用性完全解耦。
+- **真机协作**：分别用 LocalSend SAF 与“保存到相册”链路确认 fd 的最终关闭/提交发生在哪个进程、
+  哪个可 Hook/可观测入口，再决定 settled 实现；用户负责操作手机，collector 负责固定证据。
+- **当前观察（2026-08-04，SAF）**：关闭“保存到相册”后，LocalSend 明确记录 `Using SAF`，
+  ExternalStorageProvider 创建 target 并把 fd 返回给调用方，实际大文件内容由 LocalSend 进程直接
+  `write()`。`456.pptx` 最后写入为 `22:38:40.260`，LocalSend 最终关闭数据 fd 为
+  `22:38:40.286`，MediaProvider FUSE backing fd 随后在 `22:38:40.290` 关闭；`123.pptx` 对应
+  时间为 `22:38:56.821`、`22:38:57.024`、`22:38:57.027`。AOSP `pf_release()` 同样在回复
+  release 请求前销毁
+  handle 并关闭 backing fd，因此 FUSE release 是当前设备 SAF 链路的候选 completion boundary。
+  该结论尚不覆盖“保存到相册”链路，也不授权全局 `close` Hook；第二条链路完成采集并证明可限定
+  到真实 FUSE release 后，才能实现 settled。证据：
+  `build/device-evidence/audit-completion-trace-v1/20260804-223824/`。
+  首次“保存到相册”复采目录 `20260804-230208` 因 collector 错误要求未参与该模式的
+  ExternalStorageProvider 必须已运行，在正式计时窗口开始前即停止，只产生空的线程 trace；该目录
+  标记为无效证据。随后对 MediaProvider 使用 `strace -yy` 的尝试发生 FUSE 自锁：tracer 为解析 fd
+  路径进入 `__fuse_request_send`，但处理该 lookup 的 MediaProvider 又被同一 tracer 暂停，最终触发
+  system process ANR；目录 `20260804-230622` 同样标记为无效证据。collector 现只附加 LocalSend，
+  只采集 `close/fsync/fdatasync/ftruncate`，并用远端 watchdog 有界结束；禁止 ptrace 系统 Provider。
+  设备重启后的相册链路证据 `20260804-231657` 有效：LocalSend 对最终 target
+  `12 (1).jpg` 先关闭前置 fd `84`，随后在 `23:17:18.453` 关闭输出 fd `151`，紧接着关闭缓存输入
+  `/data/data/org.localsend.localsend_app/cache/12.jpg`，并在 `23:17:18.468` 报告 `Saved` 和
+  `Received all files`；最终文件为 12400218 bytes。该证据与 SAF 链路及 AOSP `pf_release()` 一致，
+  关闭 completion 观察门。
+- **实现结果**：协议增加 target-only `kSettle`；Store 只在已有 initial 的 caller UID 和对象 identity
+  匹配时合并完整 settled upsert，缺失/错 UID/错 inode/非 canonical alias 均不创建或升级记录。
+  `0.1.57-dev` 真机确认审计队列和 redirect 正常，但延迟 FUSE 注册得到
+  `completion=1 committed=0 active=0 close=0x0`，与此前 Flutter 实验所证实的 specialize 后增量
+  `pltHookCommit()` 失败一致。下一候选改为仅在 `android_dlopen_ext()` 返回后直接修改
+  `libfuse_jni.so` 自身的 request/reply/close GOT 槽；不 Hook 全局 libc、不加载 LSPlant，RELRO 权限
+  必须恢复，任一修改失败时原子状态保持 inactive 且回调只透传。只对当前 policy 的 `audit=true`
+  target 在成功 close 后异步入队；审计失败保持 fail-open。Release CTest `85/85`、NDK r27d 和
+  LSPlant 双 ABI通过；真机 settled 结果进入 V-72。
+
+### T-63～R-63 [P0] WAL append/recovery 故障矩阵
+
+- **红测**：覆盖 append 完整失败、frame 已写但返回失败、header/payload 部分写入、flush/fsync 失败、
+  随后继续 append、重启回放、末尾断帧、中段 CRC 错误、非法长度及 sequence 重复/缺口。
+- **绿测**：append 结果不确定后 Store 立即恢复或进入显式 unavailable，禁止复用 sequence 继续追加；
+  仅截断最后一个不完整 frame，完整损坏返回 `corrupt`。所有故障只降级审计，不改变 redirect。
+- **重构**：通过 Journal fault double 注入阶段性结果，不把测试开关带入生产文件格式。
+
+### T-64～R-64 [P0] 当前索引乱序状态机矩阵
+
+- **红测**：表驱动覆盖重复 upsert、旧 upsert 晚到、delete 后旧事件、rename 与新 target 已存在、
+  rename/delete 交错、同 realtime 不同 boottime、设备重启后 boottime 归零以及 WAL replay 等价性。
+- **绿测**：live/recovered 边界只由明确 session epoch 决定；相同事件序列在线执行和回放得到同一
+  current index。未知旧事件不得复活已删除对象或覆盖更新 identity。
+- **重构**：排序比较保持纯函数，Store 只负责 append-before-apply 与有界 current index。
+
+### T-65～R-65 [P1] 容量、快照、协议与队列边界
+
+- **红测**：覆盖 64 MiB WAL 与 200000 current 上限、重复更新造成的 WAL 增长、snapshot info/record
+  之间 generation 变化、非法 magic/version/reserved/path/handle/confidence、非 root peer、64-slot queue
+  wrap/full/drop 和 delivery failure。
+- **绿测**：实现 checkpoint/compaction 或冻结明确有界保留策略；CLI 对 generation 竞争做有界重试，
+  协议拒绝 malformed input，队列指标可诊断，所有失败不反向影响文件操作。
+- **性能门**：compaction 不在 Provider 热路径执行；daemon 峰值内存、fsync 次数和 10 万 current
+  snapshot 延迟必须有基准。
+
+### V-72 [真机] Private Audit 数据库加固验收
+
+- **前置条件**：T-62～R-65 的适用 Host/ABI 测试全绿；每个候选使用新的 dev 版本，不读取旧实验 WAL。
+- **操作**：用户协助执行 LocalSend 两种保存模式、顺序同名、rename/delete、重启和大文件写入；必要时
+  在明确确认后执行 WAL/socket 故障注入。
+- **验收标准**：canonical key 无重复；initial 与 settled 状态不混淆；重启前后 current index 一致；
+  WAL/queue/daemon 故障不影响文件接收；达到当前设备不支持的 FILE_HANDLE/BTIME 时准确降级，不
+  伪造 strong identity。
 
 ## 参考依据
 
