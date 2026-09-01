@@ -1,0 +1,1783 @@
+# PathGuard Next `hide` 能力收缩、分阶段路线与 HideLab
+
+> 状态：Research / Proposed；尚未进入生产实现
+>
+> 文档版本：1.0
+>
+> 日期：2026-09-01
+>
+> 关联文档：`docs/07-hide-capability-research-and-design.md`
+>
+> 适用范围：Android 共享存储；目标应用无 Root 权限；按应用选择性隐藏
+
+## 1. 文档目的
+
+本文整理 `hide` 能力调研期间形成的事实、源码审计结果和产品决策，并把它们收敛为一条可以验证、可以停止、不会用近似实现冒充真隐藏的实施路线。
+
+本文不是聊天逐句转录，也不是实现承诺。它重点回答以下问题：
+
+1. PathGuard 所说的 `hide` 到底保证什么；
+2. 软件通过哪些路径发现和访问文件，是否能逐层针对性隐藏；
+3. 当前 Android 16 真机具备哪些内核和存储条件；
+4. bind mount、OverlayFS、PathMask/NoOpt、SUSFS、MediaProvider FUSE、Kasumi 和 NoMount 是否满足要求；
+5. 在“完整语义不能降级”的前提下，如何收缩能力并分阶段交付；
+6. 如何先建设自动化攻击测试“矛” HideLab，再开发隐藏后端“盾”。
+
+本文继承 `docs/07-hide-capability-research-and-design.md` 已冻结的 exact hide 语义。若两份文档对核心语义存在冲突，以 `07` 的冻结要求为准；本文负责补充后续设备调研、Kasumi/NoMount 审计和阶段化路线。
+
+## 2. 执行摘要
+
+当前结论是：
+
+1. **通用 stock Android 内核上，仍没有已验证且可直接交付的 per-app exact hide 方案。**
+2. **“针对软件获取文件的手段逐层隐藏”在工程上成立，但访问面不止一个。** 直接 VFS、MediaStore、ContentResolver、SAF、Photo Picker、CloudMediaProvider 和已有 FD 必须分别治理。
+3. **只拦截常用 API 不等于隐藏。** Java API 最终可能进入 libc/VFS，但应用也可以使用 JNI、raw syscall、相对 `dirfd`、storage alias 或系统 Provider 绕过上层 Hook。
+4. **SUSFS 的 namei/getdents 时机最接近真隐藏，但现有 ABI 缺少 PathGuard 所需的逐规则 UID/namespace scope。**
+5. **Kasumi API 17 的 dirhijack 机制比 syscall 返回后改写更接近目标，但原版仍不满足 PathGuard 契约。** 主要风险是 FUSE `atomic_open` 绕过、mutation 未封闭、hide 规则缺少逐规则作用域、控制面丢弃安装错误，以及对非稳定 GKI 内部符号和共享 inode operation 替换的依赖。
+6. **NoMount v20 的 whiteout 已在正确层面处理 lookup/readdir，且规则可指定 UID，但它同样不满足 PathGuard 契约。** 它没有包装 `atomic_open` 或 mutation；规则没有 namespace scope；同路径多 UID 在 parent child index 中会互相覆盖；hook/child 分配失败可静默成功。
+7. **最可信的 direct hide 方向是最小化 PathGuard VFS 后端。** 它只能被声明为特定 KMI/OEM/ROM 的设备能力，不能先宣称通用支持。
+8. **版本阶段扩大的是访问面和设备覆盖，不是降低隐藏质量。** Hide 1.0 在声明的 direct VFS 范围内也必须完整覆盖 lookup、`atomic_open`、readdir、mutation 和缓存一致性；不能先发布 syscall Hook 近似版。
+9. **必须先完成 HideLab。** 没有能主动使用 Java、JNI、raw syscall、Provider、alias、缓存次序和 mutation 攻击后端的测试软件，就无法证明“不可发现且不可访问”。
+
+因此，截至本文日期，产品状态仍应是：
+
+```text
+deny       supported
+redirect   supported
+hide       unsupported
+```
+
+只有某个后端通过本文定义的 capability 准入和 HideLab 矩阵后，才能对对应设备、对应访问面报告 `active`。
+
+## 3. 调研方法与证据等级
+
+本轮结论来自四类证据：
+
+| 等级 | 证据 | 可以证明 | 不能单独证明 |
+|---|---|---|---|
+| E1 | 已连接设备只读采集 | 当前设备、ROM、内核、Root、挂载与 inode 拓扑 | 其他 ROM 或未来 OTA 一定相同 |
+| E2 | 本地源码逐行审计 | 指定源码版本的控制流、数据模型和明确缺口 | 未执行路径在真机上的全部竞态结果 |
+| E3 | Linux/AOSP 官方资料 | VFS、Kprobe、GKI KMI、FUSE 等平台契约 | OEM 私有修改和特定模块一定兼容 |
+| E4 | 上游项目资料与网页调研 | 项目定位、支持范围、已公开风险 | PathGuard exact hide 已经通过 |
+
+本文使用以下措辞区分结论强度：
+
+- **已确认**：有 E1、E2 或权威 E3 的直接证据；
+- **高风险推论**：源码调用链显示存在绕过或破坏可能，但仍须 HideLab 真机复现；
+- **设计要求**：PathGuard 后端必须满足，尚不代表已有实现；
+- **不支持**：缺少必要机制或没有通过准入，不能对用户承诺。
+
+## 4. 对话与决策演进
+
+本轮讨论形成的决策不是一步得出的，演进如下：
+
+### 4.1 从现实场景开始
+
+最初问题可以具体化为：
+
+```text
+只让 LocalSend 看不到 Pictures/Nagram，
+其他应用和系统仍然正常看到并使用该目录。
+```
+
+这排除了全局 chmod、全局改名、删除目录或对所有 App 生效的方案。规则必须具备调用方身份和隔离范围。
+
+### 4.2 区分 deny 与 hide
+
+现有 bind mount/权限手段可以阻止访问，但父目录仍可能列出 `Nagram`，目标也可能表现为 `EACCES` 或一个空挂载点。这是 `deny`，不是 `hide`。
+
+讨论因此冻结：`hide` 是独立能力，不能成为 `deny` 的显示名称，也不能在失败时自动退化为 `deny`。
+
+### 4.3 从“有没有现成真隐藏”转向完整访问面
+
+应用获取文件不只有 `java.io.File`。它可以直接调用 VFS，也可以让 MediaProvider、DocumentsProvider 或系统选择器代查、代开文件。因此，单点 Hook 只能覆盖某一访问面。
+
+“针对性隐藏”仍然可行，但必须明确：针对的是哪个观察者、哪个路径平面、哪个 Provider 和哪组操作。
+
+### 4.4 接受设备限定，而不是语义降级
+
+通用 stock kernel 没有稳定的目录项过滤扩展接口。讨论接受 `hide` 可能只在受支持 KMI/ROM 上启用，但不接受在所有设备上提供一个语义残缺的同名功能。
+
+### 4.5 引入分阶段 hide
+
+阶段化方案可行，但版本的含义必须是扩大覆盖面：
+
+```text
+Hide 1.0  完整 direct VFS
+Hide 2.0  direct VFS + MediaStore
+Hide 3.0  再增加 SAF/DocumentsProvider
+Hide 4.0  再增加 Photo Picker/CloudMediaProvider
+```
+
+Hide 1.0 不能省略 direct VFS 内部的关键操作，再把漏洞留给 2.0 修复。否则版本号只是在包装 approximate hide。
+
+### 4.6 先造“矛”，再造“盾”
+
+最终形成共识：测试 hide 必须有一个像攻击软件一样枚举、猜测、直接 syscall、跨 alias、使用 Provider、改变缓存顺序并尝试 mutation 的软件；同时还要有不受策略的对照 App 和 Root Oracle。
+
+这套自动化系统命名为 **HideLab**。它不是附属测试，而是后端进入实现和发布的前置条件。
+
+## 5. exact hide 冻结要求
+
+### 5.1 核心观察语义
+
+`hide` 对目标应用的核心语义为：
+
+```text
+readdir(parent)       不返回目标 basename
+stat/open/opendir     对目标及后代返回 ENOENT
+直接 syscall          不得绕过
+MediaStore query      在声明 mediastore capability 时不返回相关记录
+mountinfo             hide 本身不产生新挂载
+```
+
+“目标及后代返回 `ENOENT`”包括已知完整路径访问。应用即使已经知道 `Pictures/Nagram/secret.jpg` 的名字，也不能通过跳过父目录枚举直接打开。
+
+### 5.2 调用方隔离
+
+同一真实目录必须满足：
+
+| 观察者 | 期望 |
+|---|---|
+| 目标 App，例如 LocalSend | 目标名称不存在，直接访问 `ENOENT` |
+| 非目标普通 App | 目录完整可见、可读写 |
+| Root Oracle | 能观察真实对象并校验未损坏 |
+| 系统 Provider | 取决于对应 Provider capability，不隐式宣称已隐藏 |
+
+不能使用“所有 KernelSU umounted App”或“所有 UID >= 10000”代替逐规则调用方隔离。
+
+### 5.3 mutation 契约
+
+隐藏不能只处理读取。对隐藏名称及其后代，以下 mutation 必须统一封闭：
+
+```text
+create / mkdir / mknod / symlink / link
+unlink / rmdir
+rename source / rename destination
+open(O_CREAT / O_TRUNC / O_TMPFILE 等相关组合)
+```
+
+首版建议统一返回 `ENOENT`。重点不是错误码美观，而是操作不能先成功触达真实对象，再在 syscall 返回时伪装失败。
+
+例如，后置 Hook 把成功的 `open(O_TRUNC)` 改写成 `ENOENT`，真实文件已经被截断，这属于破坏性失败，绝不能计为 hide。
+
+### 5.4 兄弟项语义不变
+
+隐藏 `Pictures/Nagram` 不应改变 `Pictures/Screenshots` 或其他兄弟项的正常创建、写入、rename、权限和 inode 语义。
+
+这项要求排除了以父目录 OverlayFS 视图实现单项隐藏的正式路线，因为 copy-up、upper/workdir 和合并目录可能改变所有兄弟项行为。
+
+### 5.5 不允许静默降级
+
+以下行为均禁止：
+
+```text
+hide 后端失败 -> 自动改用 deny
+direct_vfs 可用、mediastore 不可用 -> 仍把整条规则报告 active
+部分 operation 包装失败 -> 保留已经安装的另一部分
+规则容量耗尽 -> 静默跳过新规则
+probe instance 耗尽 -> fail-open 但仍报告正常
+```
+
+请求的 capability 不能完整满足时，规则必须拒绝激活，并给出稳定、可诊断的状态。
+
+## 6. 现实例子：只向 LocalSend 隐藏 Nagram
+
+### 6.1 规则意图
+
+目标应用：
+
+```text
+package = org.localsend.localsend_app
+path    = Pictures/Nagram
+```
+
+用户意图不是“LocalSend 打不开 Nagram”，而是“LocalSend 的受支持观察面中不存在 Nagram”。
+
+### 6.2 正确结果
+
+对 LocalSend：
+
+```text
+list("Pictures")                         不含 Nagram
+stat("Pictures/Nagram")                 ENOENT
+open("Pictures/Nagram/known.jpg")       ENOENT
+openat(pictures_fd, "Nagram", ...)      ENOENT
+raw getdents64(pictures_fd)              不含 Nagram
+MediaStore query                         仅在 mediastore active 时不含相关行
+```
+
+对 Control App：
+
+```text
+list/stat/open                           正常成功
+```
+
+对 Root Oracle：
+
+```text
+真实目录存在
+canary 内容、inode、结构未被 Target Probe 的 mutation 改变
+```
+
+### 6.3 为什么一个文件管理器截图不构成证明
+
+文件管理器可能：
+
+- 只使用 Java `File.list()`；
+- 使用缓存结果；
+- 通过 MediaStore 而不是 VFS 列出媒体；
+- 自己过滤隐藏项；
+- 没有尝试已知后代、alias 或 raw syscall；
+- 没有执行任何 mutation。
+
+因此“界面上没看见”只能作为体验验证，不能作为 exact hide 的安全证据。
+
+## 7. 已连接设备与存储拓扑
+
+### 7.1 本轮设备配置
+
+本轮只读采集到的目标设备为：
+
+| 项目 | 值 |
+|---|---|
+| ADB serial | `f3ba305a` |
+| 厂商/型号 | Xiaomi Redmi `25102RKBEC` |
+| device | `myron` |
+| SoC | Qualcomm `SM8850` |
+| Android | Android 16 / API 36 |
+| ROM | `OS3.0.23.0.WPMCNXM` |
+| 安全补丁 | `2026-01-01` |
+| Kernel | `6.12.23-android16` 系列 |
+| KMI | `android16-6.12` |
+| Verified Boot | `green` |
+| vbmeta | locked |
+| SELinux | Enforcing |
+| Root | KernelSU/SukiSU Ultra，`ksud 4.1.3`，内核模块形态 |
+
+仓库 2026-08-01 的既有设备证据记录过同一 `myron` 设备的 KernelSU `4.1.2` 和完整内核 build string。版本变化说明 Root framework 也必须进入 capability fingerprint，不能只按机型缓存结果。
+
+### 7.2 内核配置能力
+
+已观察到的相关配置包括：
+
+```text
+CONFIG_KPROBES=y
+CONFIG_KRETPROBES=y
+CONFIG_FTRACE=y
+CONFIG_BPF=y
+CONFIG_BPF_LSM=y
+CONFIG_MODULES=y
+CONFIG_MODVERSIONS=y
+CONFIG_OVERLAY_FS=y
+```
+
+这些开关说明设备具备进行内核实验的基础条件，但不等于存在稳定的目录 lookup/readdir 过滤 ABI。Android GKI KMI 只承诺白名单内的稳定接口；VFS 内部 operation table、未导出符号和 OEM 私有布局不能因为“模块能加载”就被视为兼容。
+
+### 7.3 SUSFS/KPM 状态
+
+只读 capability probe 结果为：
+
+```text
+ksud susfs status   -> false
+ksud susfs version  -> unsupported
+ksud kpm            -> ENOTTY
+```
+
+结论：当前设备虽然是 KernelSU 内核模块形态，但没有可供 PathGuard 直接调用的 SUSFS/KPM hide backend。不能把 KernelSU、SUSFS 和 KPM 当作同一个能力。
+
+### 7.4 LocalSend 配置
+
+本轮观察到：
+
+```text
+package   = org.localsend.localsend_app
+appId/UID = 10358
+version   = 1.17.0
+```
+
+UID 会随卸载重装、多用户或包状态变化，生产规则不能把一次采集到的 `10358` 永久写死。包名到 UID 的绑定必须在 admission/launch 时重新验证。
+
+### 7.5 storage alias 与 inode 拓扑
+
+`Pictures` 的前台共享存储 alias：
+
+```text
+/sdcard/Pictures
+/storage/emulated/0/Pictures
+/mnt/user/0/emulated/0/Pictures
+```
+
+本轮观察到它们的 `device:inode` 均为：
+
+```text
+1048605:15771
+```
+
+而 pass-through/backing 平面：
+
+```text
+/mnt/pass_through/0/emulated/0/Pictures
+```
+
+观察到：
+
+```text
+65079:15771
+```
+
+这意味着：
+
+1. 前台 FUSE alias 共享同一个父 inode identity，适合以 `(superblock, parent inode, basename)` 统一识别；
+2. pass-through/F2FS 是不同 superblock，即使 inode number 恰好相同，也不是同一个 VFS identity；
+3. 只在前台 FUSE inode 安装规则，不能自动宣称 backing 平面也隐藏；
+4. 只比较 inode number 会跨 superblock 误伤；
+5. `Nagram` 也呈现 FUSE 与 backing 不同 device、可能相同 inode number 的结构，测试必须同时覆盖两类平面。
+
+是否需要治理 pass-through 取决于目标 App 的 mount namespace 是否能访问它。该平面应建模为独立 capability 或明确不可达前置条件，不能依赖路径字符串偶然不公开。
+
+## 8. 软件发现和访问文件的路径面
+
+“软件获取文件需要哪些手段”不能只按编程语言枚举，应按最终执行主体和数据平面划分。
+
+### 8.1 目标进程直接 VFS
+
+常见上层入口：
+
+```text
+java.io.File
+java.nio.file.Files
+Kotlin/Flutter/React Native 的文件 API
+libc opendir/readdir/stat/open/access
+JNI 自定义 native 库
+```
+
+可直接使用的低层入口包括：
+
+```text
+getdents64
+statx / newfstatat / faccessat2 / readlinkat
+openat / openat2 / O_PATH
+mkdirat / unlinkat / renameat2 / linkat / symlinkat
+```
+
+因此，Hook Java 或 libc 导出函数不能形成强保证。应用可以绕过它们直接发 syscall；真正的 direct hide 必须在共享的 VFS lookup、directory actor 和 mutation 路径上成立。
+
+### 8.2 路径解析变体
+
+同一个对象可能通过以下方式到达：
+
+```text
+绝对路径
+相对 cwd
+相对 dirfd
+符号链接
+`.` / `..` / 重复 `/`
+storage alias
+已打开父目录 FD
+```
+
+按原始路径字符串做前缀匹配会漏掉相对路径、alias 和规范化变体。规则主键应尽量基于已解析父目录 identity 与单个 basename，而不是在每次 syscall 后重新猜路径文本。
+
+### 8.3 MediaStore 与 ContentResolver
+
+应用可以查询媒体数据库获得 `_id`、相册、缩略图和 content URI，再通过 ContentResolver 请求 Provider 代开 FD。
+
+direct VFS hide 不会自动删除数据库记录。即使 `_data` 不在 projection 中，文件名、相册、缩略图或已知 URI 也可能泄露存在性。因此 `mediastore` 必须是独立 capability，并覆盖 query 与 open，而不是只过滤某一列。
+
+### 8.4 SAF / ExternalStorageProvider
+
+Storage Access Framework 通过 DocumentsProvider 枚举、搜索和打开文档。执行 VFS 操作的可能是 Provider 进程，目标 App 只通过 Binder 接收结果或 FD。
+
+若只按 `current_uid()` 过滤目标 App 的进程，Provider 代办路径不会命中。需要可靠恢复 Binder caller identity，并在 Provider 的 query/open 两条链上保持一致。
+
+### 8.5 Photo Picker 与 CloudMediaProvider
+
+Photo Picker 有自己的查询、recent、搜索、local/cloud 数据源和 URI 授权模型。它不是 MediaStore query 的简单别名。
+
+因此选择器隐藏必须单独声明；没有 `photo_picker` capability 时，产品不能暗示图片在系统选择器中不可见。
+
+### 8.6 已有 FD 与跨进程传递
+
+如果 hide 激活前目标进程已经持有文件或目录 FD，或者其他进程通过 Binder/Unix socket 传入 FD，路径 lookup 已经结束。VFS 名称隐藏不能撤销这个对象引用。
+
+首版明确不保证回收已有 FD。规则激活策略应优先绑定应用冷启动，并把“已有 FD”写入非保证范围。
+
+### 8.7 能否逐层针对性隐藏
+
+可以，但必须把问题表达为能力组合：
+
+```text
+direct_vfs
+mediastore
+saf
+photo_picker
+cloud_media
+backing_view
+```
+
+每一层都要有：
+
+- 可识别的真实调用方；
+- 完整的列举、lookup/open 和 mutation/query 契约；
+- 缓存失效方式；
+- 独立测试与运行时状态；
+- 不可用时的拒绝策略。
+
+这比寻找一个“万能 Hook”更复杂，但边界清晰、可验证，也符合单一职责原则。
+
+## 9. 候选方案调研结果
+
+### 9.1 总览
+
+| 方案 | readdir 隐名 | lookup `ENOENT` | raw syscall | per-app | 无新增 mount | mutation 完整 | 结论 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| bind mount / 权限 | 否 | 否 | 阻断但非隐藏 | 可按 namespace | 否 | 不适用 | `deny`，不是 hide |
+| OverlayFS whiteout | 是 | 是 | 是 | 可按 namespace | 否 | 改变父目录写语义 | Rejected |
+| Java/libc/Zygisk Hook | 部分 | 部分 | 否 | 是 | 是 | 否 | 不可作 exact backend |
+| PathMask/NoOpt 类返回后改写 | 部分 | 部分 | 入口依赖 probe | UID 粗粒度 | 是 | 否 | Reference / Anti-pattern |
+| MediaProvider 私有 FUSE接入 | 机制上可行 | 机制上可行 | 仅共享存储 FUSE面 | 有请求 UID | 是 | 理论可覆盖 | 公开稳定接入不存在 |
+| SUSFS 2.2 | 是 | 是 | VFS 内联 | 不满足逐规则 scope | 是 | 机制较完整 | Blocked |
+| Kasumi API 17 | 设计目标是 | 设计目标是 | VFS 层为主 | 全局 VIEW/SPOOF scope | 是 | 不完整 | 仅作机制参考 |
+| NoMount v20 | 是 | 设计目标是 | VFS 层为主 | 单 UID，但无 namespace | 是 | 否 | Reference / Rejected |
+| 最小 PathGuard VFS 后端 | 设计要求是 | 设计要求是 | 设计要求是 | 设计要求是 | 是 | 设计要求是 | 最可信方向，尚未实现 |
+
+### 9.2 bind mount
+
+bind 一个空目录或不可访问目录到目标路径，可以让后代内容不可访问，但不会删除父目录中的 basename：
+
+```text
+readdir("Pictures")       -> 仍可返回 Nagram
+stat("Pictures/Nagram")  -> 仍可观察挂载点或权限结果
+```
+
+同时新增 mount 会出现在目标 namespace 的 `/proc/self/mountinfo`。因此它继续服务于稳定的 `deny`，不进入 hide 后端。
+
+### 9.3 OverlayFS whiteout
+
+whiteout 能在合并视图中同时影响 readdir 和 lookup，单看读取语义接近 hide。但它必须替换目标父目录视图，带来：
+
+- 新 mount 与 mountinfo 痕迹；
+- upper/workdir 生命周期；
+- 兄弟项 copy-up；
+- rename、chmod、xattr 和 inode 语义变化；
+- FUSE lower、SELinux、OEM OverlayFS 组合风险。
+
+它已经违反冻结约束，不再安排实现 spike。
+
+### 9.4 应用层或 Zygisk syscall Hook
+
+Hook `File.list()`、libc `readdir()` 或少数 syscall wrapper 适合做兼容实验，不适合安全语义：
+
+- native 库可以直接 syscall；
+- 静态链接、内联和替代 libc 路径可绕过；
+- Provider 在另一个进程执行；
+- mutation 的副作用可能发生在返回值改写之前；
+- 需要持续追逐 API 和 ABI。
+
+因此不能把“针对常用软件 API”定义为 Hide 1.0。
+
+### 9.5 PathMask / NoOpt 类后置改写
+
+这类实现通常通过 kprobe/kretprobe：
+
+- 在 `getdents64` 返回后改写用户 dirent buffer；
+- 在 `stat/open` 返回后修改 errno；
+- 用固定数量 probe instance 承载并发；
+- 用路径字符串或 inode number 判断目标。
+
+主要问题：
+
+- probe 容量耗尽、分配/uaccess 失败可能直接泄漏；
+- `nmissed` 不是可接受的偶发误差；
+- 相对 `dirfd` 和 alias 可能绕过字符串匹配；
+- 成功后的 `O_TRUNC/O_CREAT` 无法撤销；
+- 只按 inode number 会跨 superblock 误判。
+
+其 KMI 打包、启动诊断和 UID 映射可以参考，数据面不能用于 exact hide。
+
+### 9.6 SUSFS 2.2
+
+SUSFS 将隐藏判断放入 namei/dcache/open 和 getdents actor，时机正确，且能同时标记 FUSE inode 与 backing inode。它证明 direct-VFS 真隐藏应在“名字解析前”和“目录项写入用户缓冲前”完成。
+
+阻塞点不是机制强度，而是控制作用域：
+
+- `add_sus_path` 以路径为主，没有每条规则的 package/UID/namespace handle；
+- 生效依赖 KernelSU 的 task 分类，例如 `TIF_PROC_UMOUNTED`；
+- 同一 inode 标记会影响一类 App；
+- 不能表达不同 App 拥有不同 hide 集合；
+- MediaProvider 本身的可见性仍需独立处理。
+
+因此 SUSFS 是最佳机制参考之一，但现有 ABI 不能直接成为 PathGuard adapter。
+
+### 9.7 MediaProvider 私有 FUSE 接入
+
+AOSP MediaProvider FUSE 天然持有请求 UID，并在 lookup、readdir、open 和 mutation 附近工作，机制上很适合共享存储。
+
+但 PathGuard 没有稳定公开的规则注册 API。关键逻辑位于 Mainline MediaProvider 的私有 C++ 实现中，路径拼接、目录快速路径和 dentry cache 控制分散；inline patch 私有布局会随 APEX/OEM 更新变化。
+
+结论：可继续作为长期平台合作或稳定 adapter 研究方向，不作为当前可交付后端。
+
+### 9.8 NoMount v20
+
+NoMount 是 KernelSU/APatch 的 VFS 路径注入/whiteout 框架。它不创建 mount，而是替换目标父目录的 `i_op.lookup` 与 `i_fop.iterate_shared`，whiteout 在 lookup 中制造 negative dentry、在 readdir actor 中省略 basename。规则中的 `target_uid` 可限制到单个调用 UID，因此它比 SUSFS 的全类 App scope 更接近“只向 LocalSend 隐藏 Nagram”。
+
+但是它不是 PathGuard exact hide 的直接候选：
+
+- 仅替换 `.lookup` 和 `.iterate_shared`，继承真实 `.atomic_open`，因此 FUSE cold-cache open 路径存在与 Kasumi 同类的绕过风险；
+- 没有 `create/mkdir/unlink/rename/link/symlink` 等 mutation wrapper，无法确保失败前没有触达真实对象；
+- 规则只有 `target_uid`，没有 package/user 验证、mount namespace cookie 或 policy generation；
+- 同一 parent/basename 的 child index 只容纳一个 rule pointer，多个 UID 的同路径规则会相互覆盖；
+- hook 或 child-array 内存分配失败不会传回 `add_rule`，可能出现控制面成功、数据面未安装；
+- 通过控制进程的 `kern_path()` 解析并绑定 parent inode，对 Android 共享存储 alias、独立 namespace 与 pass-through/backing 平面没有完整保证；
+- 直接替换 `super_block.s_op/s_xattr`、inode `i_op/i_fop` 和 dentry `d_op`，属于 VFS 内部实现，不是稳定 GKI KMI。
+
+NoMount 的无 mount、parent/basename 目录项过滤、RCU/seqcount 快路径和 observer-aware dentry revalidate 值得作为设计证据；原版不能整体引入，也不能作为 Hide 1.0 数据面。
+
+### 9.9 最小 PathGuard VFS 后端
+
+从机制上，最可信方向仍是一个职责单一的 VFS 后端：
+
+- 只处理按观察者隐藏单个 parent/basename；
+- 在 lookup、`atomic_open`、readdir 和 mutation 入口统一决策；
+- 不 mount；
+- 不做 Provider query；
+- 使用不可变 policy generation 和事务安装；
+- 仅在已验证 KMI/ROM 上报告可用。
+
+它不是“通用 LKM”承诺。若必须解析未导出符号或替换内部 operation table，就要按内核 build fingerprint 白名单，并接受 OTA 后重新准入。
+
+## 10. VFS whiteout 参考源码审计
+
+### 10.1 审计对象
+
+本地源码：
+
+```text
+refer/Kasumi-main
+```
+
+该目录不含独立 `.git` 元数据，因此不能从本地快照可靠恢复 Kasumi 上游 commit。本文不使用 PathGuard 父仓库提交号冒充上游版本，审计对象以本地文件内容、协议版本和下述源码位置共同定位。
+
+协议版本：
+
+```c
+#define KSM_PROTOCOL_VERSION 17
+```
+
+位置：`refer/Kasumi-main/src/include/kasumi_uapi.h:25`。
+
+### 10.2 值得借鉴的机制
+
+Kasumi 的 `dirhijack` 比 syscall 返回后改写更接近 exact hide：
+
+1. `kasumi_dh_lookup()` 对隐藏观察者制造 negative dentry，不调用真实 lookup，目标表现为 `ENOENT`；
+2. `kasumi_dh_proxy_actor()` 在原始目录项写给调用者前省略匹配 basename；
+3. 自定义 `d_revalidate` 根据 observer scope 使同一 dentry 对不同观察者重新解析；
+4. 使用 RCU/SRCU、shadow operation 和 policy replace 处理并发与视图切换；
+5. 能从 KernelSU provider 判断 VIEW/SPOOF 观察者。
+
+关键位置：
+
+```text
+src/core/kasumi_dirhijack.c:276   negative dentry
+src/core/kasumi_dirhijack.c:396   readdir actor
+src/core/kasumi_dirhijack.c:539   observer-aware d_revalidate
+src/core/kasumi_dirhijack.c:986   inode_operations clone
+```
+
+这些设计证明：lookup、readdir 和 observer-aware cache 是正确问题域。
+
+### 10.3 高风险缺口一：FUSE `atomic_open`
+
+Kasumi 安装 shadow inode operations 时执行：
+
+```c
+im->fake_iop = *orig_iop;
+im->fake_iop.lookup = kasumi_dh_lookup;
+```
+
+它只替换 `.lookup`，其余 operation，包括真实文件系统的 `.atomic_open`，从原表继承。
+
+本机 `/proc/kallsyms` 已确认存在：
+
+```text
+fuse_atomic_open
+fuse_dir_inode_operations
+```
+
+Linux 打开最后路径分量时，在满足条件的 dcache miss 路径可以调用目录 inode 的 `.atomic_open`。FUSE 的 `fuse_atomic_open` 可以自行完成 lookup/open，而不经过被替换的普通 `.lookup`。
+
+由此得到高风险推论：
+
+```text
+cold dcache -> open/openat hidden child
+    可能进入继承的 fuse_atomic_open
+    可能绕过 kasumi_dh_lookup
+
+stat hidden child -> 先制造 synthetic negative
+    后续 open 可能得到 ENOENT
+```
+
+这意味着结果可能依赖访问顺序和 dcache 状态。`opendir` 使用的打开路径也必须纳入测试，但是否在该内核上命中同一 `atomic_open` 分支，应由 HideLab 追踪/结果确认，不能仅凭源码推导宣称已复现。
+
+无论实际复现结果如何，PathGuard 后端都必须显式包装或拒绝带 `.atomic_open` 且无法安全治理的 operation table。只替换 `.lookup` 不满足准入。
+
+### 10.4 明确缺口二：mutation 未封闭
+
+由于 Kasumi 克隆整张原始 inode operation table 后只替换 lookup，以下 operation 仍指向真实文件系统：
+
+```text
+create / mkdir / mknod / symlink / link
+unlink / rmdir
+rename
+```
+
+此外 `.atomic_open` 还可能承载 `O_CREAT`。风险包括：
+
+- rename destination 指向隐藏 basename 时覆盖真实对象；
+- `O_TRUNC` 触及真实文件；
+- 创建隐藏名称返回 `EEXIST`，泄露真实对象存在；
+- unlink/rmdir/rename source 通过已有 dentry 触达真实对象；
+- 返回结果无法统一为 `ENOENT`。
+
+这是相对 PathGuard mutation contract 的明确不完整，不需要等到 UI 测试才成立。
+
+### 10.5 明确缺口三：hide 规则缺少逐规则作用域
+
+`kasumi_hide_entry` 只保存（`refer/Kasumi-main/src/internal/kasumi_types.h:65`）：
+
+```c
+char *path;
+u32 path_hash;
+```
+
+`kasumi_dh_child` 保存名称、来源、flags 和 `hide`，没有 policy handle、target UID 或 namespace cookie。
+
+KernelSU provider 的判断是全局观察者分类（`refer/Kasumi-main/src/policy/kasumi_path_policy.c:724`）：
+
+```c
+scope = provider(uid) ? KASUMI_POLICY_SCOPE_SPOOF
+                      : KASUMI_POLICY_SCOPE_VIEW;
+```
+
+因此原版不能自然表达：
+
+```text
+LocalSend        隐藏 Pictures/Nagram
+另一个 App       隐藏 Pictures/Other
+Control App      两者都可见
+```
+
+PathGuard 需要的是“规则 -> 目标身份/namespace -> hidden child”的映射，而不是所有 VIEW observer 共用一份 hide 集合。
+
+### 10.6 明确缺口四：控制面可能静默成功
+
+Kasumi ioctl 添加 hide 后，在 dirhijack 启用时调用（`refer/Kasumi-main/src/control/kasumi_ioctl.c:1439`）：
+
+```c
+(void)kasumi_dirhijack_hide(src);
+```
+
+返回值被丢弃。若 dirhijack 安装、内存分配或 child 注册失败，控制器仍可能只看到外层规则添加成功，而 lookup 轴没有完整安装。
+
+这违反 PathGuard 的事务准入和 no-degrade 要求。控制面必须能回答：
+
+- 所有必需 operation 是否已经包装；
+- 所有 hidden child 是否发布到同一 generation；
+- 缓存是否完成必要失效；
+- 任一步失败是否整体回滚；
+- 当前状态是 active、unsupported 还是 failed。
+
+### 10.7 维护与可信计算基风险
+
+Kasumi 还依赖：
+
+- 未导出符号的运行时解析；
+- 通过 kprobe 获取 kallsyms 等辅助能力；
+- 替换共享 inode 的 `i_op`、`f_op`、`d_op`；
+- ftrace/kretprobe fallback；
+- 针对内核版本差异的兼容分支。
+
+这些能力不属于 Android GKI 稳定 KMI。错误恢复、模块卸载、并发 inode 生命周期和 OEM 修改都会扩大可信计算基。
+
+### 10.8 Kasumi 结论
+
+```text
+机制：值得参考
+原版：不能直接作为 PathGuard exact hide 后端
+引入策略：不整体移植，只提取独立设计事实
+验证重点：atomic_open、mutation、observer scope、事务失败
+```
+
+不整体引入也符合 YAGNI：Kasumi 同时承担注入、合并、重定向、root spoof 等更大职责，PathGuard Hide 1.0 只需要最小 hidden-child 数据面。
+
+### 10.9 NoMount v20 本地源码审计
+
+#### 10.9.1 审计对象与定位
+
+本地源码：
+
+```text
+refer/hide-refer/nomount-master
+```
+
+该目录没有独立 `.git` 元数据；审计对象以本地快照、`NOMOUNT_VERSION "20"`、模块声明 `v2.0.0` 和源码位置共同定位。许可证为 GPL-3.0。
+
+NoMount 的主产品目标是无 mount 的系统文件注入/重定向，以及让“排除 UID”看见原始系统视图；whiteout 是该框架的一个能力，不是为 Android 共享存储 per-app exact hide 设计的独立后端。
+
+#### 10.9.2 可借鉴的机制
+
+NoMount 在正确的 VFS 层处理目录可见性：
+
+```text
+parent i_op.lookup          -> nomount_hijacked_lookup
+parent i_fop.iterate_shared -> nomount_hijacked_iterate_dir
+dentry d_revalidate         -> 按当前 UID 重验视图
+whiteout                    -> negative dentry + readdir omit
+```
+
+对应位置：
+
+```text
+kernel/src/nomount.c:303   lookup
+kernel/src/nomount.c:327   iterate_shared
+kernel/src/nomount.c:682   d_revalidate
+kernel/src/nomount.c:832   operation-table hijack
+```
+
+规则数据带有 `target_uid`，匹配条件是 `target_uid == 0 || target_uid == current_uid().val`。这证明“per-UID whiteout”可以放在 lookup/readdir 共同边界，而无需新建 mount。另有一个全局 UID bypass table：命中的 UID 对全部 NoMount 规则回退到真实文件系统。这适合其 root-detection 排除用途，但与 PathGuard 的正向 target-policy 模型不同。
+
+#### 10.9.3 明确缺口一：`atomic_open` 与 mutation 未治理
+
+`nomount_hijack_dir_ops()` 复制原 inode/file operation table 后，只改写：
+
+```c
+fake_iop.lookup = nomount_hijacked_lookup;
+fake_fop.iterate_shared = nomount_hijacked_iterate_dir;
+```
+
+源码没有 `.atomic_open`、`create`、`mkdir`、`mknod`、`symlink`、`link`、`unlink`、`rmdir` 或 `rename` 的 wrapper。
+
+因此存在两个不可接受的 direct hide 缺口：
+
+1. FUSE 目录在 cold dcache 的 `open/openat` 可能通过继承的 `.atomic_open` 自行 lookup/open，绕过只替换的 `.lookup`；
+2. 对 hidden basename 的 `O_CREAT/O_TRUNC`、rename、unlink 等不受前置 guard 保护，可能泄露 `EEXIST`、成功修改真实对象，或发生失败后副作用。
+
+这不是“后续优化项”，而是 Hide 1.0 无法准入的硬条件。HideLab 必须用 cold `openat/openat2`、`stat -> open` 顺序和完整 mutation matrix 在目标 FUSE/KMI 上复现或证伪绕过；在此之前不能把 NoMount whiteout 视为 exact hide。
+
+#### 10.9.4 明确缺口二：规则作用域与多 UID 冲突
+
+`struct nomount_rule` 有 `target_uid`，但没有 namespace、package、user 或 policy generation。规则由控制进程的 `kern_path()` 解析父目录，再直接替换该 inode operation table；它不是以目标应用 namespace/已验证目录 FD 安装。
+
+这会带来两层问题：
+
+- 同一 UID 的所有进程统一命中，无法区分 shared UID 的不同 package，也不处理 isolated UID；
+- Android 共享存储 FUSE alias 和 pass-through/backing 可处于不同 superblock/namespace 平面，控制进程解析到的 parent inode 不能证明等同于目标 App 的全部可达视图。
+
+更具体地说，RB tree 的 key 允许相同 virtual path 使用不同 `target_uid`，但 parent child-array 的 `nomount_bsearch_child()` 仅按 basename 找到一个 pointer；`__nomount_inject_child_locked()` 对同名项直接覆盖该 pointer。第二条同路径 UID 规则会使第一条从数据面失效，删除第二条也不会自动恢复第一条。
+
+因此 NoMount 不能正确表达：
+
+```text
+LocalSend  隐藏 Pictures/Nagram
+App B      也隐藏 Pictures/Nagram
+Control    仍看到 Pictures/Nagram
+```
+
+#### 10.9.5 明确缺口三：安装非事务且可静默 fail-open
+
+`nomount_hijack_dir_ops()` 的返回类型为 `void`。其 `kzalloc` 失败、inode 缺少可替换 operation 或 file operation 不可替换时，调用方不会收到错误。`__nomount_inject_child_locked()` 同样在 child-array `kmalloc` 失败时直接返回；`nomount_generate_virtual_topology()` 随后仍可能返回成功，`__nomount_add_rule()` 再把规则放入全局 RB tree 并记录“Successfully added”。
+
+规则替换也不是事务式：旧 rule 先从 tree/parent child index 摘除，再尝试生成新拓扑；后续失败时旧规则不会回滚。批量 payload 中每条规则依次安装，`payload->status` 会被最后一次结果覆盖，之前成功的规则也不会因后续失败撤销。
+
+这违反 PathGuard 的核心要求：完整 operation 验证、完整 child 发布、cache 处理和 generation 发布必须作为一个事务完成；任何失败都不能报告 active。
+
+#### 10.9.6 维护、缓存与可信计算基风险
+
+NoMount 除目标 parent inode 外，还会修改整个 superblock 的：
+
+```text
+s_op
+s_xattr
+```
+
+并直接写入 inode `i_op/i_fop` 与 dentry `d_op`。whiteout dentry 的 `d_op` 会被替换为仅含 NoMount `d_revalidate` 的表，同时清除原文件系统 dentry operation flags，而不是链式调用原实现。这扩大了与 FUSE、其他 LSM/FS、cache revalidate 和模块卸载的兼容风险。
+
+项目使用 `VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver` 与 `ANDROID_GKI_VFS_EXPORT_ONLY` namespace import。它说明模块需要内部 VFS 能力，不构成稳定 KMI 承诺；“预编译 LKM 可以加载”也不等于本机 operation layout、生命周期和 OTA 后仍正确。
+
+#### 10.9.7 NoMount 结论
+
+```text
+机制：无 mount 的 VFS whiteout 参考
+UID 规则：可表达单 UID，但不构成完整 per-app scope
+原版：不满足 PathGuard exact hide
+引入策略：不整体移植，不作为 Hide 1.0 后端
+验证价值：作为 HideLab 的 atomic_open、mutation、scope、安装失败对照对象
+```
+
+## 11. 当前可行性结论
+
+### 11.1 “真隐藏”仍然存在，但必须限定声明域
+
+若“真隐藏”指对所有软件、所有系统服务、Root、已有 FD 和任意侧信道都与对象从未存在完全等价，则当前项目不应承诺。
+
+若定义为：
+
+> 对指定非 Root 应用，在已声明并处于 active 的访问面中，目标目录不可枚举，已知路径及后代返回 `ENOENT`，mutation 不触及真实对象，其他应用语义不变。
+
+则该能力在技术上有方案方向，但需要设备限定的 VFS 后端和分层 Provider adapter。
+
+### 11.2 当前设备不是“开箱即用”
+
+`myron` 具备 kprobe、ftrace、BPF、module 和 Android 16 GKI 基础，适合作为研发目标机；但：
+
+- 没有 SUSFS backend；
+- KPM ioctl 不可用；
+- 没有标准 LKM dirent/lookup filter ABI；
+- Kasumi 原版没有通过 PathGuard 契约；
+- NoMount 原版没有通过 PathGuard 契约；
+- 还没有 HideLab 对目标内核完成矩阵验证。
+
+所以当前能力状态仍是 `unsupported`，不能因为设备配置丰富就直接标为 supported。
+
+### 11.3 建议方向
+
+短期：先完成 HideLab，以及 Kasumi/NoMount 对照实验，不改生产 schema。
+
+中期：实现一个固定设备、固定父目录、固定 basename、固定 target UID/namespace 的最小 VFS prototype；仅验证 lookup、`atomic_open`、readdir、mutation 和 cache。
+
+长期：若 prototype 通过，再设计 versioned ABI、KMI 白名单和 Provider capabilities。若无法保证 operation 完整性或 OTA 维护成本不可接受，则保持 hide unsupported。
+
+## 12. hide 能力收缩原则
+
+能力收缩不是把“隐藏”改成“打不开”，而是缩小承诺范围。
+
+### 12.1 可以收缩的维度
+
+- 设备：只支持经过验证的 KMI、内核 build fingerprint 或 ROM；
+- 对象：首版只支持共享存储目录，不支持文件、glob、regex；
+- 调用方：只支持非 Root 普通应用主 UID；
+- 生命周期：首版只在应用冷启动前安装，不承诺在线无缝变更；
+- 访问面：用 capability 明确 direct VFS、MediaStore、SAF、Picker；
+- 规则数量：设置有诊断的硬上限；
+- alias：只声明已经解析和验证的 storage roots；
+- 已有 FD：明确不回收。
+
+### 12.2 不可收缩的核心语义
+
+在任何声明为 active 的访问面内，以下项目不能省略：
+
+- 目录枚举不返回 basename；
+- 已知目标和后代不能直接访问；
+- raw syscall 不绕过；
+- mutation 不触达真实对象；
+- 非目标 App 不受影响；
+- 安装失败不部分发布；
+- 状态不谎报；
+- hide 不新增 mount。
+
+### 12.3 产品措辞
+
+允许的措辞：
+
+> 已对 LocalSend 启用 Direct hide；MediaStore、SAF 和 Photo Picker 当前不受保护。
+
+不允许的措辞：
+
+> Nagram 已完全隐身。
+
+运行时必须把边界显示为机器可读 capability 状态，而不是藏在说明文档中。
+
+## 13. 分阶段 Hide 路线
+
+### 13.1 版本定义
+
+| 版本 | 能力 | 保证 | 不包含 |
+|---|---|---|---|
+| Hide 0 / Lab | HideLab 与后端对照 | 能发现泄漏、误伤和破坏性失败 | 不向用户提供 hide |
+| Hide 1.0 Direct | `direct_vfs` | lookup、`atomic_open`、readdir、后代和 mutation 完整 | MediaStore、SAF、Picker、已有 FD |
+| Hide 1.5 Multi-KMI | `direct_vfs` 扩展设备 | 语义不变，扩大 KMI/OEM 白名单 | 不增加 Provider 面 |
+| Hide 2.0 Media | `direct_vfs + mediastore` | query、已知 URI、ContentResolver open 不泄露 | SAF、Picker/Cloud |
+| Hide 3.0 Documents | 增加 `saf` | DocumentsProvider 枚举、搜索、open 一致 | Photo Picker/Cloud |
+| Hide 4.0 Picker | 增加 `photo_picker/cloud_media` | 系统选择器声明范围内一致 | Root、已有 FD、未支持 Provider |
+
+### 13.2 为什么 Hide 1.0 不能是 syscall Hook 试用版
+
+Hide 1.0 虽然只覆盖 direct VFS，但 direct VFS 本身是一个完整一致性域。少一个入口就会出现同一 App 内：
+
+```text
+File.list() 看不到
+raw getdents64 看得到
+
+stat 返回 ENOENT
+open(O_TRUNC) 却截断真实文件
+
+热缓存返回 ENOENT
+冷缓存 atomic_open 成功
+```
+
+这不是“1.0 功能少”，而是“1.0 保证不成立”。实验版本可以内部存在，但不得以 hide 产品能力发布。
+
+### 13.3 阶段退出条件
+
+每个阶段只有两种正常退出：
+
+```text
+PASS         对应 capability 进入受支持矩阵
+UNSUPPORTED  保持未支持并记录证据
+```
+
+不能以“常用 App 看起来可用”“大部分 case 通过”或“失败概率很低”作为发布结论。
+
+## 14. Hide 1.0 最小 VFS 后端设计
+
+### 14.1 单一职责
+
+Hide 1.0 内核后端只负责 direct VFS 的 hidden child 决策。它不负责：
+
+- MediaStore 数据库过滤；
+- SAF/Picker Hook；
+- redirect 或 deny mount；
+- mountinfo 伪装；
+- Root 环境隐藏；
+- glob/regex 编译；
+- UI 和配置持久化。
+
+### 14.2 最小数据模型
+
+概念模型：
+
+```text
+HiddenChild {
+    parent_superblock
+    parent_inode
+    basename
+    immutable_policy
+}
+
+Policy {
+    target_uid
+    target_mount_namespace
+    generation
+}
+```
+
+实现中还需要用户 ID、namespace 生命周期 cookie、长度上限和引用管理，但不应提前加入文件内容、通配符或 Provider 数据。
+
+选择 `(superblock, parent inode, basename)` 的原因：
+
+- 对 alias 后的同一 FUSE parent 可统一匹配；
+- 不依赖易变的完整路径字符串；
+- 不会仅因 inode number 相同而跨 superblock 误伤；
+- readdir 天然拥有 parent 与 child basename；
+- lookup/mutation 也在 parent/name 边界决策。
+
+### 14.3 必须统一治理的 operation
+
+```text
+lookup
+atomic_open
+iterate_shared / iterate
+d_revalidate
+
+create / mkdir / mknod / symlink / link
+unlink / rmdir
+rename source / destination
+```
+
+还必须验证特定内核中 `tmpfile`、whiteout rename flags、`O_PATH` 和 io_uring 等是否进入已覆盖路径。无法证明的 operation 应使该 operation table admission 失败，而不是默认继承。
+
+### 14.4 observer 决策
+
+热路径决策至少绑定：
+
+```text
+current task identity
+verified target UID/user
+target mount namespace generation/cookie
+active immutable policy generation
+```
+
+只检查 UID 不足以覆盖 shared UID、isolated process 和 Provider 代办。Hide 1.0 可以收缩为“不支持 shared UID/isolated/Provider”，但 admission 必须检测并报告，不得误认为普通 per-package 隔离。
+
+### 14.5 缓存一致性
+
+同一 dentry 可能被目标 App 和非目标 App 观察。后端必须处理：
+
+- hide 前已有 positive dentry；
+- hide 后的 synthetic negative dentry；
+- 非目标观察者重新看到真实 entry；
+- disable 后目标观察者恢复；
+- parent rename/delete/recreate；
+- inode 回收与 namespace 销毁。
+
+可以采用 observer-aware `d_revalidate` 或隔离视图，但不能让一个观察者生成的 negative dentry 永久污染所有观察者。
+
+Hide 1.0 建议仅在应用冷启动前发布策略，以减少在线变更面；HideLab 仍要测试 enable/disable，确保控制面不会破坏全局 cache。
+
+### 14.6 事务安装
+
+建议安装流程：
+
+```text
+解析全部目标到受信 storage root
+-> 验证 parent identity 与 basename
+-> 验证所有必需 operation 可安全包装
+-> 分配完整 immutable generation
+-> 安装 shadow/observer 设施
+-> 处理已有 dentry/cache
+-> 原子发布 generation
+```
+
+任一步失败：
+
+```text
+不发布新 generation
+撤销本次安装的所有 shadow
+保持上一 generation 不变
+返回稳定错误和 capability reason
+```
+
+不允许控制面先写入“规则存在”，再忽略数据面安装返回值。
+
+### 14.7 卸载和故障策略
+
+模块退出、daemon 崩溃、namespace 销毁和 OTA ABI 不匹配必须分别定义。建议：
+
+- ABI/KMI 不匹配：后端不加载，规则 `unsupported`；
+- 规则编译失败：旧 generation 保持 active；
+- 后端部分安装失败：整体回滚；
+- daemon 消失：已发布 immutable policy 可继续，或明确 fail-closed 停止应用启动；
+- 无法安全恢复原 operation table：设备不进入支持矩阵。
+
+## 15. capability、admission 与状态模型
+
+### 15.1 配置表达意图，不写死版本号
+
+未来配置应声明所需能力，而不是 `hide_version = 2`：
+
+```toml
+[[visibility]]
+package = "org.localsend.localsend_app"
+path = "Pictures/Nagram"
+capabilities = ["direct_vfs", "mediastore"]
+```
+
+版本属于发布路线；capability 才是机器可判定的契约。
+
+### 15.2 admission 输入
+
+```text
+package -> 当前 user/UID/package attribution
+storage path -> canonical root + parent identity + basename
+requested capabilities
+kernel release + build fingerprint + KMI generation
+root framework/runtime mode
+backend protocol version
+Provider/APEX version
+operation table feature probe
+规则/内存容量
+```
+
+### 15.3 运行时状态
+
+示例：
+
+```text
+rule=localsend:nagram
+generation=42
+
+direct_vfs    active
+mediastore    active
+saf           unsupported(reason=no_adapter)
+photo_picker  unsupported(reason=no_adapter)
+```
+
+若规则请求 `direct_vfs + mediastore`，但 `mediastore` 缺失，则整条规则状态应是：
+
+```text
+rejected(reason=required_capability_missing:mediastore)
+```
+
+而不是偷偷启用 direct 部分。
+
+### 15.4 状态枚举建议
+
+```text
+unsupported  设备/版本没有实现
+inactive     能力存在但规则未启用
+admitting    正在事务验证，尚未发布
+active       全部请求能力已发布
+failed       运行时故障，带稳定 reason
+rejected     规则或环境不满足准入
+```
+
+状态必须能被 CLI、Manager 和 HideLab 读取，且与真实数据面结果交叉验证。
+
+## 16. HideLab：自动化测试“矛”
+
+### 16.1 目标
+
+HideLab 的任务不是证明某个 UI 看起来正常，而是主动寻找：
+
+```text
+LEAK              目标 App 发现或访问隐藏对象
+OVERBLOCK         Control App 或兄弟项被误伤
+SEMANTIC_DRIFT    errno、alias、缓存次序结果不一致
+DESTRUCTIVE_FAIL  返回失败但真实对象已被修改
+STATE_LIE         runtime 报 active，但数据面未完整安装
+CRASH/HANG        内核、Provider 或 App 崩溃/卡死
+```
+
+### 16.2 三观察者架构
+
+```text
+                    Host Orchestrator
+                           |
+          +----------------+----------------+
+          |                |                |
+  Target Probe App  Control Probe App   Root Oracle
+  受 hide policy     不受 hide policy     真实/backing视图
+  主动尝试绕过       验证正常可见性       校验无破坏
+```
+
+任何 hide case 都不能只有 Target Probe。否则“目标看不到”可能是权限、挂载损坏或整个存储不可用造成的。
+
+### 16.3 建议组件
+
+```text
+tests/device/hide/
+  app-probe-target/       独立 package/UID
+  app-probe-control/      独立 package/UID
+  native/                 共享 JNI/raw syscall probe
+  fixtures/               fixture manifest/schema
+  orchestrator/           host/device runner
+  schemas/                JSONL 与 summary schema
+```
+
+实际实现时优先复用现有：
+
+```text
+tests/device/hide/app-probe
+native/libs/arm64-v8a/pathguard_hide_vfs_probe
+run_hide_h0_baseline.ps1
+run_hide_h0_app_probe.ps1
+collect_hide_h0_app_evidence.ps1
+```
+
+不应重写已有 Java/NIO/JNI、MediaStore、Picker、SAF 和 native probe；应把它们扩展成双 App + Root Oracle 的统一协议。
+
+### 16.4 一次性 fixture
+
+所有 mutation 只能针对随机、一次性测试目录：
+
+```text
+Pictures/PathGuardHideLab/<run-id>/
+  hidden/
+    canary.txt
+    child/
+      nested.txt
+  visible-sibling/
+    writable.txt
+  rename-source/
+  same-prefix-hidden-x/
+```
+
+禁止对真实 `Pictures/Nagram` 执行 create/truncate/rename/unlink 测试。真实目录只可用于只读观察案例。
+
+`<run-id>` 必须不可预测且全局唯一，使新 basename 自然形成 cold-dentry case；默认不使用全局 `drop_caches`，避免改变整机状态和掩盖真实生命周期问题。
+
+### 16.5 Root Oracle 基线
+
+启用规则前记录：
+
+```text
+storage alias 与 backing path
+mount namespace 与 mountinfo hash
+每个对象的 superblock/device/inode
+目录树结构
+文件 size/mode/mtime
+canary SHA-256
+兄弟项写入能力
+```
+
+每组 mutation 后重新校验：
+
+- hidden canary 内容和长度未变；
+- hidden 目录未被删除、移动或覆盖；
+- 没有意外新建隐藏 basename；
+- visible sibling 仍可正常写入；
+- Control App 仍能看到和打开真实对象；
+- hide 没有新增 mountinfo 记录。
+
+### 16.6 Target Probe 的攻击面
+
+Target Probe 必须同时包含：
+
+- Java `File`；
+- Java NIO；
+- JNI/libc；
+- raw syscall；
+- MediaStore/ContentResolver；
+- SAF；
+- Photo Picker；
+- 多线程和多进程；
+- 已知完整路径与枚举发现；
+- 可控的缓存次序。
+
+Native probe 不应依赖目标 libc wrapper 来发关键 syscall，否则无法验证 wrapper Hook 绕过。
+
+### 16.7 Control Probe 的职责
+
+Control Probe 执行与 Target Probe 相同的只读用例，并执行受控兄弟项写入。它用于发现：
+
+- hide 规则全局生效；
+- shared inode operation 替换污染非目标观察者；
+- negative dentry 被错误共享；
+- storage parent 被整体 Overlay/mount 替换；
+- 规则 disable 后视图未恢复。
+
+### 16.8 Orchestrator
+
+Host Orchestrator 负责：
+
+1. 采集设备 fingerprint 和 capability；
+2. 创建一次性 fixture；
+3. 采集 Root Oracle 基线；
+4. 启动 Control/Target 前置观察；
+5. 请求 hide rule admission；
+6. 验证 runtime status；
+7. 按固定顺序执行测试矩阵；
+8. 每组后执行 Oracle 校验；
+9. disable rule 并验证恢复；
+10. 只删除本次 manifest 明确记录的 fixture；
+11. 生成 JSONL、summary 和人类可读报告。
+
+APK 安装、权限变更和共享存储 mutation 都会改变设备状态。执行对应 runner 前仍需明确批准；本文只定义测试系统，不授权实际安装或 mutation。
+
+## 17. HideLab 自动化测试矩阵
+
+### 17.1 基础枚举与属性
+
+| Case | Target 期望 | Control 期望 |
+|---|---|---|
+| Java `File.list/listFiles` | 不含 hidden | 包含 hidden |
+| NIO `DirectoryStream` | 不含 hidden | 包含 hidden |
+| libc `readdir` | 不含 hidden | 包含 hidden |
+| raw `getdents64` | 不含 hidden | 包含 hidden |
+| `stat/lstat/statx` | `ENOENT` | 成功 |
+| `access/faccessat2` | `ENOENT` | 符合真实权限 |
+| `readlinkat` | 不泄露隐藏目标 | 符合真实语义 |
+| `O_PATH` | `ENOENT` | 成功 |
+
+`getdents64` 必须覆盖 4 KiB、32 KiB、64 KiB、128 KiB buffer 和跨多轮读取，防止只过滤第一批目录项。
+
+### 17.2 open 与后代
+
+```text
+open
+openat(relative dirfd)
+openat2 + RESOLVE_* flags
+opendir
+已知 hidden/child/nested.txt
+先打开 Pictures dirfd，再启用 hide 后访问
+```
+
+所有 Target 结果必须为 `ENOENT`；Control 应按真实权限成功。`EACCES`、空目录或成功后关闭 FD 都不算通过。
+
+### 17.3 alias 与规范化
+
+```text
+/sdcard/...
+/storage/emulated/0/...
+/mnt/user/0/emulated/0/...
+应用 namespace 中可达的其他 alias
+相对 cwd
+相对 dirfd
+符号链接 alias
+`.` / `..` / 重复 `/`
+```
+
+同一 capability 声明内，任一可达 alias 泄漏即失败。backing/pass-through 若不在声明范围，必须先证明 Target namespace 不可达并报告 `out_of_scope`，不能跳过不说明。
+
+### 17.4 mutation
+
+| 操作 | Target 期望 | Root Oracle |
+|---|---|---|
+| `open(O_CREAT)` hidden basename | `ENOENT` | 未创建/未覆盖 |
+| `open(O_EXCL)` | `ENOENT` | 原对象不变 |
+| `open(O_TRUNC)` | `ENOENT` | canary hash/size 不变 |
+| `mkdir/mknod/symlink` | `ENOENT` | 结构不变 |
+| `unlink/rmdir` | `ENOENT` | 对象仍存在 |
+| `rename hidden -> visible` | `ENOENT` | hidden 未移动 |
+| `rename visible -> hidden` | `ENOENT` | hidden 未覆盖，source 仍在 |
+| `renameat2(NOREPLACE)` | `ENOENT` | 两侧均不变 |
+| `link visible -> hidden` | `ENOENT` | link count/结构不变 |
+
+若 syscall 返回失败但 Oracle 发现任何副作用，分类必须是 `DESTRUCTIVE_FAIL`，严重级别高于普通 `LEAK`。
+
+### 17.5 缓存和顺序敏感
+
+必须显式测试：
+
+```text
+cold unique name -> direct open/openat
+cold unique name -> opendir
+cold -> stat -> open
+readdir parent -> open hidden
+Control 预热 positive dentry -> 启用 hide -> Target open
+Target 预热 positive dentry -> 启用 hide -> Target open
+启用 -> 禁用 -> Target/Control 再访问
+禁用 -> 重新启用新 generation
+parent rename/delete/recreate 后再访问
+```
+
+这组用例专门发现 Kasumi/NoMount 类 `.lookup` 与 `.atomic_open` 路径分裂、positive/negative dentry 污染和规则更新失效。
+
+### 17.6 并发与容量
+
+```text
+1 / 20 / 21 / 40 / 41 / 128 threads
+lookup + getdents + open 混合
+规则 generation 切换
+App force-stop/cold-start
+namespace 创建/销毁
+目录 rename/recreate
+达到规则硬上限及上限 + 1
+```
+
+任何 `nmissed`、固定 probe instance 耗尽或偶发 basename 泄漏都判失败。错误必须 fail closed 或拒绝 admission，不能以统计成功率接受。
+
+### 17.7 身份隔离
+
+```text
+Target package 主进程
+Target :remote 进程
+Control 独立 UID
+同 user 的其他 App
+副用户/工作资料
+shared UID 两包
+isolated process
+WebView renderer / child zygote
+```
+
+Hide 1.0 若不支持其中某类身份，应在 admission 前拒绝或明确从规则中排除，不得运行后才出现全局误伤。
+
+### 17.8 Provider 与选择器
+
+Hide 2.0+ 分别增加：
+
+```text
+MediaStore query：projection 有/无 _data
+album/recent/search/thumbnail
+已知 content URI query/open
+ContentResolver openFileDescriptor
+
+SAF queryChildDocuments/search/recent/openDocument
+Photo Picker local/recent/search/open
+CloudMediaProvider query/open
+```
+
+Provider case 必须验证 Binder caller attribution；不能仅按 Provider 自身 UID 命中或全局隐藏。
+
+### 17.9 mount 与可观察状态
+
+规则启用前后比较：
+
+```text
+/proc/self/mountinfo
+/proc/self/mounts
+/proc/self/mountstats
+namespace inode
+```
+
+Hide 本身不得产生新 mount。若同一 App 同时配置 deny/redirect，报告应区分既有 mount 与 hide 新增变化，不能误把其他能力的 mount 当成 hide 失败。
+
+### 17.10 权限矩阵
+
+Target/Control 至少覆盖：
+
+```text
+普通共享存储权限
+READ_MEDIA_IMAGES
+MANAGE_EXTERNAL_STORAGE
+```
+
+权限 profile 必须分批执行和记录。grant/revoke 会改变设备状态，不能由测试脚本静默完成。
+
+## 18. 结果协议与准入门
+
+### 18.1 JSONL 示例
+
+```json
+{"case":"direct_open_cold","observer":"target","expected":"ENOENT","actual":"SUCCESS","result":"LEAK"}
+{"case":"rename_to_hidden","observer":"target","expected":"ENOENT_NO_SIDE_EFFECT","actual":"SUCCESS","result":"DESTRUCTIVE_FAIL"}
+{"case":"control_readdir","observer":"control","expected":"CONTAINS","actual":"OMITTED","result":"OVERBLOCK"}
+```
+
+每条记录至少包含：
+
+```text
+schema/run_id/timestamp
+device fingerprint/kernel/KMI/root framework
+backend/protocol/generation/capability state
+observer/package/uid/user/namespace
+fixture/alias/operation/arguments
+expected/actual/errno/duration
+oracle before/after hash
+result/reason
+```
+
+### 18.2 结果分类
+
+```text
+PASS
+LEAK
+OVERBLOCK
+SEMANTIC_DRIFT
+DESTRUCTIVE_FAIL
+STATE_LIE
+CRASH
+HANG
+UNSUPPORTED
+INFRA_ERROR
+```
+
+`UNSUPPORTED` 是设备能力结论，不是测试通过；`INFRA_ERROR` 必须重跑，不能算后端失败或成功。
+
+### 18.3 Hide 1.0 准入门
+
+一个设备 profile 只有同时满足以下条件才能进入 `direct_vfs supported`：
+
+1. 所有基础枚举、属性、open、后代、alias 和 mutation case 通过；
+2. 所有缓存次序通过，包括 cold open 和 positive dentry 预热；
+3. Target 不泄漏，Control 不误伤，Root Oracle 无副作用；
+4. 并发和容量边界无漏拦、崩溃、hang、UAF 或 `nmissed`；
+5. admission/status 与数据面一致；
+6. hide 启用不新增 mount；
+7. 模块加载、规则回滚、App restart 和 namespace 销毁可重复；
+8. KMI/内核 build fingerprint 被明确记录并白名单化；
+9. 真实 LocalSend 只读工作流通过，但不替代 probe 矩阵；
+10. 有已验证的禁用/回滚路径。
+
+任一核心 case 失败，整个 device profile 不支持 Hide 1.0。不能把失败入口降级为“该 API 不支持”，因为 direct VFS 内部入口可由攻击应用自由选择。
+
+### 18.4 Provider 阶段准入
+
+Hide 2.0/3.0/4.0 的 Provider capability 分别准入。某个 Provider adapter 失败不应撤销已经验证的 Direct backend，但请求组合规则不能部分激活。
+
+示例：
+
+```text
+设备能力：direct_vfs=active, mediastore=unsupported
+规则请求：direct_vfs
+结果：允许 active
+
+规则请求：direct_vfs + mediastore
+结果：rejected，不发布 direct 部分
+```
+
+## 19. 性能与可靠性预算
+
+### 19.1 热路径约束
+
+建议沿用 `07` 的 H0 预算：
+
+| 场景 | P95 回归上限 |
+|---|---:|
+| 无 active hide policy | 1% |
+| 其他 namespace 有规则，当前无规则 | 2% |
+| 当前 namespace 最多 256 条规则的 non-match | 3% |
+
+同时报告绝对纳秒、样本数和至少 30 轮统计，避免微基准噪声。
+
+热路径设计要求：
+
+```text
+零动态分配
+零全局 mutex
+零常规日志
+有界 lookup
+不可变 generation
+容量在 admission 时检查
+```
+
+### 19.2 benchmark
+
+```text
+stat/open non-match
+lookup match
+readdir 100 / 1,000 / 10,000 / 100,000 entries
+1 / 20 / 128 并发线程
+应用冷启动
+规则发布/回滚
+MediaStore query 100 / 1,000 rows
+```
+
+### 19.3 稳定性
+
+至少执行：
+
+- 反复 app force-stop/cold-start；
+- namespace create/destroy soak；
+- policy generation 更新 soak；
+- Provider restart（对应阶段）；
+- 内存分配失败和容量故障注入；
+- backend unload/disable 恢复；
+- tombstone、kernel log、RCU stall 和 hung task 扫描。
+
+## 20. 实施顺序
+
+### Phase A：冻结契约和建设 HideLab
+
+产物：
+
+- 本文与 exact semantics checklist；
+- Target/Control 双 App；
+- native raw syscall probe；
+- Root Oracle；
+- disposable fixture 与 JSONL schema；
+- baseline：无 hide 后端时 Target/Control 均可见。
+
+停止条件：若测试不能可靠区分 LEAK、OVERBLOCK 与 DESTRUCTIVE_FAIL，不进入内核实现。
+
+### Phase B：Kasumi 与 NoMount 对照实验
+
+目的不是产品集成，而是用 HideLab 验证两种 VFS whiteout 源码审计：
+
+- cold `atomic_open` 是否绕过；
+- `stat -> open` 与 `open first` 是否分裂；
+- mutation 是否触达真实对象；
+- Kasumi 的 VIEW/SPOOF scope、NoMount 的 UID/bypass scope 是否误伤 Control；
+- NoMount 同路径多 UID rule 是否互相覆盖；
+- 安装失败时 ioctl/status 是否谎报。
+
+产物是证据报告，不把 Kasumi 或 NoMount 代码并入生产树。
+
+### Phase C：固定目标最小原型
+
+只实现：
+
+```text
+单一受支持内核
+单一 target UID/namespace
+单一 parent/basename
+lookup + atomic_open + readdir + mutation + d_revalidate
+```
+
+不实现动态 schema、UI、Provider、glob、文件级规则或通用 KMI。
+
+停止条件：任一 direct case 无法 fail closed，或共享 inode operation 无法安全恢复，则停止后端路线并保持 unsupported。
+
+### Phase D：versioned ABI 与多规则
+
+在固定原型完整通过后才增加：
+
+- immutable policy generation；
+- 多 parent/child；
+- versioned control ABI；
+- package/user/UID/namespace admission；
+- 硬容量和诊断；
+- 事务 replace/rollback。
+
+### Phase E：Hide 1.0 设备白名单
+
+建立：
+
+- kernel release/build fingerprint/KMI matrix；
+- operation layout probe；
+- OTA 后自动降级为 `unsupported` 的规则；
+- 安装前检查与恢复方案；
+- 至少两个 ROM/设备家族的证据，若产品只批准单设备发布则明确单设备声明。
+
+### Phase F：Provider capabilities
+
+按 MediaStore -> SAF -> Picker/Cloud 顺序独立推进。每个 adapter 都应拥有自己的 ADR、测试矩阵和 status bit，不扩大内核后端职责。
+
+## 21. 停止条件与明确不实施项
+
+遇到以下任一条件，应停止相应路线，而不是继续堆 Hook：
+
+- 必须在 syscall 成功后改写返回值才能隐藏；
+- mutation 副作用无法在执行前阻断；
+- operation 包装存在已知未治理入口；
+- 缓存只能通过全局关闭或频繁 `drop_caches` 保证；
+- 规则不能逐 App/namespace 隔离；
+- 固定 probe 容量耗尽会 fail-open；
+- ABI/KMI 不匹配仍允许加载；
+- 需要用 mountinfo 字符串 Hook 掩盖新增 mount；
+- Provider 无法可靠恢复调用方，却尝试按猜测 package 过滤；
+- Control App 或兄弟项语义发生变化。
+
+当前明确不实施：
+
+```text
+用 bind mount 冒充 hide
+OverlayFS 单目录 whiteout 后端
+仅 Java/libc Hook 的 Hide 1.0
+PathMask 式 post-success 返回值改写
+没有 per-app ABI 的 SUSFS 全局 adapter
+整体引入 Kasumi
+整体引入 NoMount
+hide 失败自动降级 deny
+在 HideLab 完成前修改 rules.toml 和 Manager UI
+```
+
+## 22. 风险与明确不保证
+
+### 22.1 不保证的攻击者
+
+- Root 应用；
+- 内核代码执行；
+- ptrace/调试等高权限攻击者；
+- 能读取 PathGuard 控制面或 Root 日志的主体。
+
+### 22.2 不保证的对象引用
+
+- hide 激活前已有 FD；
+- 其他进程已经代开并传入的 FD；
+- 对应 Provider capability 未 active 时的 content URI；
+- 未纳入 capability 的 backing/pass-through view。
+
+### 22.3 可写父目录侧信道
+
+真实不存在的名称通常允许创建；隐藏一个真实对象后，为保护真实对象，PathGuard 对该名称的创建也返回 `ENOENT`。恶意应用可能通过写入结果、时序或系统 Provider 侧信道推断异常。
+
+完全模拟“对象从未存在且可以创建一个私有同名新对象”需要 shadow writable filesystem，已经是完整隔离/虚拟化能力，不属于 hide。
+
+### 22.4 兼容与 OTA 风险
+
+VFS 内部实现不是稳定 Android 应用 ABI。任何内核、Root framework、MediaProvider APEX 或 OEM OTA 都可能改变能力判断。
+
+正确策略是 OTA 后重新 admission，不是沿用旧的 `active` 缓存。无法证明兼容时报告 `unsupported`。
+
+## 23. 架构原则
+
+### KISS
+
+- Hide 1.0 只解决 direct hidden child；
+- 以 parent identity + basename 建模；
+- 固定原型先于通用配置；
+- capability 状态直接表达真实边界。
+
+### YAGNI
+
+- 首版不做文件、glob、regex、shadow writable view；
+- 不在后端可行前升级 schema/UI；
+- 不整体引入 Kasumi 的注入、合并和 spoof 能力；
+- 不整体引入 NoMount 的系统文件注入、global UID bypass 和 superblock 改写；
+- 不为尚未批准的 ROM 提前维护兼容分支。
+
+### DRY
+
+- 扩展 `tests/device/hide` 的现有 probe，而不是另写第二套；
+- Target/Control 共享 native case library 和结果 schema；
+- 所有 adapter 复用 capability/admission/status 协议；
+- Root Oracle 统一校验所有 mutation。
+
+### SOLID
+
+- Direct VFS、MediaStore、SAF、Picker adapter 单一职责；
+- 新 Provider 通过 capability 扩展，不修改 VFS 核心契约；
+- 控制面依赖 versioned backend interface，不依赖具体项目实现；
+- 测试 probe、orchestrator、oracle 分离，便于独立替换。
+
+## 24. 决策记录
+
+| 决策 | 状态 | 理由 |
+|---|---|---|
+| `hide` 与 `deny` 分离 | Accepted | 可观察语义和后端不同 |
+| exact hide 核心语义不降级 | Accepted | 防止产品名称掩盖泄漏 |
+| 允许设备/KMI 限定 | Accepted | 通用 stock kernel 缺少稳定机制 |
+| 按访问面 capability 分阶段 | Accepted | Provider 与 direct VFS 是不同主体 |
+| Hide 1.0 必须完整覆盖 direct VFS | Accepted | 入口遗漏即可绕过或破坏 |
+| OverlayFS 正式路线 | Rejected | mountinfo 与兄弟写语义冲突 |
+| PathMask/NoOpt 数据面 | Rejected | post-success、副作用和 fail-open |
+| SUSFS 2.2 直接 adapter | Blocked | 缺少逐规则 per-app/namespace ABI |
+| Kasumi 原版直接集成 | Rejected | atomic_open、mutation、scope、事务缺口 |
+| NoMount 原版直接集成 | Rejected | atomic_open、mutation、namespace、多 UID rule、事务缺口 |
+| 最小 PathGuard VFS 后端 | Proposed | 最接近冻结语义，需 HideLab 证明 |
+| HideLab 先于生产实现 | Accepted | 没有攻击矩阵就无法证明能力 |
+
+## 25. 后续交付清单
+
+只有以下清单按顺序完成，才讨论对用户开放配置：
+
+- [ ] 将本文件与 `07` 的 exact semantics 转成机器可执行 case IDs；
+- [ ] 将现有 H0 probe 升级为 Target/Control 双 App；
+- [ ] 实现 Root Oracle 与 disposable fixture manifest；
+- [ ] 增加 raw syscall、mutation、alias、cache-order 矩阵；
+- [ ] 定义 JSONL schema 和 summary gate；
+- [ ] 运行无后端 baseline；
+- [ ] 运行 Kasumi API 17 与 NoMount v20 对照实验并归档证据；
+- [ ] 完成固定内核最小 VFS prototype；
+- [ ] 通过 Hide 1.0 全矩阵和可靠性测试；
+- [ ] 决定支持设备/KMI 与 OTA 策略；
+- [ ] 设计 versioned ABI 和 capability status；
+- [ ] 最后才修改规则 schema、daemon、CLI 与 Manager；
+- [ ] MediaStore、SAF、Picker 按独立阶段推进。
+
+## 26. 资料来源
+
+### 26.1 项目文档与本地证据
+
+| 资料 | 用途 |
+|---|---|
+| `docs/07-hide-capability-research-and-design.md` | exact semantics、候选路线、H0 结论、性能预算 |
+| `tests/device/hide/README.md` | 已有 native/app probe、sandbox 安全约束和证据格式 |
+| `tests/device/hide/H0.1_*` | Android 13/alioth baseline、权限与 selector 观察 |
+| `tests/device/hide/H0.2_MEDIAPROVIDER_FUSE_ALIOTH_20260728.md` | MediaProvider FUSE 调研与 kill decision |
+| `tests/device/hide/H0.3_LKM_INTERFACE_AUDIT_ALIOTH_20260728.md` | LKM/KMI 接口审计 |
+| `tests/device/hide/H0.4_SUSFS_AND_H0_DECISION_ALIOTH_20260728.md` | SUSFS ABI 与 H0 unsupported 结论 |
+| `build/device-evidence/p6-final-device-myron-v019-20260801/device-snapshot.json` | myron 既有设备、内核和 Root 版本证据 |
+| `refer/Kasumi-main` | Kasumi API 17 本地源码审计 |
+| `refer/hide-refer/nomount-master` | NoMount v20 静态源码审计；未在本机加载或运行 |
+
+### 26.2 权威平台资料
+
+| 资料 | 用途 |
+|---|---|
+| [Linux pathname lookup](https://docs.kernel.org/filesystems/path-lookup.html) | namei、dcache、lookup 语义 |
+| [Linux Kprobes](https://docs.kernel.org/trace/kprobes.html) | kprobe/kretprobe、`maxactive/nmissed` 和 handler 约束 |
+| [Linux OverlayFS](https://docs.kernel.org/filesystems/overlayfs.html) | whiteout、copy-up、merged readdir |
+| [Android GKI stable KMI](https://source.android.com/docs/core/architecture/kernel/stable-kmi) | GKI 符号稳定边界 |
+| [Android loadable kernel modules](https://source.android.com/docs/core/architecture/kernel/loadable-kernel-modules) | Android LKM 构建和加载约束 |
+| [AOSP Android 16 FUSE dir.c](https://android.googlesource.com/kernel/common/+/refs/tags/android16-6.12-2025-12_r53/fs/fuse/dir.c) | FUSE lookup/atomic_open 参考实现 |
+| [AOSP MediaProvider FuseDaemon.cpp](https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/main/jni/FuseDaemon.cpp) | 请求 UID、lookup、readdir、cache |
+| [Android Photo Picker](https://developer.android.com/training/data-storage/shared/photopicker) | Picker 独立访问面 |
+| [Android DocumentsProvider](https://developer.android.com/guide/topics/providers/document-provider) | SAF/DocumentsProvider 模型 |
+
+### 26.3 参考项目
+
+| 项目 | 结论 |
+|---|---|
+| [Rouyashiki/Kasumi](https://github.com/Rouyashiki/Kasumi) | dirhijack 机制参考；原版不满足 PathGuard exact hide |
+| [SUSFS](https://gitlab.com/simonpunk/susfs4ksu) | namei/getdents 机制参考；现有 ABI 缺少逐规则 scope |
+| `refer/hide-refer/LKM-PathMask-main` | KMI 打包/诊断参考；post-syscall 数据面拒绝 |
+| `refer/hide-refer/nomount-master` | 无 mount、per-UID VFS whiteout 参考；原版不满足 exact hide |
+| `refer/Storage-redirection-X-Public-main` | 整盘隔离、storage alias 和兄弟目录恢复成本参考 |
+
+参考项目只用于事实分析和独立设计。正式实现不得未经许可证和架构审查复制 copyleft 源码；更重要的是，任何参考项目名称都不能替代 HideLab 的设备级行为证明。
+
+## 27. 最终结论
+
+PathGuard 可以继续研究“真隐藏”，但正确路线不是寻找一个看起来能过滤文件列表的 Hook，而是：
+
+```text
+冻结 exact semantics
+-> 收缩设备、对象和访问面
+-> 建设 HideLab 攻击矩阵
+-> 验证最小 direct VFS 后端
+-> 用 capability 分阶段扩展 MediaStore/SAF/Picker
+-> 任一必需能力缺失时拒绝激活
+```
+
+最重要的产品边界是：
+
+```text
+deny 追求广覆盖、稳定地阻止访问；
+hide 追求声明范围内不可发现，并接受更严格的设备准入。
+```
+
+分阶段交付能降低工程风险，但不能降低每个阶段已经承诺的语义质量。HideLab 是判断这条边界是否真实成立的“矛”；没有通过它的后端，只能继续保持 `unsupported`。
