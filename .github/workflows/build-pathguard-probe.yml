@@ -2,6 +2,12 @@ name: Build PathGuard LKM Probe
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/pattern-redirect-v6
+    paths:
+      - .github/workflows/build-pathguard-probe.yml
+      - experimental/hide-vfs/probe/**
 
 permissions:
   contents: read
