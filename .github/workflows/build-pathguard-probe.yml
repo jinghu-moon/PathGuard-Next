@@ -8,6 +8,10 @@ on:
     paths:
       - .github/workflows/build-pathguard-probe.yml
       - experimental/hide-vfs/probe/**
+      - experimental/hide-vfs/loader/**
+      - tests/unit/hide_loader_fixture.h
+      - tests/unit/hide_loader_test.cpp
+      - tests/unit/restricted_loader_test.cpp
 
 permissions:
   contents: read
@@ -18,6 +22,74 @@ env:
   OFFLINE_TEST_VERMAGIC: 6.12.23-android16-5-g16e473de48a3-abogki462654244-4k SMP preempt mod_unload modversions aarch64
 
 jobs:
+  build-restricted-loader:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out PathGuard
+        uses: actions/checkout@v6
+
+      - name: Run host loader tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/pathguard-loader
+          common=(
+            -std=c++20 -Wall -Wextra -Werror
+            -Iexperimental/hide-vfs/loader
+            -Itests/unit
+            experimental/hide-vfs/loader/offline_module_adapter.cpp
+            experimental/hide-vfs/loader/restricted_loader.cpp
+          )
+          clang++ "${common[@]}" tests/unit/hide_loader_test.cpp \
+            -o out/pathguard-loader/hide_loader_test
+          clang++ "${common[@]}" tests/unit/restricted_loader_test.cpp \
+            -o out/pathguard-loader/restricted_loader_test
+          out/pathguard-loader/hide_loader_test
+          out/pathguard-loader/restricted_loader_test
+
+      - name: Build Android arm64 prepare-only loader
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ANDROID_NDK_LATEST_HOME:?GitHub runner must provide an Android NDK}"
+          toolchain="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cxx="$toolchain/aarch64-linux-android26-clang++"
+          readelf="$toolchain/llvm-readelf"
+          nm="$toolchain/llvm-nm"
+          test -x "$cxx"
+          "$cxx" -std=c++20 -Wall -Wextra -Werror -static-libstdc++ \
+            -fPIE -pie -Iexperimental/hide-vfs/loader \
+            experimental/hide-vfs/loader/offline_module_adapter.cpp \
+            experimental/hide-vfs/loader/restricted_loader.cpp \
+            experimental/hide-vfs/loader/restricted_loader_main.cpp \
+            -o out/pathguard-loader/pathguard_lkm_loader-android-arm64
+
+          binary=out/pathguard-loader/pathguard_lkm_loader-android-arm64
+          "$readelf" -hW "$binary" > out/pathguard-loader/elf-header.txt
+          "$readelf" -dW "$binary" > out/pathguard-loader/elf-dynamic.txt
+          "$nm" -u "$binary" > out/pathguard-loader/undefined-symbols.txt
+          sha256sum "$binary" > out/pathguard-loader/sha256.txt
+          printf '%s\n' "$ANDROID_NDK_LATEST_HOME" \
+            > out/pathguard-loader/android-ndk.txt
+          printf '%s\n' "$GITHUB_SHA" > out/pathguard-loader/pathguard-commit.txt
+
+          grep -Eq 'Type:[[:space:]]+DYN' out/pathguard-loader/elf-header.txt
+          grep -Eq 'Machine:[[:space:]]+AArch64' out/pathguard-loader/elf-header.txt
+          ! grep -Eq 'libc\+\+_shared\.so' out/pathguard-loader/elf-dynamic.txt
+          ! grep -Eq '(^|[[:space:]])(init_module|finit_module)($|[[:space:]@])' \
+            out/pathguard-loader/undefined-symbols.txt
+          ! grep -Raq '/proc/sys/kernel/kptr_restrict' "$binary"
+
+      - name: Upload restricted loader report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pathguard-loader-android16-6.12
+          path: out/pathguard-loader/
+          if-no-files-found: error
+          retention-days: 14
+
   build-probe:
     runs-on: ubuntu-latest
     container:

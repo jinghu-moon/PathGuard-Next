@@ -483,7 +483,14 @@ bool ParseKernelSymbols(std::string_view text, KernelSymbolMap* symbols,
             continue;
         }
         if (fields >> extra) {
-            break;
+            std::string trailing;
+            if (extra.size() < 3 || extra.front() != '[' ||
+                extra.back() != ']' || fields >> trailing) {
+                *error = "invalid kallsyms fields at line " +
+                         std::to_string(line_number);
+                symbols->clear();
+                return false;
+            }
         }
 
         std::uint64_t address = 0;

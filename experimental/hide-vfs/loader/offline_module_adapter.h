@@ -12,6 +12,8 @@ namespace pathguard::hide::lkm {
 
 enum class AdapterErrorCode {
     kNone,
+    kIo,
+    kUnsupportedOperation,
     kInvalidElf,
     kUnsupportedElf,
     kMalformedElf,
