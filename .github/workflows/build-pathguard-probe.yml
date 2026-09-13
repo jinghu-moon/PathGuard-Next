@@ -77,7 +77,7 @@ jobs:
 
           versions_size="$({
             llvm-readelf -SW "$report/pathguard_probe.ko" \
-              | awk '$3 == "__versions" { print $7; found=1 } END { if (!found) print "MISSING" }'
+              | awk '$2 == "__versions" { print $6; found=1 } END { if (!found) print "MISSING" }'
           })"
           printf '%s\n' "$versions_size" > "$report/versions-size-hex.txt"
 
