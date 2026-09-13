@@ -1,0 +1,104 @@
+name: Build PathGuard LKM Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DDK_IMAGE: ghcr.io/ylarod/ddk-min:android16-6.12-20260828
+  KMI: android16-6.12
+
+jobs:
+  build-probe:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:android16-6.12-20260828
+
+    steps:
+      - name: Check out PathGuard
+        uses: actions/checkout@v4
+
+      - name: Validate DDK environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${KDIR:?The DDK image must export KDIR}"
+          test "$(basename "${KDIR%/}")" = "$KMI"
+          test -f "$KDIR/Makefile"
+          test -f "$KDIR/vmlinux"
+          command -v clang
+          command -v llvm-readelf
+          command -v llvm-nm
+          command -v llvm-strip
+          {
+            echo "ddk_image=$DDK_IMAGE"
+            echo "kdir=$KDIR"
+            echo "kmi=$KMI"
+            clang --version | head -n 1
+          } | tee "$GITHUB_WORKSPACE/ddk-environment.txt"
+
+      - name: Build minimal probe
+        shell: bash
+        working-directory: experimental/hide-vfs/probe
+        run: |
+          set -euo pipefail
+          CC=clang make
+          test -s pathguard_probe.ko
+
+      - name: Inspect and validate ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          module="$GITHUB_WORKSPACE/experimental/hide-vfs/probe/pathguard_probe.ko"
+          report="$GITHUB_WORKSPACE/out/pathguard-probe"
+          mkdir -p "$report"
+
+          cp "$module" "$report/pathguard_probe.unstripped.ko"
+          llvm-strip -d -o "$report/pathguard_probe.ko" "$module"
+
+          llvm-readelf -hW "$report/pathguard_probe.ko" > "$report/elf-header.txt"
+          llvm-readelf -SW "$report/pathguard_probe.ko" > "$report/elf-sections.txt"
+          llvm-readelf -sW "$report/pathguard_probe.ko" > "$report/elf-symbols.txt"
+          llvm-readelf -p .modinfo "$report/pathguard_probe.ko" > "$report/modinfo.txt"
+          llvm-nm -u --format=posix "$report/pathguard_probe.ko" \
+            | awk '{print $1}' | sort -u > "$report/undefined-symbols.txt"
+          llvm-nm --defined-only --format=posix "$KDIR/vmlinux" \
+            | awk '{print $1}' | sort -u > "$report/vmlinux-defined-symbols.txt"
+          comm -23 "$report/undefined-symbols.txt" \
+            "$report/vmlinux-defined-symbols.txt" > "$report/missing-symbols.txt"
+
+          grep -Eq 'Machine:[[:space:]]+AArch64' "$report/elf-header.txt"
+          grep -q 'vermagic=' "$report/modinfo.txt"
+          test ! -s "$report/missing-symbols.txt"
+
+          versions_size="$({
+            llvm-readelf -SW "$report/pathguard_probe.ko" \
+              | awk '$3 == "__versions" { print $7; found=1 } END { if (!found) print "MISSING" }'
+          })"
+          printf '%s\n' "$versions_size" > "$report/versions-size-hex.txt"
+          test "$versions_size" = "000000"
+
+          grep -E '^(CONFIG_|# CONFIG_)(ARM64|MODULES|MODVERSIONS|MODULE_SIG|MODULE_SIG_FORCE|CFI_CLANG|CFI_ICALL_NORMALIZE_INTEGERS|LTO_NONE)(=| is not set)' \
+            "$KDIR/.config" > "$report/kconfig-selection.txt" || true
+
+          if tail -c 64 "$report/pathguard_probe.ko" | grep -aq '~Module signature appended~'; then
+            echo present > "$report/module-signature.txt"
+          else
+            echo absent > "$report/module-signature.txt"
+          fi
+
+          sha256sum "$report/pathguard_probe.ko" \
+            "$report/pathguard_probe.unstripped.ko" > "$report/sha256.txt"
+          printf '%s\n' "${GITHUB_SHA}" > "$report/pathguard-commit.txt"
+
+      - name: Upload probe and inspection report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pathguard-probe-android16-6.12
+          path: |
+            out/pathguard-probe/
+            ddk-environment.txt
+          if-no-files-found: error
+          retention-days: 14
