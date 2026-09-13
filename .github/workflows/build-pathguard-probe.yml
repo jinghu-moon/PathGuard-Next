@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Check out PathGuard
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Validate DDK environment
         shell: bash
@@ -75,16 +75,11 @@ jobs:
           comm -23 "$report/undefined-symbols.txt" \
             "$report/vmlinux-defined-symbols.txt" > "$report/missing-symbols.txt"
 
-          grep -Eq 'Machine:[[:space:]]+AArch64' "$report/elf-header.txt"
-          grep -q 'vermagic=' "$report/modinfo.txt"
-          test ! -s "$report/missing-symbols.txt"
-
           versions_size="$({
             llvm-readelf -SW "$report/pathguard_probe.ko" \
               | awk '$3 == "__versions" { print $7; found=1 } END { if (!found) print "MISSING" }'
           })"
           printf '%s\n' "$versions_size" > "$report/versions-size-hex.txt"
-          test "$versions_size" = "000000"
 
           grep -E '^(CONFIG_|# CONFIG_)(ARM64|MODULES|MODVERSIONS|MODULE_SIG|MODULE_SIG_FORCE|CFI_CLANG|CFI_ICALL_NORMALIZE_INTEGERS|LTO_NONE)(=| is not set)' \
             "$KDIR/.config" > "$report/kconfig-selection.txt" || true
@@ -99,8 +94,29 @@ jobs:
             "$report/pathguard_probe.unstripped.ko" > "$report/sha256.txt"
           printf '%s\n' "${GITHUB_SHA}" > "$report/pathguard-commit.txt"
 
+          gate=0
+          grep -Eq 'Machine:[[:space:]]+AArch64' "$report/elf-header.txt" || {
+            echo "ERROR: module is not AArch64" >&2
+            gate=1
+          }
+          grep -q 'vermagic=' "$report/modinfo.txt" || {
+            echo "ERROR: module has no vermagic" >&2
+            gate=1
+          }
+          if test -s "$report/missing-symbols.txt"; then
+            echo "ERROR: module has symbols missing from DDK vmlinux:" >&2
+            cat "$report/missing-symbols.txt" >&2
+            gate=1
+          fi
+          if test "$versions_size" != "000000"; then
+            echo "ERROR: __versions size is $versions_size, expected 000000" >&2
+            gate=1
+          fi
+          exit "$gate"
+
       - name: Upload probe and inspection report
-        uses: actions/upload-artifact@v4
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
           name: pathguard-probe-android16-6.12
           path: |
