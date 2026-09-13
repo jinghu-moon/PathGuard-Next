@@ -15,6 +15,7 @@ permissions:
 env:
   DDK_IMAGE: ghcr.io/ylarod/ddk-min:android16-6.12-20260828
   KMI: android16-6.12
+  OFFLINE_TEST_VERMAGIC: 6.12.23-android16-5-g16e473de48a3-abogki462654244-4k SMP preempt mod_unload modversions aarch64
 
 jobs:
   build-probe:
@@ -83,6 +84,33 @@ jobs:
 
           grep -E '^(CONFIG_|# CONFIG_)(ARM64|MODULES|MODVERSIONS|MODULE_SIG|MODULE_SIG_FORCE|CFI_CLANG|CFI_ICALL_NORMALIZE_INTEGERS|LTO_NONE)(=| is not set)' \
             "$KDIR/.config" > "$report/kconfig-selection.txt" || true
+
+          clang++ -std=c++20 -Wall -Wextra -Werror \
+            -I"$GITHUB_WORKSPACE/experimental/hide-vfs/loader" \
+            "$GITHUB_WORKSPACE/experimental/hide-vfs/loader/offline_module_adapter.cpp" \
+            "$GITHUB_WORKSPACE/experimental/hide-vfs/loader/offline_adapter_main.cpp" \
+            -o "$report/pathguard_lkm_offline_adapter"
+          test "$(wc -l < "$report/undefined-symbols.txt")" -eq 1
+          grep -qx 'init_uts_ns' "$report/undefined-symbols.txt"
+          llvm-nm --defined-only --format=posix "$KDIR/vmlinux" \
+            > "$report/vmlinux-symbols-posix.txt"
+          : > "$report/kernel-symbol-fixture.txt"
+          while IFS= read -r symbol; do
+            awk -v wanted="$symbol" \
+              '$1 == wanted { print $3, $2, $1; found=1; exit } END { if (!found) exit 1 }' \
+              "$report/vmlinux-symbols-posix.txt" \
+              >> "$report/kernel-symbol-fixture.txt"
+          done < "$report/undefined-symbols.txt"
+          "$report/pathguard_lkm_offline_adapter" \
+            "$report/pathguard_probe.ko" \
+            "$report/kernel-symbol-fixture.txt" \
+            "$OFFLINE_TEST_VERMAGIC" \
+            "$report/pathguard_probe.offline-adapted-do-not-load.ko" \
+            | tee "$report/offline-adapter.txt"
+          grep -q '^relocated=1$' "$report/offline-adapter.txt"
+          grep -q "^vermagic_after=$OFFLINE_TEST_VERMAGIC$" \
+            "$report/offline-adapter.txt"
+          test -s "$report/pathguard_probe.offline-adapted-do-not-load.ko"
 
           if tail -c 64 "$report/pathguard_probe.ko" | grep -aq '~Module signature appended~'; then
             echo present > "$report/module-signature.txt"

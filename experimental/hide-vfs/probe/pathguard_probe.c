@@ -5,9 +5,13 @@
  */
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/utsname.h>
+
+static volatile char pathguard_probe_release_byte;
 
 static int __init pathguard_probe_init(void)
 {
+    pathguard_probe_release_byte = init_utsname()->release[0];
     return 0;
 }
 

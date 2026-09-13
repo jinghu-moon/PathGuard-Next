@@ -14,6 +14,19 @@ add_subdirectory(rules)
 add_subdirectory(daemon)
 add_subdirectory(cli)
 
+add_library(pathguard_hide_loader STATIC
+  experimental/hide-vfs/loader/offline_module_adapter.cpp
+)
+target_include_directories(pathguard_hide_loader PUBLIC
+  ${CMAKE_SOURCE_DIR}/experimental/hide-vfs/loader
+)
+target_compile_features(pathguard_hide_loader PUBLIC cxx_std_20)
+
+add_executable(pathguard_lkm_offline_adapter
+  experimental/hide-vfs/loader/offline_adapter_main.cpp
+)
+target_link_libraries(pathguard_lkm_offline_adapter PRIVATE pathguard_hide_loader)
+
 if(PATHGUARD_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

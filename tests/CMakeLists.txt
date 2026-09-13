@@ -125,6 +125,11 @@ target_include_directories(pathguard_hide_probe_contract_test PRIVATE
 add_test(NAME pathguard_hide_probe_contract_test
   COMMAND pathguard_hide_probe_contract_test)
 
+add_executable(pathguard_hide_loader_test
+  unit/hide_loader_test.cpp)
+target_link_libraries(pathguard_hide_loader_test PRIVATE pathguard_hide_loader)
+add_test(NAME pathguard_hide_loader_test COMMAND pathguard_hide_loader_test)
+
 add_executable(pathguard_rules_contract_test unit/rules_contract_test.cpp)
 target_include_directories(pathguard_rules_contract_test PRIVATE
   ${CMAKE_SOURCE_DIR}/rules/include
