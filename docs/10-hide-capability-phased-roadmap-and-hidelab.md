@@ -1704,19 +1704,333 @@ VFS 内部实现不是稳定 Android 应用 ABI。任何内核、Root framework�
 
 只有以下清单按顺序完成，才讨论对用户开放配置：
 
-- [ ] 将本文件与 `07` 的 exact semantics 转成机器可执行 case IDs；
-- [ ] 将现有 H0 probe 升级为 Target/Control 双 App；
-- [ ] 实现 Root Oracle 与 disposable fixture manifest；
-- [ ] 增加 raw syscall、mutation、alias、cache-order 矩阵；
-- [ ] 定义 JSONL schema 和 summary gate；
-- [ ] 运行无后端 baseline；
-- [ ] 运行 Kasumi API 17 与 NoMount v20 对照实验并归档证据；
-- [ ] 完成固定内核最小 VFS prototype；
-- [ ] 通过 Hide 1.0 全矩阵和可靠性测试；
-- [ ] 决定支持设备/KMI 与 OTA 策略；
+- [x] 将本文件与 `07` 的 exact semantics 转成机器可执行 case IDs；
+- [x] 将现有 H0 probe 升级为 Target/Control 双 App；
+- [x] 实现 Root Oracle 与 disposable fixture manifest；
+- [x] 增加 raw syscall、mutation、alias、cache-order、并发矩阵；容量和生命周期尚未实现；
+- [x] 定义 JSONL schema 和 baseline summary gate；
+- [x] 运行无后端 baseline；
+- [x] 运行 Kasumi API 17 与 NoMount v20 对照实验并归档证据；（源码审计完成；两者均无在 myron 上复用 SukiSU loader 的构建/加载证据，运行项保持 unsupported）
+- [x] 复刻 SukiSU `android16-6.12` DDK + loader 的离线 `pathguard_probe.ko` 检查；（真实 DDK ELF 的单符号重定位、空 `__versions` 和 vermagic 内存适配已通过；尚未设备加载）
+- [ ] 完成固定内核最小 VFS prototype；（仅完成 fail-closed admission shell，真实 VFS 数据面待匹配 KMI）
+- [ ] 通过 Hide 1.0 全矩阵和可靠性测试；（无后端全量基线已完成，显式隐藏期望为 LEAK）
+- [x] 决定支持设备/KMI 与 OTA 策略；（myron/android16-6.12 白名单，OTA 必须重新 admission）
 - [ ] 设计 versioned ABI 和 capability status；
 - [ ] 最后才修改规则 schema、daemon、CLI 与 Manager；
 - [ ] MediaStore、SAF、Picker 按独立阶段推进。
+
+### 25.1 2026-09-02 Phase A 实际进展
+
+已新增 `tests/device/hide/hidelab_acceptance_matrix.json`，固定 Hide 1.0
+direct-VFS case ID、Target/Control/Root Oracle 期望和失败分类。原有
+`app-probe` 已改为 Kotlin/Gradle Kotlin DSL，使用与 YingLi-Player 相同的
+JDK 21、Gradle 9.5、AGP 9.3.1、Kotlin 2.4.0 与 API 36；它构建两个独立 UID：
+
+```text
+dev.pathguard.hideprobe.target
+dev.pathguard.hideprobe.control
+```
+
+native probe 已覆盖 4/32/64/128 KiB `getdents64` buffer，并提供默认关闭的
+`--attack-mutations` 模式。该模式会对 disposable fixture 执行 create、truncate、
+mkdir、unlink、rename source/destination、link、symlink，由 Root Oracle 前后
+snapshot 判定 `DESTRUCTIVE_FAIL`；它不得在无后端 baseline 中启用。
+
+本机 `myron` 的无后端 baseline 证据目录为：
+
+```text
+build/device-evidence/hidelab-baseline/20260902-000712
+```
+
+结果：Target UID `10448`、Control UID `10480` 分属不同 mount namespace；两者对
+8 个 alias 都可见 fixture，`lstat/open/readdir` 与四种 `getdents64` buffer 均符合
+“无后端可见”的基线，Root Oracle 前后无差异，fixture 已清理。该结果明确为
+`BASELINE_VISIBLE_NOT_HIDE_PASS`。
+
+Android 16 app seccomp 在 arm64 上会以 `SIGSYS` 终止 raw `openat2`（syscall 437）。
+HideLab 因而在 APK 域将 `openat2`、`faccessat2`、`renameat2` 报告为
+`UNSUPPORTED/ENOSYS`，并保留 shell/native executable 的真实 syscall 测试路径。
+`UNSUPPORTED` 不是通过；当前设备尚未满足 Hide 1.0 准入，禁止启动生产 VFS 后端。
+
+### 25.2 2026-09-11 Phase A 采集增强与设备证据
+
+HideLab runner 已增加两类显式场景：
+
+1. `-Scenario cache-order`：对每个 alias 执行 cold `open`、cold
+   `opendir`、`stat -> open`、`readdir -> open` 和 positive dentry warmup
+   后再次 `open`。该场景不修改共享存储 fixture。
+2. `-AttackMutations -ConfirmMutation`：仅在随机 disposable fixture 内执行
+   create、truncate、mkdir、unlink、rename source/destination、link 和
+   symlink 攻击；Target 与 Control 之间重新建立 fixture，避免前一观察者污染
+   后一观察者。
+
+本机 `myron`（Android 16，6.12.23-android16，Target/Control 均授予
+`MANAGE_EXTERNAL_STORAGE`）证据：
+
+```text
+build/device-evidence/hidelab-baseline/20260911-213720
+conclusion = BASELINE_VISIBLE_NOT_HIDE_PASS
+phase = cache-order
+fixture_unchanged = true
+```
+
+该运行证明了 cache-order 采集协议和 Root Oracle 不变性检查可工作，但不证明
+hide。当前设备的 `/mnt/user/0/primary`、`/mnt/runtime/*` 和 `/data/media/0`
+alias 在 app namespace 中不可达并返回 `EACCES`；这属于权限/namespace
+capability 事实，不能计为 Target 隐藏成功。
+
+显式 mutation 证据：
+
+```text
+build/device-evidence/hidelab-baseline/20260911-223113
+conclusion = BASELINE_MUTATION_VISIBLE
+target_oracle_changed = true
+control_oracle_changed = true
+```
+
+无后端 Target/Control 均成功触及共享 fixture。Root Oracle 捕获了创建文件、
+截断 canary、创建目录、删除后代、双向 rename 等副作用。无后端攻击应记为
+`BASELINE_MUTATION_VISIBLE`，这是后端开发前的攻击基线，不是 Hide 1.0 通过。
+只有在实际后端运行时显式传入 `-ExpectTargetHidden`，Target Oracle 仍发生变化
+才分类为 `DESTRUCTIVE_FAIL`；Control 的正常变化不应被误判为后端失败。
+
+runner 的 Oracle 在 canary 缺失时记录 `MISSING|<path>`，因此删除攻击不会再
+中断证据采集。任何后端测试若出现相同前后差异，必须归类为
+`DESTRUCTIVE_FAIL` 并拒绝 admission。
+
+隐藏期望模式也已在当前无后端设备上执行：
+
+```text
+build/device-evidence/hidelab-baseline/20260911-225254
+backend = none
+conclusion = LEAK
+target_error = java.external.0.exists exposed hidden target
+```
+
+这验证了当 Target 仍能看到对象时，runner 会明确输出 `LEAK`，而不是因为
+Control 正常可见或 APK 执行成功就报告通过。
+
+runner/native 还增加了 `-Scenario concurrency`。该场景在每个观察者进程内
+启动 20 个线程，每线程执行 100 轮混合 `stat/open/readdir`，并汇总三类成功次数；
+无后端可见基线的期望值为每类 2,000 次，隐藏模式的期望值为 0。并发场景只读
+disposable fixture，仍未覆盖规则 generation 切换、容量上限和 namespace
+create/destroy，这三项保留为后端接入后的可靠性测试。
+
+设备证据目录：
+
+```text
+build/device-evidence/hidelab-baseline/20260912-004228
+target/control canonical concurrency.stat = 2000
+target/control canonical concurrency.open = 2000
+target/control canonical concurrency.readdir = 2000
+fixture_unchanged = true
+```
+
+### 25.3 2026-09-12 Phase B/C/D/E 执行结果
+
+按“可靠性测试 -> Kasumi/NoMount 对照 -> 固定设备 prototype -> 全量回归 ->
+设备/KMI 白名单与 OTA 重新准入 -> 通过后激活”的顺序执行。本轮新增：
+
+- `tests/device/hide/HIDE1_PHASE_B_KASUMI_NOMOUNT_COMPARISON_MYRON.md`：Kasumi
+  API 17 与 NoMount v20 的源码证据、缺失入口、scope/事务风险和 myron LKM
+  可加载性结论；两个参考项目均未并入生产树。
+- `tests/device/hide/hide1_device_kmi_allowlist.json`：固定 myron、Android 16、
+  `android16-6.12`、完整 kernel release 和 required operation mask；fingerprint
+  或 kernel release 任一变化即重新进入 `unsupported`。
+- `experimental/hide-vfs/`：固定 KMI 的 Hide 1.0 UAPI、构建约束和
+  fail-closed admission shell。当前 shell 不安装部分 VFS shadow；没有精确
+  kernel build tree/`Module.symvers` 时 install/enable 返回 `-EOPNOTSUPP`，
+  防止控制面被误认为已激活。
+- `tests/device/hide/run_hidelab_baseline.ps1` 的 `reliability` 场景：1000 轮
+  stat/open/readdir 稳定性，以及 generation、capacity、namespace、unload 控制
+  面缺失时的明确 `unsupported` 记录。
+- `tests/device/hide/run_hide1_full_regression.ps1`：按固定顺序编排
+  baseline、cache-order、concurrency、reliability 和显式 mutation 回归。
+- `tests/device/hide/admit_hide1.ps1`：OTA 后重新读取 fingerprint/kernel release、
+  检查模块 live 状态并输出 admission JSON。
+
+本轮设备证据：
+
+```text
+build/device-evidence/hide1-admission/20260912-012409/admission.json
+build/device-evidence/hide1-regression/20260912-014844/full-regression.json
+build/device-evidence/hidelab-baseline/20260912-013910/summary.json
+```
+
+`myron` 的 allowlist 命中，但 `/sys/module/pathguard_hide1` 不存在，故 admission
+为 `unsupported`。无后端基线回归结果为 baseline visible、cache-order visible、
+concurrency visible、reliability stable、mutation `BASELINE_MUTATION_VISIBLE`。
+真正的 `run_hide1_full_regression.ps1` 默认启用 `-ExpectTargetHidden`，本轮结果为
+`LEAK, LEAK, LEAK, LEAK, DESTRUCTIVE_FAIL`，总判定 `blocked`；这证明激活闸门能
+拒绝没有真实 VFS 后端的构建。当前不能宣称 Hide 1.0 通过，也不能激活 production hide。
+
+因此后续唯一可接受的推进条件是取得与上述 release/KMI 完全匹配的 kernel output
+tree，完成真正的 lookup + atomic_open + readdir + mutation + d_revalidate 数据面，
+再运行同一 `run_hide1_full_regression.ps1` 并将所有 Target/Control/Oracle/no-new-mount
+结果记录为 PASS；OTA 后必须重新运行 `admit_hide1.ps1`，不得复用旧的 active 状态。
+
+在同一无后端设备上以 `-ExpectTargetHidden -Scenario concurrency` 运行，证据
+目录 `build/device-evidence/hidelab-baseline/20260912-003754` 明确返回
+`LEAK`（Target `concurrency.stat = 2000`，期望为 0）。这证明并发场景也会在
+隐藏期望不满足时阻止伪通过。
+
+### 25.4 2026-09-12 GKI LKM 构建链 smoke test
+
+按 Kasumi/NoMount 的通用 GKI LKM 路线，使用 Android `android16-6.12.74_r00`
+源码工作树、`android16-6.12` KDIR 和 Android clang r536225，在 WSL 中对
+`experimental/hide-vfs` 执行了 out-of-tree Kbuild。为适配离线主机缺少
+`pahole` 的情况，本次 smoke test 临时传入 `CONFIG_DEBUG_INFO_BTF_MODULES=`；
+这只影响本地构建验证，不改变设备准入结论。
+
+构建证据：
+
+```text
+build/device-evidence/hide1-build-tag74.log
+experimental/hide-vfs/pathguard_hide1.ko
+SHA-256: 31AB8D5E70189508D191396C06161FE8E562C7232EA8930416C474593BA761BA
+ELF: AArch64 relocatable module
+```
+
+该 `.ko` 的 `vermagic` 为 `6.12.76-4k SMP preempt mod_unload modversions aarch64`，
+而 `myron` 当前运行 `6.12.23-android16-5-g16e473de48a3-abogki462654244-4k`；
+更关键的是该产物的 `__versions` 和 `__version_ext_crcs` section 均为空。按标准 Android
+6.12 Kbuild/modversions 路径，这种通用产物不能直接用 `insmod` 绕过 release/CRC 检查；此前
+的错误不应通过改写 `.modinfo` 或清空 `__versions` 制造“通过”。
+
+已在 `experimental/hide-vfs/Makefile` 和 `verify-kmi.ps1` 增加 fail-closed
+检查：Kbuild 输出的 `include/generated/utsrelease.h` 必须与设备证据一致，且
+`.ko` 必须包含非空 CRC section；否则构建/验收直接失败。这些检查仍然适用于传统
+Kbuild ABI 路径，但不覆盖 SukiSU 的专用加载器路径。
+
+本轮从 `/vendor_dlkm/lib/modules/` 复制了 `common.ko`、`cfg80211.ko`、
+`machine_dlkm.ko`、`xiaomi_touch.ko`、`zram.ko`、`bq27z561.ko` 作为设备已
+接受的 CRC 参考样本。它们确认：
+
+| 符号 | 设备 CRC | 通用 KDIR CRC | 结论 |
+|---|---:|---:|---|
+| `module_layout` | `0xe976b219` | `0xe143d454` | 不匹配 |
+| `misc_register` | `0xd9a13df1` | `0x180d5d38` | 不匹配 |
+| `misc_deregister` | `0x78d4940f` | `0xb3a29e45` | 不匹配 |
+| `init_uts_ns` | `0x16cbd34a` | `0x8c45c050` | 不匹配 |
+| `bcmp` | `0x5bf0d3e8` | `0x5bf0d3e8` | 一致 |
+| `memcpy` | `0x8a7493b2` | `0x8a7493b2` | 一致 |
+
+其中 `module_layout`、`misc_*`、`init_uts_ns` 的差异足以阻止模块加载，说明
+仅改 vermagic 不能解决问题。运行时 release 为 `g16e473...-abogki...`，
+vendor 模块 vermagic release 为 `gf79b...-mi-4k`；两者不同是 Xiaomi
+GKI/vendor 构建的正常形态，不能把完整 `uname -r` 当作唯一匹配条件。
+
+### 25.5 2026-09-13 SukiSU LKM 加载配方实证修正
+
+用户从当前 slot 的 `init_boot_b` ramdisk 解出的 SukiSU 加载物记录为：`init` 为 Rust
+`ksuinit`，`init.real` 为原始 init，`kernelsu.ko` 的 `vermagic` 为
+`6.12.76-4k-gae4e2f4f997e-dirty`，`__versions` size 为 0，模块无签名；设备配置中
+`CONFIG_MODULE_SIG_FORCE` 未启用。SukiSU `userspace/ksuinit/src/lib.rs` 会在内存中的 ELF
+buffer 上用 `/proc/kallsyms` 解析并重定位 undefined symbols，调用 `init_module`，仅在
+内核报告 vermagic mismatch 时替换内存 buffer 的 `.modinfo` 后重试。
+
+这证明当前 myron 上存在一条不同于标准 Kbuild CRC 路径的、设备已运行的 LKM 装载方案：
+**精确 `Module.symvers` 不是该方案的绝对装载前提**。它仍是结构布局、符号 CRC、函数原型
+和高可靠 Hide 后端开发的重要证据，不能因此删除 ABI/CFI/签名准入。ramdisk 文件大小
+374200 bytes 与 `/proc/modules` 的 200704 统计不同，必须用哈希、ELF section 和加载日志
+确认是否为同一构建物。
+
+因此设备级下一闸门调整为：先复刻 SukiSU 的 `android16-6.12` DDK + 离线 ELF 检查，构建
+最小 `pathguard_probe.ko` 并实现只读 loader 适配；获得明确授权后才可在 myron 加载 probe。
+Probe 通过后，才能进入固定设备的 VFS prototype；在 HideLab 全量回归、设备/KMI 白名单和
+OTA 重新准入完成前，Hide 1.0 仍保持 `unsupported`，不得激活。
+
+为此已新增手动 GitHub Actions workflow `.github/workflows/build-pathguard-probe.yml`，固定
+使用 `ghcr.io/ylarod/ddk-min:android16-6.12-20260828`，构建无 hook、无设备节点、无策略状态的
+`experimental/hide-vfs/probe/pathguard_probe.c`。workflow 会校验 AArch64、空 `__versions`、
+undefined symbol 是否存在于 DDK `vmlinux`、`.modinfo`、签名标记和关键 Kconfig，并上传 stripped/
+unstripped `.ko`、SHA-256 及检查报告。当前只完成本地 workflow/YAML 静态检查，尚未提交、推送或
+在 GitHub 执行，因此 checklist 仍保持未完成。
+
+后续已将 workflow 分四次小提交推送到 `feature/pattern-redirect-v6`（`1717d88`、`5648dc0`、
+`f667a37`、`627d933`），并由受限的 branch/path `push` 触发器执行。最终 GitHub Actions run
+`34734993002` 全部通过，构建产物及报告保存为 artifact `pathguard-probe-android16-6.12`，本地
+下载证据位于 `build/device-evidence/pathguard-probe-action/34734993002/`。关键结果：
+
+```text
+ELF:                    ELF64 AArch64 relocatable
+stripped size:          11456 bytes
+vermagic:               6.12.76-4k SMP preempt mod_unload modversions aarch64
+__versions size:        000000
+undefined symbols:      none
+missing DDK symbols:    none
+module signature:       absent
+stripped SHA-256:       2ec3d037662eb75616e4bec6405d3b45b9175d36772ae470844ff86501bd7094
+unstripped SHA-256:     35805519cbe2beaac790417d1650fe01df35e36caa600900446327ef7e04be2e
+```
+
+该轮只完成“最小 LKM 的 DDK 构建与离线 ELF 资格检查”，尚未实现或执行 SukiSU 式 loader，也
+没有证明模块能在 myron 加载。
+
+### 25.6 2026-09-13 PathGuard 离线 LKM adapter
+
+提交 `18b04f0` 新增纯 C++20 `OfflineModuleAdapter`。核心不包含 `init_module`、`/dev/kmsg`、
+`kptr_restrict` 或 ADB 调用，只接受 ELF bytes、kernel symbol snapshot 和目标 vermagic，并返回新
+的内存 image。解析器只接受 little-endian ELF64/AArch64 relocatable，要求唯一 `.symtab`、
+`.modinfo` 和空 `__versions`；所有 undefined symbol 必须具有非零地址，随后才原子改写为
+`SHN_ABS`。缺失/重复符号、畸形 offset/size、非空 `__versions` 和非法 vermagic 均 fail closed。
+
+Host 验证：
+
+```text
+Windows CMake/MSVC build:       passed
+pathguard_hide_loader_test:     passed
+Clang -Wall -Wextra -Werror:    passed
+真实 run 34734993002 artifact:
+  vermagic-only offline adapt:  passed
+  input SHA-256 unchanged:      true
+```
+
+随后把 probe 改为只读访问一次 `init_uts_ns`，使真实 DDK 模块产生一个确定的 undefined symbol，
+并在 GitHub Actions run `34736258439` 中执行 loader 核心。结果：
+
+```text
+ELF:                    ELF64 AArch64 relocatable
+undefined symbol:       init_uts_ns
+relocated count:        1
+adapted symbol:         ABS 0xffffffc0826f87b8
+vermagic before:        6.12.76-4k SMP preempt mod_unload modversions aarch64
+vermagic after:         6.12.23-android16-5-g16e473de48a3-abogki462654244-4k SMP preempt mod_unload modversions aarch64
+__versions size:        000000
+module signature:       absent
+stripped SHA-256:       eac3140c4a91398c2941b20ee0b81baf0c28a200ec335d43cee934857fb88bf3
+adapted SHA-256:        8e77846fd9bce5121ad2c1f62dc5ea368c4c647e787f5fbd58d35a1878a619a5
+```
+
+其中 `0xffffffc0826f87b8` 来自 DDK `vmlinux` fixture，不是 myron `/proc/kallsyms` 地址；适配产物
+明确命名为 `pathguard_probe.offline-adapted-do-not-load.ko`，禁止加载设备。该结果证明离线 ELF
+算法和 SukiSU 配方一致，不证明设备装载成功。下一闸门是实现受限的 Android loader shell，并在
+取得明确授权后使用设备实时 kallsyms 生成内存 image、执行一次最小 probe 的加载/卸载和稳定性
+采集；设备实验前 Hide 1.0 仍为 `unsupported`。
+
+### 25.7 2026-09-13 受限 Android loader shell
+
+已新增 `pathguard_lkm_loader`，把设备文件采集与纯 ELF adapter 分离。默认且当前唯一可执行模式为
+`--prepare-only`：只读模块和 `/proc/kallsyms`，在进程私有内存中完成适配，输出模块大小、解析到的
+非零符号数量、重定位数量及 vermagic 来源，然后丢弃适配 image。工具没有输出路径参数，不会把带
+设备地址的 `.ko` 写入磁盘；`--load` 会在读取模块前直接失败，最终 Android ELF 不导入
+`init_module`/`finit_module`。
+
+边界进一步收紧如下：
+
+- 不读取、不修改 `/proc/sys/kernel/kptr_restrict`；若 `/proc/kallsyms` 地址被隐藏为零，adapter
+  因缺少符号而 fail closed；
+- `--prepare-only` 不从历史 kmsg 猜测 vermagic，必须显式传入独立记录并审计过的设备值；
+- `KernelLogCursor` 以非阻塞方式打开 `/dev/kmsg`（fallback `/kmsg`），先消费历史记录，后续只读取
+  新增记录，为将来的“一次加载失败 -> 解析本次 vermagic mismatch”事务提供 RAII 文件描述符边界；
+- 读取输入限制为 128 MiB；模块异常、符号歧义、零地址和 vermagic 异常继续沿用 adapter 的
+  fail-closed 结果；
+- Android arm64/API 26 构建使用静态 libc++，运行时只依赖系统 `libm`、`libdl`、`libc`。
+
+本地验证已通过 Windows/MSVC 两组单测、完整 prepare 流程测试，以及 NDK 29
+`aarch64-linux-android26-clang++ -Wall -Wextra -Werror` 构建。GitHub Actions 同步新增 host 单测、
+Android ELF/依赖审计和禁用加载入口检查。此阶段仍未使用 ADB、没有加载/卸载模块，也没有修改设备
+配置；下一闸门仍是取得单独明确授权后，在 myron 上只加载最小 `pathguard_probe.ko`。
 
 ## 26. 资料来源
 
