@@ -93,10 +93,14 @@ std::string RenderObservationJson(const Observation& observation) {
 }
 
 bool IsAllowedSandboxPath(std::string_view path) {
-    constexpr std::array<std::string_view, 3> kPrefixes = {
+    constexpr std::array<std::string_view, 7> kPrefixes = {
         "/data/local/tmp/pathguard-hide-h0-",
         "/data/user/0/dev.pathguard.hideprobe/no_backup/pathguard-hide-h0-",
         "/data/data/dev.pathguard.hideprobe/no_backup/pathguard-hide-h0-",
+        "/data/user/0/dev.pathguard.hideprobe.target/no_backup/pathguard-hide-h0-",
+        "/data/data/dev.pathguard.hideprobe.target/no_backup/pathguard-hide-h0-",
+        "/data/user/0/dev.pathguard.hideprobe.control/no_backup/pathguard-hide-h0-",
+        "/data/data/dev.pathguard.hideprobe.control/no_backup/pathguard-hide-h0-",
     };
     std::string_view matched_prefix;
     for (const std::string_view prefix : kPrefixes) {

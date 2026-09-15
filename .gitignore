@@ -26,3 +26,13 @@
 /module/provider/**/*.so
 /module/provider/provider-hooker.dex
 /build-release/
+
+# Local agent metadata and workspace instructions
+/.codegraph/
+/AGENTS.md
+/CLAUDE.md
+
+# Local APKs, native build outputs, and generated tool artifacts
+/download/
+/libs/
+/obj/

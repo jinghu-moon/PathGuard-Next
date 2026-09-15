@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "capability": "direct_vfs",
+  "phase": "hide-1.0",
+  "rule_fixture": {
+    "parent": "Pictures/PathGuardHideLab",
+    "hidden_basename": "hidden",
+    "descendant": "hidden/nested.txt",
+    "canary": "hidden/canary.txt"
+  },
+  "observers": {
+    "target": "dev.pathguard.hideprobe.target",
+    "control": "dev.pathguard.hideprobe.control",
+    "oracle": "root"
+  },
+  "cases": [
+    {"id":"java_file_list","surface":"java_file","operation":"readdir","target":"OMITTED","control":"CONTAINS","oracle":"UNCHANGED"},
+    {"id":"nio_directory_stream","surface":"java_nio","operation":"readdir","target":"OMITTED","control":"CONTAINS","oracle":"UNCHANGED"},
+    {"id":"libc_readdir","surface":"direct_vfs","operation":"readdir","target":"OMITTED","control":"CONTAINS","oracle":"UNCHANGED"},
+    {"id":"raw_getdents_4k","surface":"direct_vfs","operation":"getdents64","buffer_bytes":4096,"target":"OMITTED","control":"CONTAINS","oracle":"UNCHANGED"},
+    {"id":"raw_getdents_32k","surface":"direct_vfs","operation":"getdents64","buffer_bytes":32768,"target":"OMITTED","control":"CONTAINS","oracle":"UNCHANGED"},
+    {"id":"raw_getdents_64k","surface":"direct_vfs","operation":"getdents64","buffer_bytes":65536,"target":"OMITTED","control":"CONTAINS","oracle":"UNCHANGED"},
+    {"id":"raw_getdents_128k","surface":"direct_vfs","operation":"getdents64","buffer_bytes":131072,"target":"OMITTED","control":"CONTAINS","oracle":"UNCHANGED"},
+    {"id":"stat_lstat_statx","surface":"direct_vfs","operation":"metadata","target":"ENOENT","control":"SUCCESS","oracle":"UNCHANGED"},
+    {"id":"access_faccessat2","surface":"direct_vfs","operation":"access","target":"ENOENT","control":"SUCCESS","oracle":"UNCHANGED"},
+    {"id":"open_openat_openat2_opath","surface":"direct_vfs","operation":"open","target":"ENOENT","control":"SUCCESS","oracle":"UNCHANGED"},
+    {"id":"opendir_descendant","surface":"direct_vfs","operation":"open_descendant","target":"ENOENT","control":"SUCCESS","oracle":"UNCHANGED"},
+    {"id":"alias_and_relative","surface":"direct_vfs","operation":"alias","target":"ENOENT","control":"SUCCESS","oracle":"UNCHANGED"},
+    {"id":"create_mkdir_link_symlink","surface":"direct_vfs","operation":"mutation_create","target":"ENOENT_NO_SIDE_EFFECT","control":"SUCCESS_OR_PLATFORM_DENIAL","target_oracle":"UNCHANGED","control_oracle":"EXPECTED_CHANGE"},
+    {"id":"truncate_unlink_rmdir","surface":"direct_vfs","operation":"mutation_remove","target":"ENOENT_NO_SIDE_EFFECT","control":"SUCCESS","target_oracle":"UNCHANGED","control_oracle":"EXPECTED_CHANGE"},
+    {"id":"rename_source_and_destination","surface":"direct_vfs","operation":"rename","target":"ENOENT_NO_SIDE_EFFECT","control":"SUCCESS","target_oracle":"UNCHANGED","control_oracle":"EXPECTED_CHANGE"},
+    {"id":"cache_cold_and_positive_dentry","surface":"direct_vfs","operation":"cache_order","target":"ENOENT","control":"SUCCESS","oracle":"UNCHANGED"},
+    {"id":"concurrent_lookup_open_readdir","surface":"direct_vfs","operation":"concurrency","threads":20,"iterations":100,"target":"ZERO_SUCCESS","control":"2000_SUCCESS_PER_OPERATION","oracle":"UNCHANGED"},
+    {"id":"enable_disable_generation","surface":"direct_vfs","operation":"policy_transition","target":"RESTORED_AFTER_DISABLE","control":"SUCCESS","oracle":"UNCHANGED"},
+    {"id":"mount_observability","surface":"proc","operation":"mountinfo","target":"NO_NEW_MOUNT","control":"NO_NEW_MOUNT","oracle":"UNCHANGED"}
+  ],
+  "admission": {
+    "pass_requires": ["all_target_cases", "all_control_cases", "all_oracle_cases", "no_new_mount"],
+    "failure_results": ["LEAK", "OVERBLOCK", "SEMANTIC_DRIFT", "DESTRUCTIVE_FAIL", "STATE_LIE", "CRASH", "HANG"],
+    "informational_results": ["UNSUPPORTED", "INFRA_ERROR"]
+  }
+}

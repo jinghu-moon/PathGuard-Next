@@ -1,5 +1,14 @@
 # Hide H0 device probes
 
+`README-hidelab.md` and `hidelab_acceptance_matrix.json` define the next Phase A
+system. `app-probe/` has been upgraded to a Kotlin Target/Control APK pair;
+`run_hidelab_baseline.ps1` is the only runner that creates the disposable
+Target/Control/Root-Oracle fixture. Its no-backend result is a baseline, never
+a hide success. Use `-Scenario cache-order` to exercise cold/ordered/positive
+dentry access, or use `-AttackMutations -ConfirmMutation` for the explicit
+fixture attack baseline. Add `-ExpectTargetHidden` only after a backend is
+active; then a Target Oracle change is classified as `DESTRUCTIVE_FAIL`.
+
 This directory contains isolated research probes. They do not implement `hide`
 and are not linked into the daemon or Zygisk module.
 

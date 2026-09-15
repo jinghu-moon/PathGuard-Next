@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 cmake_policy(SET CMP0091 NEW)
-project(PathGuardNext LANGUAGES CXX)
+project(PathGuardNext LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,14 @@ target_include_directories(pathguard_hide_loader PUBLIC
   ${CMAKE_SOURCE_DIR}/experimental/hide-vfs/loader
 )
 target_compile_features(pathguard_hide_loader PUBLIC cxx_std_20)
+
+add_library(pathguard_hide_vfs_model STATIC
+  experimental/hide-vfs/model/hide_vfs_model.c
+)
+target_include_directories(pathguard_hide_vfs_model PUBLIC
+  ${CMAKE_SOURCE_DIR}/experimental/hide-vfs/model
+)
+target_compile_features(pathguard_hide_vfs_model PUBLIC c_std_11)
 
 add_executable(pathguard_lkm_offline_adapter
   experimental/hide-vfs/loader/offline_adapter_main.cpp

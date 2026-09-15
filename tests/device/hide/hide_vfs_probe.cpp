@@ -9,8 +9,11 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <array>
+#include <atomic>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "hide_probe_contract.h"
@@ -97,16 +100,21 @@ int DirectoryContainsLibc(const char* parent, const char* name, int* error) {
     return found;
 }
 
-int DirectoryContainsRaw(int parent_fd, const char* name, int* error) {
+int DirectoryContainsRaw(int parent_fd, const char* name, size_t buffer_size,
+                         int* error) {
+    if (buffer_size < sizeof(LinuxDirent64)) {
+        *error = EINVAL;
+        return -1;
+    }
     if (lseek(parent_fd, 0, SEEK_SET) < 0) {
         *error = errno;
         return -1;
     }
-    alignas(LinuxDirent64) char buffer[4096];
+    std::vector<char> buffer(buffer_size);
     for (;;) {
         errno = 0;
         const long bytes = syscall(
-            __NR_getdents64, parent_fd, buffer, sizeof(buffer));
+            __NR_getdents64, parent_fd, buffer.data(), buffer.size());
         if (bytes < 0) {
             *error = errno;
             return -1;
@@ -118,7 +126,7 @@ int DirectoryContainsRaw(int parent_fd, const char* name, int* error) {
         size_t position = 0;
         while (position < static_cast<size_t>(bytes)) {
             const auto* entry = reinterpret_cast<const LinuxDirent64*>(
-                buffer + position);
+            buffer.data() + position);
             if (entry->record_length < sizeof(LinuxDirent64)
                 || position + entry->record_length
                     > static_cast<size_t>(bytes)) {
@@ -214,6 +222,11 @@ void ObservePath(std::string_view label, const std::string& path) {
     Emit(std::string(label) + ".openat", "direct_vfs", path,
          NormalizedFdResult(relative_fd), relative_error);
 
+    // Android app seccomp may terminate the process for newer raw syscalls.
+#if defined(PATHGUARD_HIDE_PROBE_APP)
+    Emit(std::string(label) + ".openat2", "direct_vfs", path,
+         -1, ENOSYS, false, ProbeStatus::kUnsupported);
+#else
     open_how how{};
     how.flags = O_RDONLY | O_CLOEXEC;
     errno = 0;
@@ -227,8 +240,9 @@ void ObservePath(std::string_view label, const std::string& path) {
     Emit(std::string(label) + ".openat2", "direct_vfs", path,
          NormalizedFdResult(openat2_fd), openat2_error, false,
          openat2_status);
+#endif
 
-#if defined(__NR_faccessat2)
+#if defined(__NR_faccessat2) && !defined(PATHGUARD_HIDE_PROBE_APP)
     errno = 0;
     const int faccessat2_result = static_cast<int>(syscall(
         __NR_faccessat2, parent_fd, name.c_str(), F_OK, 0));
@@ -244,12 +258,191 @@ void ObservePath(std::string_view label, const std::string& path) {
          -1, ENOSYS, false, ProbeStatus::kUnsupported);
 #endif
 
-    int raw_error = 0;
-    const int raw_listed = DirectoryContainsRaw(
-        parent_fd, name.c_str(), &raw_error);
-    Emit(std::string(label) + ".getdents64", "direct_vfs", path,
-         raw_listed, raw_error);
+    constexpr std::array<size_t, 4> kGetdentsBuffers = {
+        4 * 1024, 32 * 1024, 64 * 1024, 128 * 1024};
+    for (const size_t buffer_size : kGetdentsBuffers) {
+        int raw_error = 0;
+        const int raw_listed = DirectoryContainsRaw(
+            parent_fd, name.c_str(), buffer_size, &raw_error);
+        Emit(std::string(label) + ".getdents64_"
+                 + std::to_string(buffer_size),
+             "direct_vfs", path, raw_listed, raw_error);
+    }
     close(parent_fd);
+}
+
+void ObserveCacheOrder(std::string_view label, const std::string& path) {
+    std::string parent;
+    std::string name;
+    if (!SplitPath(path, &parent, &name)) {
+        Emit(std::string(label) + ".cache.arguments", "cache_order", path,
+             -1, EINVAL, false, ProbeStatus::kSetupError);
+        return;
+    }
+
+    errno = 0;
+    const int cold_fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    const int cold_error = cold_fd < 0 ? errno : 0;
+    Emit(std::string(label) + ".cache.cold_open", "cache_order", path,
+         NormalizedFdResult(cold_fd), cold_error);
+
+    errno = 0;
+    DIR* cold_directory = opendir(path.c_str());
+    const int cold_opendir_error = cold_directory == nullptr ? errno : 0;
+    if (cold_directory != nullptr) closedir(cold_directory);
+    Emit(std::string(label) + ".cache.cold_opendir", "cache_order", path,
+         cold_directory == nullptr ? -1 : 0, cold_opendir_error);
+
+    struct stat metadata {};
+    errno = 0;
+    const int stat_result = stat(path.c_str(), &metadata);
+    const int stat_error = stat_result == 0 ? 0 : errno;
+    errno = 0;
+    const int after_stat_fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    const int after_stat_error = after_stat_fd < 0 ? errno : 0;
+    Emit(std::string(label) + ".cache.stat_then_open", "cache_order", path,
+         NormalizedFdResult(after_stat_fd), after_stat_error,
+         false, stat_result == 0 || stat_error == ENOENT
+             ? ProbeStatus::kObserved
+             : ProbeStatus::kSetupError);
+
+    int list_error = 0;
+    const int listed = DirectoryContainsLibc(
+        parent.c_str(), name.c_str(), &list_error);
+    errno = 0;
+    const int after_readdir_fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    const int after_readdir_error = after_readdir_fd < 0 ? errno : 0;
+    Emit(std::string(label) + ".cache.readdir_then_open", "cache_order", path,
+         NormalizedFdResult(after_readdir_fd), after_readdir_error,
+         false, listed >= 0 && list_error == 0
+             ? ProbeStatus::kObserved
+             : ProbeStatus::kSetupError);
+
+    errno = 0;
+    const int warmup_fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    const int warmup_error = warmup_fd < 0 ? errno : 0;
+    if (warmup_fd >= 0) close(warmup_fd);
+    errno = 0;
+    const int after_warmup_fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    const int after_warmup_error = after_warmup_fd < 0 ? errno : 0;
+    Emit(std::string(label) + ".cache.positive_warm_then_open",
+         "cache_order", path, NormalizedFdResult(after_warmup_fd),
+         after_warmup_error, false,
+         warmup_fd >= 0 || warmup_error == ENOENT
+             ? ProbeStatus::kObserved
+             : ProbeStatus::kSetupError);
+}
+
+void ObserveConcurrency(const std::string& path) {
+    std::string parent;
+    std::string name;
+    if (!SplitPath(path, &parent, &name)) {
+        Emit("concurrency.arguments", "concurrency", path, -1, EINVAL,
+             false, ProbeStatus::kSetupError);
+        return;
+    }
+    constexpr int kThreads = 20;
+    constexpr int kIterations = 100;
+    std::atomic<int> stat_success{0};
+    std::atomic<int> open_success{0};
+    std::atomic<int> readdir_success{0};
+    std::atomic<int> first_error{0};
+    std::vector<std::thread> workers;
+    workers.reserve(kThreads);
+    for (int worker = 0; worker < kThreads; ++worker) {
+        workers.emplace_back([&] {
+            for (int iteration = 0; iteration < kIterations; ++iteration) {
+                struct stat metadata {};
+                errno = 0;
+                if (stat(path.c_str(), &metadata) == 0) {
+                    ++stat_success;
+                } else {
+                    int expected = 0;
+                    first_error.compare_exchange_strong(expected, errno);
+                }
+                errno = 0;
+                const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+                if (fd >= 0) {
+                    ++open_success;
+                    close(fd);
+                } else {
+                    int expected = 0;
+                    first_error.compare_exchange_strong(expected, errno);
+                }
+                int list_error = 0;
+                const int listed = DirectoryContainsLibc(
+                    parent.c_str(), name.c_str(), &list_error);
+                if (listed == 1 && list_error == 0) {
+                    ++readdir_success;
+                } else {
+                    int expected = 0;
+                    first_error.compare_exchange_strong(expected, list_error);
+                }
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    Emit("concurrency.stat", "concurrency", path, stat_success.load(),
+         first_error.load());
+    Emit("concurrency.open", "concurrency", path, open_success.load(),
+         first_error.load());
+    Emit("concurrency.readdir", "concurrency", path, readdir_success.load(),
+         first_error.load());
+}
+
+void ObserveReliability(const std::string& path) {
+    std::string parent;
+    std::string name;
+    if (!SplitPath(path, &parent, &name)) {
+        Emit("reliability.arguments", "reliability", path, -1, EINVAL,
+             false, ProbeStatus::kSetupError);
+        return;
+    }
+
+    constexpr int kIterations = 1000;
+    int stat_success = 0;
+    int open_success = 0;
+    int readdir_success = 0;
+    int first_error = 0;
+    for (int iteration = 0; iteration < kIterations; ++iteration) {
+        struct stat metadata {};
+        errno = 0;
+        if (stat(path.c_str(), &metadata) == 0) {
+            ++stat_success;
+        } else if (first_error == 0) {
+            first_error = errno;
+        }
+
+        errno = 0;
+        const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            ++open_success;
+            close(fd);
+        } else if (first_error == 0) {
+            first_error = errno;
+        }
+
+        int list_error = 0;
+        const int listed = DirectoryContainsLibc(
+            parent.c_str(), name.c_str(), &list_error);
+        if (listed == 1 && list_error == 0) {
+            ++readdir_success;
+        } else if (first_error == 0) {
+            first_error = list_error;
+        }
+    }
+    Emit("reliability.stat", "reliability", path, stat_success, first_error);
+    Emit("reliability.open", "reliability", path, open_success, first_error);
+    Emit("reliability.readdir", "reliability", path, readdir_success,
+         first_error);
+
+    // These transitions require a backend control ABI. Reporting them as
+    // unsupported keeps the baseline honest until the VFS prototype is loaded.
+    for (const char* test : {"reliability.generation", "reliability.capacity",
+                             "reliability.namespace", "reliability.unload"}) {
+        Emit(test, "backend_control", path, -1, ENOSYS, false,
+             ProbeStatus::kUnsupported);
+    }
 }
 
 void ObserveRelativeVariants(int sandbox_fd, const std::string& hidden_path) {
@@ -276,6 +469,10 @@ void ObserveRelativeVariants(int sandbox_fd, const std::string& hidden_path) {
          sub_created ? ProbeStatus::kObserved : ProbeStatus::kSetupError);
     if (sub_created) unlinkat(sandbox_fd, "sub", AT_REMOVEDIR);
 
+#if defined(PATHGUARD_HIDE_PROBE_APP)
+    Emit("sandbox.hidden.openat2_beneath", "direct_vfs", hidden_path,
+         -1, ENOSYS, false, ProbeStatus::kUnsupported);
+#else
     open_how how{};
     how.flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
     how.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
@@ -290,6 +487,7 @@ void ObserveRelativeVariants(int sandbox_fd, const std::string& hidden_path) {
     Emit("sandbox.hidden.openat2_beneath", "direct_vfs", hidden_path,
          NormalizedFdResult(beneath_fd), beneath_error, false,
          beneath_status);
+#endif
 
     const int original_cwd = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (original_cwd < 0) {
@@ -454,7 +652,7 @@ void ObserveMutations(int sandbox_fd, int hidden_fd,
              : ProbeStatus::kSetupError);
     unlinkat(hidden_fd, "remove-dir", AT_REMOVEDIR);
 
-#if defined(__NR_renameat2)
+#if defined(__NR_renameat2) && !defined(PATHGUARD_HIDE_PROBE_APP)
     errno = 0;
     const int renameat2_result = static_cast<int>(syscall(
         __NR_renameat2, hidden_fd, "canary", sandbox_fd,
@@ -513,6 +711,105 @@ void ObserveMutations(int sandbox_fd, int hidden_fd,
          existing_mkdir_result == 0);
 }
 
+void ObserveExternalMutations(const std::string& hidden_path) {
+    std::string parent;
+    std::string name;
+    if (!SplitPath(hidden_path, &parent, &name)) {
+        Emit("external.mutation.arguments", "mutation", hidden_path,
+             -1, EINVAL, false, ProbeStatus::kSetupError);
+        return;
+    }
+    const int parent_fd = open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (parent_fd < 0) {
+        const int error_number = errno;
+        Emit("external.mutation.parent_open", "mutation", parent,
+             -1, error_number, false, ProbeStatus::kSetupError);
+        return;
+    }
+
+    const std::string created_path = name + "/hidelab-created";
+    const std::string canary_path = name + "/canary.txt";
+    const std::string created_directory_path = name + "/hidelab-created-dir";
+    const std::string nested_path = name + "/nested/nested.txt";
+    const std::string linked_path = name + "/hidelab-linked-visible.txt";
+    const std::string symlink_path = name + "/hidelab-symlink";
+
+    errno = 0;
+    const int created_fd = openat(parent_fd, created_path.c_str(),
+                                  O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+                                  0600);
+    const int created_error = created_fd < 0 ? errno : 0;
+    if (created_fd >= 0) close(created_fd);
+    Emit("external.mutation.openat_create", "mutation", hidden_path + "/hidelab-created",
+         created_fd < 0 ? -1 : 0, created_error,
+         ExistsAt(parent_fd, created_path.c_str()));
+
+    off_t before_size = -1;
+    const bool canary_before = FileSizeAt(
+        parent_fd, canary_path.c_str(), &before_size);
+    errno = 0;
+    const int truncate_fd = openat(
+        parent_fd, canary_path.c_str(), O_WRONLY | O_TRUNC | O_CLOEXEC);
+    const int truncate_error = truncate_fd < 0 ? errno : 0;
+    if (truncate_fd >= 0) close(truncate_fd);
+    off_t after_size = -1;
+    const bool canary_after = FileSizeAt(
+        parent_fd, canary_path.c_str(), &after_size);
+    Emit("external.mutation.openat_truncate", "mutation", hidden_path + "/canary.txt",
+         truncate_fd < 0 ? -1 : 0, truncate_error,
+         canary_before && canary_after && before_size != after_size);
+
+    errno = 0;
+    const int mkdir_result = mkdirat(
+        parent_fd, created_directory_path.c_str(), 0700);
+    const int mkdir_error = mkdir_result == 0 ? 0 : errno;
+    Emit("external.mutation.mkdirat", "mutation", hidden_path + "/hidelab-created-dir",
+         mkdir_result, mkdir_error,
+         ExistsAt(parent_fd, created_directory_path.c_str()));
+
+    errno = 0;
+    const int unlink_result = unlinkat(parent_fd, nested_path.c_str(), 0);
+    const int unlink_error = unlink_result == 0 ? 0 : errno;
+    Emit("external.mutation.unlinkat", "mutation", hidden_path + "/nested/nested.txt",
+         unlink_result, unlink_error,
+         !ExistsAt(parent_fd, nested_path.c_str()));
+
+    errno = 0;
+    const int rename_source_result = renameat(
+        parent_fd, canary_path.c_str(), parent_fd,
+        "hidelab-moved-canary.txt");
+    const int rename_source_error = rename_source_result == 0 ? 0 : errno;
+    Emit("external.mutation.rename_source", "mutation", hidden_path + "/canary.txt",
+         rename_source_result, rename_source_error,
+         !ExistsAt(parent_fd, canary_path.c_str())
+             && ExistsAt(parent_fd, "hidelab-moved-canary.txt"));
+
+    errno = 0;
+    const int rename_destination_result = renameat(
+        parent_fd, "visible.txt", parent_fd, canary_path.c_str());
+    const int rename_destination_error = rename_destination_result == 0 ? 0 : errno;
+    Emit("external.mutation.rename_destination", "mutation", hidden_path + "/canary.txt",
+         rename_destination_result, rename_destination_error,
+         !ExistsAt(parent_fd, "visible.txt")
+             && ExistsAt(parent_fd, canary_path.c_str()));
+
+    errno = 0;
+    const int link_result = linkat(parent_fd, "visible-link.txt", parent_fd,
+                                   linked_path.c_str(), 0);
+    const int link_error = link_result == 0 ? 0 : errno;
+    Emit("external.mutation.linkat", "mutation", hidden_path + "/hidelab-linked-visible.txt",
+         link_result, link_error, ExistsAt(parent_fd, linked_path.c_str()));
+
+    errno = 0;
+    const int symlink_result = symlinkat(
+        "canary.txt", parent_fd, symlink_path.c_str());
+    const int symlink_error = symlink_result == 0 ? 0 : errno;
+    Emit("external.mutation.symlinkat", "mutation", hidden_path + "/hidelab-symlink",
+         symlink_result, symlink_error,
+         ExistsAt(parent_fd, symlink_path.c_str()));
+    close(parent_fd);
+}
+
 std::string ReadSmallFile(const char* path) {
     const int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return {};
@@ -561,18 +858,29 @@ int pathguard::hide_probe::RunHideVfsProbe(
 
     std::string sandbox;
     std::vector<std::string> observed_paths;
+    bool attack_mutations = false;
+    std::string scenario = "baseline";
     for (int index = 1; index < argc; ++index) {
         if (strcmp(argv[index], "--sandbox") == 0 && index + 1 < argc) {
             sandbox = argv[++index];
         } else if (strcmp(argv[index], "--observe") == 0
                    && index + 1 < argc) {
             observed_paths.emplace_back(argv[++index]);
+        } else if (strcmp(argv[index], "--attack-mutations") == 0) {
+            attack_mutations = true;
+        } else if (strcmp(argv[index], "--scenario") == 0
+                   && index + 1 < argc) {
+            scenario = argv[++index];
         } else {
             return Fail("arguments", index < argc ? argv[index] : "", EINVAL);
         }
     }
     if (!pathguard::hide_probe::IsAllowedSandboxPath(sandbox)) {
         return Fail("sandbox_path", sandbox, EINVAL);
+    }
+    if (scenario != "baseline" && scenario != "cache-order"
+        && scenario != "concurrency" && scenario != "reliability") {
+        return Fail("scenario", scenario, EINVAL);
     }
 
     struct stat sandbox_metadata {};
@@ -632,7 +940,20 @@ int pathguard::hide_probe::RunHideVfsProbe(
     ObserveRelativeVariants(sandbox_fd, hidden_path);
     ObserveMutations(sandbox_fd, hidden_fd, hidden_path);
     for (size_t index = 0; index < observed_paths.size(); ++index) {
+        if (scenario == "cache-order") {
+            ObserveCacheOrder(
+                "external." + std::to_string(index), observed_paths[index]);
+        }
+        if (scenario == "concurrency") {
+            ObserveConcurrency(observed_paths[index]);
+        }
+        if (scenario == "reliability") {
+            ObserveReliability(observed_paths[index]);
+        }
         ObservePath("external." + std::to_string(index), observed_paths[index]);
+    }
+    if (attack_mutations && !observed_paths.empty()) {
+        ObserveExternalMutations(observed_paths.front());
     }
 
     const std::string mountinfo_after = ReadSmallFile("/proc/self/mountinfo");

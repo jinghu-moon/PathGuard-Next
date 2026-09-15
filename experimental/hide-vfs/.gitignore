@@ -1,0 +1,10 @@
+# Kbuild outputs; only the source contract is versioned.
+*.o
+*.ko
+hide1_control
+*.cmd
+*.mod
+*.mod.c
+Module.symvers
+modules.order
+.tmp_versions/

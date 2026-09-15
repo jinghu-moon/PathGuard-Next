@@ -1491,3 +1491,1216 @@ prepare 流程，以及 Android NDK 29 arm64/API 26 `-Wall -Wextra -Werror` 编�
 静态 libc++，仅依赖系统 `libm`、`libdl`、`libc`。本轮没有执行 ADB、加载/卸载 `.ko`、修改
 `kptr_restrict` 或设备配置；因此结论仅为“设备侧 prepare 工具可构建且默认无加载能力”，不能提升
 Hide 1.0 的准入状态。
+
+## 轮次 18：本地 DDK probe 构建与离线回归
+
+由于 GitHub Actions 的 ubuntu-latest runner 长时间未分配，最新排队运行已由用户取消；该运行没有进入任何 workflow step，不能归因于源码或构建失败。本轮改用本机 WSL2 Ubuntu，直接使用已下载的 android16-6.12 DDK tar、DDK clang r536225 和仓库中的最小 probe 源码完成本地构建。
+
+本地构建从原始 tar 在 Linux 文件系统解包 DDK prepared tree，修正临时 Makefile 中容器内的 /opt/ddk/src/android16-6.12 路径，并以 ARCH=arm64、LLVM=1、LLVM_IAS=1 调用 Kbuild。第一次构建因主机默认选择 x86，第二次因本机没有 pahole 在可选 BTF 模块步骤失败；最终关闭 CONFIG_DEBUG_INFO_BTF_MODULES 的生成步骤后成功链接。这只影响调试 BTF，不改变 probe 的最小代码、目标架构或符号集合。
+
+证据目录：
+
+    build/device-evidence/pathguard-probe-local/20260913/
+
+关键结果：
+
+    ELF: ELF64 / little-endian / REL / AArch64
+    undefined symbols: init_uts_ns（唯一）
+    vermagic: 6.12.76-4k SMP preempt mod_unload modversions aarch64
+    __versions size: 000000
+    module signature: absent
+    missing symbols against DDK vmlinux: none
+    stripped SHA-256: f0fe7b783b1996b1318d904a138b9a024a326f6b55b118818e8be1f35cdbd26a
+    unstripped SHA-256: 726c7f83fdcf742a9af5ce0b8ed4d13de71a90157e4c30156fd0702bba6a1c19
+
+同一目录中的 kernel-symbol-fixture.txt 使用 DDK vmlinux 中的 init_uts_ns 地址，离线 adapter 验证结果为：
+
+    vermagic_before=6.12.76-4k SMP preempt mod_unload modversions aarch64
+    vermagic_after=6.12.23-android16-5-g16e473de48a3-abogki462654244-4k SMP preempt mod_unload modversions aarch64
+    relocated=1
+    symbol=init_uts_ns index=52 address=0xffffffc0826f87b8
+
+pathguard_probe.offline-adapted-do-not-load.ko 的地址来自 DDK vmlinux fixture，不是 myron 设备实时 /proc/kallsyms 地址，严禁加载。该结果只证明本地 Kbuild、ELF 检查和内存适配算法可以复现；不证明设备 insmod、初始化、卸载或稳定性。
+
+Windows 宿主侧重新编译并通过：
+
+    hide_loader_test
+    restricted_loader_test
+
+本轮仍未执行 ADB、init_module、finit_module、insmod、模块卸载、刷写 boot/init_boot 或修改设备配置。因此 Hide 1.0 继续保持 unsupported；下一步只能是取得单独明确授权后，使用真实设备 kallsyms 对最小 probe 做一次受控加载/卸载实验。
+
+## 轮次 19：myron 最小 probe 受控加载与卸载
+
+在用户确认后，本轮使用本地 DDK 构建的**未适配**最小 `pathguard_probe.ko`，通过设备已有的 SukiSU Ultra `ksud 4.1.3 insmod` 入口执行一次加载。没有使用 DDK fixture 生成的
+`pathguard_probe.offline-adapted-do-not-load.ko`，没有加载 `pathguard_hide1.ko` 或任何 VFS prototype，也没有修改
+`/proc/sys/kernel/kptr_restrict`、boot/init_boot 或设备配置。
+
+设备和输入：
+
+    product/device: 25102RKBEC / myron
+    kernel: 6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+    root: uid=0(root), context=u:r:ksu:s0
+    kptr_restrict: 2（保持原值；未改写）
+    module: build/device-evidence/pathguard-probe-local/20260913/pathguard_probe.ko
+    SHA-256: f0fe7b783b1996b1318d904a138b9a024a326f6b55b118818e8be1f35cdbd26a
+
+实验步骤和结果：
+
+1. 模块推送到 `/data/local/tmp/pathguard_probe.ko`，设备侧 SHA-256 与本地一致。
+2. 加载命令 `/data/adb/ksud insmod /data/local/tmp/pathguard_probe.ko` 返回 0，输出
+   `Loaded kernel module`；随后 `/proc/modules` 出现 `pathguard_probe 16384 0 ... Live`。
+3. 本轮唯一相关内核日志为 `pathguard_probe: no extended symbol version for module_layout`。该提示与本 probe 的空
+   `__versions` 设计一致；没有出现 vermagic mismatch、unknown symbol、invalid module、CFI 或签名拒绝。
+4. 设备在加载后保持在线，`sys.boot_completed=1`，无重启迹象。
+5. `ksud unload pathguard_probe` 被 4.1.3 CLI 正确拒绝（该子命令无模块名参数），未改变设备状态；随后使用
+   `/system/bin/rmmod pathguard_probe` 返回 0，模块从 `/proc/modules` 消失。
+6. 卸载后设备仍在线，`sys.boot_completed=1`，没有新增 probe 错误日志。
+
+证据目录：
+
+    build/device-evidence/pathguard-probe-local/20260913/device-load/
+
+其中保存了设备型号、`uname`、kptr_restrict、加载/卸载前后模块列表、相关 dmesg、设备侧哈希、uptime、
+boot 完成状态和 ADB 状态。
+
+本轮结论严格限定为：**在当前 Redmi K90 Pro Max / myron 运行内核上，使用 SukiSU Ultra 已验证的加载入口，
+PathGuard 的最小无 hook LKM probe 可以成功加载、初始化并卸载。** 这证明的是最小 LKM 装载能力，不证明
+VFS 隐藏、HideLab 行为矩阵、CFI/KMI 白名单、OTA 重新准入或 Hide 1.0；Hide 1.0 继续保持 `unsupported`。
+## 轮次 20：只读 VFS capability probe 的设计与本地构建
+
+在进入真实 VFS 数据面前，新增独立的 pathguard_vfs_cap_probe.ko。它固定到 myron 的
+android16-6.12 目标，仅把后续 prototype 所需的导出符号保留为 ELF undefined references，并在模块初始化时
+通过只读 misc 设备报告符号能力位图。模块不注册 kprobe、不调用 VFS helper、不改写 inode/file_operations、
+不安装策略，也不执行路径隐藏。
+
+本地使用与最小 probe 相同的 DDK source/output 和 Android clang r536225 构建；最终 ELF 证据位于
+build/device-evidence/vfs-capability-probe-local/20260913/：
+
+    ELF: AArch64 relocatable module
+    undefined: lookup_one_len, vfs_create, vfs_mkdir, vfs_mknod, vfs_symlink,
+               vfs_unlink, vfs_rmdir, vfs_link, vfs_rename,
+               register_kprobe, unregister_kprobe
+    extra DDK dependency: alt_cb_patch_nops
+    vermagic: 6.12.76-4k SMP preempt mod_unload modversions aarch64
+    __versions / __version_ext_crcs: present but empty (local DDK output)
+    module signature: absent
+    SHA-256: a5568baebdb371b0f7f82d3380c69bb3578273872ad60006814a7941f1c4d8ef
+
+源码静态检查确认没有 register_kprobe()、VFS helper 调用、inode/file operation 表写入或
+iterate_shared/d_revalidate 实现。该模块即使在设备上报告 READY，也只代表符号链接和加载期解析成功，
+不能代表任何 Hide 语义或 HideLab 通过。设备加载需要单独授权，且仍限制为一次加载、读取状态、卸载事务。
+## 轮次 21：myron 只读 VFS capability probe 设备验证
+
+使用本轮本地构建的 pathguard_vfs_cap_probe.ko 在 myron 上执行一次受控加载。设备侧哈希与本地
+一致：a5568baebdb371b0f7f82d3380c69bb3578273872ad60006814a7941f1c4d8ef。SukiSU Ultra
+ksud 4.1.3 insmod 返回 0，模块进入 Live，创建 /dev/pathguard_vfs_cap_probe。
+
+通过 Android arm64 状态读取器执行一次 ioctl，返回：
+
+    abi_version=1 size=160 state=1 last_error=0
+    available_ops=0x3ff required_ops=0x3ff
+    release=6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+
+这证明设备加载期解析了 capability probe 声明的全部十项符号能力。随后 /system/bin/rmmod
+pathguard_vfs_cap_probe 返回 0，模块从 /proc/modules 消失，设备节点消失，设备保持在线且
+sys.boot_completed=1。原始证据位于 build/device-evidence/vfs-capability-probe-local/20260913/device/。
+
+该结果只推进“符号存在且可由 SukiSU 加载期解析”的设备闸门，不证明 lookup、readdir、atomic_open、
+mutation 或 cache 的语义正确性。下一步仍需设计并审计固定设备范围的真实 VFS prototype；Hide 1.0
+继续保持 unsupported。
+
+## 轮次 22：只观测 VFS kprobe trace probe 本地构建
+
+为把“导出符号可解析”与“kprobe 入口可观测”分开验证，新增
+`experimental/hide-vfs/trace/` 独立探针。它固定注册六个入口：
+`lookup_one_len`、`vfs_create`、`vfs_mkdir`、`vfs_unlink`、`vfs_rmdir`、`vfs_rename`。
+pre-handler 只执行 `atomic64_inc()` 并返回 0；不访问 `pt_regs`，不调用 printk，不改写
+返回值或任何 VFS 对象。注册失败时逆序清理，卸载时同样逆序注销。misc ioctl 只读导出
+每个入口的命中数、`nmissed`、注册状态和运行内核 release。
+
+使用与 capability probe 相同的 DDK source/output 和 Android clang r536225，本地构建成功：
+
+    ELF: AArch64 ET_REL
+    vermagic: 6.12.76-4k SMP preempt mod_unload modversions aarch64
+    __versions / __version_ext_crcs: present but empty
+    module signature: absent
+    stripped SHA-256: 0fe62c9a92fea52f371ed8678457c5d2815ee4b47e4f9e0864ff6e1854602cce
+
+该产物是本地 DDK 编译证据，不是 myron 加载证据；本地 release 与设备
+`6.12.23-android16-5-g16e473de48a3-abogki462654244-4k` 不同，不能直接加载。配套
+Android arm64 `status_reader` 已编译，待单独授权后用于一次加载、计数读取、受控文件操作和
+卸载事务。设备实验尚未执行，Hide 1.0 仍为 unsupported。
+
+## 轮次 23：myron kprobe trace probe 设备验证
+
+在明确确认后，对本地构建的 `pathguard_vfs_trace_probe.ko` 执行一次受控加载、观测和卸载。
+设备为 `25102RKBEC / myron`，运行内核为
+`6.12.23-android16-5-g16e473de48a3-abogki462654244-4k`，使用 SukiSU Ultra
+`/data/adb/ksu/bin/ksud insmod`。设备侧哈希与本地 SHA-256
+`0fe62c9a92fea52f371ed8678457c5d2815ee4b47e4f9e0864ff6e1854602cce` 一致。
+
+加载成功，`/proc/modules` 显示模块为 `Live`，misc 节点创建成功。初始 ioctl：
+
+    state=1 last_error=0 probes=6 registered=6
+    all hits=0 nmissed=0
+
+在专用临时目录执行 mkdir、touch、rename、rmdir、unlink 后，ioctl 计数为：
+
+    lookup_one_len  hits=14 nmissed=0
+    vfs_create      hits=0  nmissed=0
+    vfs_mkdir       hits=2  nmissed=0
+    vfs_unlink      hits=12 nmissed=0
+    vfs_rmdir       hits=2  nmissed=0
+    vfs_rename      hits=13 nmissed=0
+
+其中 `vfs_create=0` 是重要观测：`touch` 的创建流程没有经过该通用 helper，后续必须把
+`atomic_open` 和文件系统特定创建路径纳入 HideLab，而不是把单个 helper 的命中当作语义覆盖。
+
+随后 `/system/bin/rmmod pathguard_vfs_trace_probe` 返回 0；模块从 `/proc/modules` 消失，
+`/dev/pathguard_vfs_trace_probe` 消失，`sys.boot_completed=1` 且 ADB 设备保持在线。模块相关
+dmesg 仅见注册成功信息；设备普通 dmesg 读取受权限/审计噪声限制，但没有本模块失败日志。
+推送到 `/data/local/tmp` 的模块和读取器已清理。证据目录：
+`build/device-evidence/vfs-trace-probe-local/20260913/device/`。
+
+结论严格限定为：myron 当前内核支持这六个 kprobe 的注册、命中和注销；`nmissed=0` 说明
+本次短事务没有丢失 probe。它不证明任何 VFS 隐藏或修改能力，Hide 1.0 继续保持
+`unsupported`。
+
+### 轮次 53：v8 加载与匹配 namespace INSTALL（2026-09-14）
+
+v8 在 myron 上通过 SukiSU loader 加载，初始 `status` 为 `state=0/EOPNOTSUPP`，设备
+稳定。启动新的 HideLab target（PID `19278`，UID `10549`）后读取其 mount namespace
+`4026535993`，并在该 namespace 内创建测试目录、执行 INSTALL generation `2002`。
+返回 `state=1`、`operation_mask=0x0fff`、parent inode `796616`，说明本轮已消除上次
+因 target PID 退出导致的 namespace 失配。尚未执行 ENABLE。
+
+### 轮次 51：v7 ENABLE/恢复失败（2026-09-14）
+
+用户确认后执行底层 `hide1_control enable 2001`，返回 `state=2 (ACTIVE)`，设备当时
+在线且未立即重启。由于 INSTALL 绑定的 target PID `19251` 已退出，随后启动的 HideLab
+进程使用了新的 mount namespace `4026536057`，而 binding 仍为 `4026536046`；
+HideLab 因观察者不匹配而正确放行，外部目标路径统计为 `27` 项可见、`36` 项返回错误，
+不能判定为隐藏成功。
+
+随后执行 `hide1_control disable`，ADB 立即断开；约一分钟后设备重新上线，uptime
+重新计时，`/proc/modules` 中模块未加载。`/sys/fs/pstore/console-ramoops-0` 存在，
+但当前权限和日志编码无法提取可读的 panic/call trace。该结果证明 operation-table
+恢复/teardown 仍会触发设备重启，Hide 1.0 必须继续保持 `unsupported`，不得再次上机
+ENABLE，直到离线修复并取得可观测的恢复证据。
+
+### 轮次 50：v7 INSTALL 设备验证（2026-09-14）
+
+在不执行 ENABLE 的前提下创建一次性测试目录，并以 HideLab target UID `10549`、
+测试 PID `19251`、generation `2001` 执行 INSTALL。结果成功：
+
+```text
+state=1
+target_uid=10549 target_pid=19251
+target_mnt_ns=4026536046 generation=2001
+operation_mask=0x0000000000000fff parent_inode=799429
+release=6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+```
+
+测试 Activity 随后退出，模块仍为 Live，设备未重启。该结果只证明 binding 校验、
+namespace/UID 绑定和完整 operation mask 检查通过；由于尚未执行 ENABLE，没有产生
+任何隐藏行为证据，产品状态仍为 `unsupported`。ENABLE 仍属于高风险步骤，需单独确认。
+
+## 轮次 24：namei/FUSE coverage probe 源码核对与本地构建
+
+上一轮 `touch` 未命中 `vfs_create`。对 android16-6.12 源码继续核对发现：`lookup_open()`
+在目录 inode 存在 `.atomic_open` 时进入该 operation；FUSE 的目录 inode operations 明确绑定
+`fuse_atomic_open`，目录 file operations 绑定 `fuse_readdir`，缓存重验使用
+`fuse_dentry_revalidate`。因此新增独立只读 coverage probe，注册 `path_openat`、
+`fuse_atomic_open`、`iterate_dir`、`fuse_readdir`、`fuse_dentry_revalidate`、`do_filp_open`。
+
+模块不读取 `pt_regs`，handler 只执行 `atomic64_inc()`；没有拒绝、返回值修改、VFS helper
+调用或 operation table 写入。六个符号名均保留在 ELF 数据中，`register_kprobe` 和
+`unregister_kprobe` 为加载期依赖。本地结果：
+
+    ELF: AArch64 ET_REL
+    vermagic: 6.12.76-4k SMP preempt mod_unload modversions aarch64
+    __versions / __version_ext_crcs: present but empty
+    module signature: absent
+    SHA-256: 1aaef8da70bb3b24b1916f480ff1e12d2a13846d09dca76e23b1bc45d37d5ac7
+
+配套状态读取器已构建为 Android arm64 PIE，证据位于
+`build/device-evidence/vfs-coverage-probe-local/20260913/`。设备是否保留并允许探测这些本地
+符号仍未知，尚未执行加载。即使设备验证通过，也只用于确定 Hide prototype 的实际覆盖面，
+不改变 Hide 1.0 的 `unsupported` 状态。
+
+## 轮次 25：myron namei/FUSE coverage probe 设备验证
+
+coverage probe 在 myron 上通过 `/data/adb/ksu/bin/ksud insmod` 加载，六项 kprobe 全部注册，
+设备 release 与预期完全一致。首次状态读取已经出现大量系统全局命中，说明通用 namei probe
+会观察整机活动，必须使用短窗口前后快照而不是绝对计数。
+
+在 `/storage/emulated/0/Pictures/PathGuardCoverage-<run-id>` 内执行受控创建、读取、枚举、重命名
+和删除。前后增量为：
+
+    path_openat             +1327
+    fuse_atomic_open        +1
+    iterate_dir             +11
+    fuse_readdir            +2
+    fuse_dentry_revalidate  +143
+    do_filp_open            +1327
+    all nmissed             0
+
+通用入口的增量混有设备后台任务，不能解释成测试自身的调用次数；但 `fuse_atomic_open` 和
+`fuse_readdir` 从 0 增长，证明受控共享存储操作确实进入两条 FUSE 专有路径。一次重复 insmod
+因模块已经 Live 返回 `EEXIST`，属于实验命令重复，不是注册失败，也没有改变已加载状态。
+
+`rmmod pathguard_vfs_coverage_probe` 返回 0，模块和 misc 节点消失，临时 fixture、模块与读取器
+均已删除，ADB 在线且 `sys.boot_completed=1`。相关 dmesg 仅见注册成功信息。原始证据位于
+`build/device-evidence/vfs-coverage-probe-local/20260913/device/`。
+
+结论：myron 当前内核同时保留并允许探测 namei/FUSE 内部入口；正式数据面必须覆盖
+`.atomic_open`、`.iterate_shared` 和 dentry revalidation，不能把 `vfs_create` 或普通 lookup
+当作完整代理。本轮依然没有修改 VFS 行为，Hide 1.0 继续保持 `unsupported`。
+
+## 轮次 26：VFS operation-table preflight 本地构建
+
+为避免直接复制 Kasumi/NoMount 的 operation-table shadow 代码，新增只读
+`experimental/hide-vfs/preflight/`。模块使用 `kern_path` 解析一个绝对父目录，报告
+文件系统名、父 inode/设备号以及 `lookup`、`.atomic_open`、`.iterate_shared`、所有父目录
+mutation 回调和 dentry `d_revalidate` 的存在位图。它不输出地址，不改写 `i_op/i_fop/d_op`，
+也不注册 kprobe；`SCAN`、`STATUS`、`CLEAR` 均受 mutex 保护。
+
+本地使用 android16-6.12 DDK + clang r536225 构建成功。期间编译器拒绝旧式
+`file_operations.iterate` 字段，确认目标 6.12 只支持 `.iterate_shared`，已移除该旧字段。
+产物证据：
+
+    ELF: AArch64 ET_REL
+    vermagic: 6.12.76-4k SMP preempt mod_unload modversions aarch64
+    module signature: absent
+    SHA-256: 4e8c229a4562527327e2dda04c9ea27c67a57745339d67b3b764da4ca9e4c7e3
+
+配套 Android arm64 `status_reader` 已构建。设备扫描尚未执行；即使扫描得到完整位图，也只
+能证明目标目录适合进入 prototype 安装前检查，不能证明任何隐藏语义。
+
+## 轮次 27：myron operation-table preflight 设备验证与状态修复
+
+只读 preflight 首次加载前，`ksud` 路径曾短暂返回 inaccessible，确认模块没有进入
+`/proc/modules` 后重新定位并加载成功。首次扫描得到 FUSE `0x0fff` 和 f2fs `0x0ffd`，但发现
+`SCAN` 中 `memset` 同时清除了初始化时写入的 `kernel_release`。该问题不影响 operation-table
+读取，却会产生不完整审计证据，因此没有接受首次结果。
+
+修复方式是在每次成功 scan 重建状态时重新从 `init_utsname()->release` 填入 release。重新构建
+模块，最终 SHA-256 为
+`4e8c229a4562527327e2dda04c9ea27c67a57745339d67b3b764da4ca9e4c7e3`，卸载旧版本后加载修复版并
+重复扫描：
+
+    /storage/emulated/0/Pictures
+      fs=fuse dev=0:280 inode=15771 mode=042770 mask=0x0fff
+      lookup/atomic_open/iterate_shared/all mutation/d_revalidate present
+
+    /data/local/tmp
+      fs=f2fs dev=254:55 inode=600 mode=040771 mask=0x0ffd
+      all required entries except dentry d_revalidate present
+
+两项状态均包含精确设备 release。`rmmod pathguard_vfs_preflight` 返回 0；模块、misc 节点和设备
+临时输入均已清理，ADB 在线且 `sys.boot_completed=1`。证据位于
+`build/device-evidence/vfs-preflight-local/20260913/device/`。
+
+结论：目标共享存储 FUSE 父目录具有 Hide 1.0 定义的全部 12 个可包装 operation，但这只是结构
+准入条件，不是行为实现。后续 operation-table shadow 必须原子覆盖并可回滚全部 12 项，且仍需
+HideLab 验证 observer、cache、mutation 和并发语义。
+
+## 轮次 28：Kasumi 生命周期复核与 Hide 1.0 决策模型
+
+继续审计 `kasumi_dirhijack.c`、`kasumi_fop_override.c` 和 android16-6.12 的 `fs.h`、
+`dcache.h`、`fs/namei.c`、`fs/fuse/dir.c` 后，确认不能把 Kasumi 的 lookup/readdir 代码直接扩写
+成 PathGuard 数据面：Kasumi 的 per-dentry shadow、SRCU/Tasks-RCU drain 和 operation table
+发布/回滚值得借鉴，但其 hide 路径仍未包装 FUSE `atomic_open` 和全部 mutation。NoMount 覆盖面
+更小，同样不能作为 12 项完整实现。
+
+本轮先新增可复用的 `experimental/hide-vfs/model/hide_vfs_model.{h,c}`。该模型不解析路径、不接触
+VFS 指针，只接受已解析的 parent identity、basename、observer 和 immutable generation，输出
+pass、synthetic negative、omit、reject、keep cache 或 invalidate cache。target mutation 一律
+输出 `ENOENT + no original call`；rename 同时检查 source/destination；同 UID 不同 namespace 和
+root oracle 均不命中。缓存决策确保 synthetic negative 不能跨 observer 或 generation 复用。
+
+模型实现采用 C11 固定大小结构，没有动态分配和平台 API。宿主测试覆盖 11 类 lookup/readdir/
+mutation 决策、rename 双端、target/control/root、同 UID 跨 namespace、parent superblock/inode、
+basename、generation，以及 real positive、real negative、synthetic negative cache。验证命令与结果：
+
+```text
+cmake --build build --config Debug --target pathguard_hide_vfs_model_test
+  PASS
+
+ctest --test-dir build -C Debug --output-on-failure
+  -R "pathguard_hide_vfs_model_test|pathguard_(hide_loader|restricted_loader)_test"
+  3/3 PASS
+
+android16-6.12 Kbuild + clang r536225: hide_vfs_model.o
+  arm64 kernel object compile PASS
+```
+
+内核侧 mount namespace 身份不能用 `nsproxy *` 代替，因为进程可在不改变 mount namespace 时得到
+新的 nsproxy。实现保存并 pin `struct mnt_namespace *`，同时持有目标 `nsproxy` 引用；回调以
+mount namespace 指针比较，审计状态通过 `from_mnt_ns()->inum` 报告。该方案已在 myron 上通过
+加载、绑定和清理验证。
+
+本轮没有构建或加载 Hide 数据面模块，没有修改设备。现有 `pathguard_hide1.c` 仍是 fail-closed
+shell；Hide 1.0 状态仍为 `unsupported`。
+
+## 轮次 29：Hide 1.0 inactive 绑定 shell 与 myron 验证
+
+`pathguard_hide1.c` 现在只实现数据面之前的资源绑定：`INSTALL` 通过带引用的 PID 查找获取
+目标 task，验证 `fsuid`，在 `task_lock` 下引用目标 `nsproxy`，解析并 pin parent path，并要求
+完整的 `0x0fff` operation mask。调用者必须已进入目标 mount namespace，否则返回 `EXDEV`。
+安装先构建 candidate 后原子替换，失败保留旧 binding；`DISABLE` 保留 inactive binding，
+`CLEAR` 才释放引用。没有任何 `i_op/i_fop/d_op` 写入，`ENABLE` 固定返回 `EOPNOTSUPP`。
+
+本地 DDK 构建的 AArch64 模块经 SukiSU loader 在 myron 上加载成功。29 个 undefined symbol
+同时存在于 DDK vmlinux 和设备 kallsyms。HideLab target `dev.pathguard.hideprobe.target`
+（uid/pid `10549/1226`）在 `/storage/emulated/0/Pictures` 安装成功，状态为：
+
+```text
+state=INACTIVE target_mnt_ns=4026536018 generation=11
+operation_mask=0x0fff parent_inode=15771
+kernel=6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+```
+
+错误 UID 返回 `EPERM`，跨 namespace 返回 `EXDEV`，两次失败均保留旧 binding；`ENABLE 11`
+返回 `EOPNOTSUPP`，`DISABLE` 保留 binding，`CLEAR` 回到 `UNSUPPORTED`。最后 `rmmod` 成功，
+设备保持在线且 `sys.boot_completed=1`。
+
+证据仅证明 LKM 启动、observer/parent 绑定、失败回滚和引用释放正确；没有任何隐藏效果。
+下一步仍是 operation-table shadow、synthetic negative、readdir、atomic_open、mutation、
+并发回收和完整 HideLab 回归，Hide 1.0 继续 `unsupported`。
+
+随后以加入显式 `igrab/iput` parent inode 引用的最终二进制重跑闭环，模块 SHA-256 为
+`2a5913da867df54ade60aa4eab09547b68e67698ef5718d9433c7ef6e893d2d9`，generation 使用 21。
+最终二进制同样在 myron 上加载、进入 `INACTIVE`（mask `0x0fff`）、`ENABLE` 返回
+`EOPNOTSUPP`、`CLEAR` 释放引用并成功 `rmmod`。因此本轮结论适用于当前源码，而非仅适用于
+早期构建物。
+
+## 轮次 30：VFS shadow 数据面第一版本地构建
+
+本轮在 `experimental/hide-vfs/pathguard_hide1.c` 中实现单 binding 的 operation-table shadow：
+
+- 保存并复制 parent inode 的原始 `inode_operations`、`file_operations`；
+- 覆盖 `lookup`、`atomic_open`、`iterate_shared`、`create`、`mkdir`、`mknod`、`symlink`、
+  `unlink`、`rmdir`、`link`、`rename` 和 `d_revalidate` 共 12 个入口；
+- 使用 `smp_store_release` 发布/恢复 i_op、i_fop，逐 dentry 保存原始 d_op；
+- 使用静态 SRCU 域包围所有 shadow callback，恢复指针后先 `synchronize_srcu`，再摘链释放
+  dentry metadata；
+- 安装前检查原始 operation pointer 未被第三方替换，parent dentry 已缓存 basename 时通过
+  `d_lookup` 预装 dentry shadow，安装任一步失败均恢复已发布指针；
+- `lookup` 为目标观察者发布 synthetic negative，`iterate_shared` 过滤 basename，所有 mutation
+  和 rename source/destination 对目标观察者返回 `ENOENT`，其它 fsuid/namespace 透传原始回调。
+
+本地真实 Kbuild 使用 clang r536225 和 `android16-6.12` prepared DDK 成功，生成 AArch64
+`pathguard_hide1.ko`；`__versions` 段大小为 0，符合 SukiSU loader 的运行时符号解析路线。
+宿主 `pathguard_hide_loader_test`、`pathguard_hide_vfs_model_test`、
+`pathguard_restricted_loader_test` 均通过。
+
+尚未在设备启用该 shadow。仍需设备加载/卸载实验、warm positive dentry、并发/生命周期和
+HideLab 全矩阵回归；在这些证据完成前状态保持 `unsupported`，不能宣称 Hide 1.0 active。
+
+## 轮次 31：shadow 模块设备 inactive 装载验证
+
+使用本轮 clang r536225 产物通过 SukiSU `/data/adb/ksud insmod` 加载到 myron。由于普通
+`su -c` 的 SELinux domain 无法访问 misc device，控制程序在目标进程 mount namespace 内通过
+`su -mm -c 'nsenter -t 1226 -m ...'` 执行。`INSTALL 10549 1226 1002 /storage/emulated/0/Pictures
+pathguard_hide1_probe` 成功，状态为 `INACTIVE`、mount namespace `4026536018`、operation mask
+`0x0fff`。随后执行 `CLEAR` 并卸载模块；设备短暂 USB 重连后恢复，`sys.boot_completed=1`，
+`/dev/pathguard_hide1` 和 `/proc/modules` 均确认已清理。
+
+本轮没有执行 `ENABLE`，因此没有发生 VFS operation-table 替换，也没有 HideLab 隐藏效果证据。
+`ENABLE` 仍是单独的高风险设备闸门，必须在明确确认后执行；产品状态继续为 `unsupported`。
+
+## 轮次 32：首次 ENABLE 失败与 dentry 发布修复
+
+在用户明确确认后，使用 target PID `24278`、UID `10549`、generation `1003` 执行了首次
+`ENABLE` 实验。`INSTALL` 返回成功（namespace `4026536020`、mask `0x0fff`），但 ENABLE
+命令期间 ADB 立即断开，设备随后自动重启；重连后 `sys.boot_completed=1`、
+`ro.boot.bootreason=reboot`，模块未持久化。没有 pstore 或上一轮 kmsg 可供进一步定位，
+因此该实验结论标记为 `CRASH/设备重启`，绝不能视为通过。
+
+源码复核发现 dentry shadow 发布路径没有按 Kasumi 的做法在 `d_lock` 下同时更新 `d_op` 和
+operation flags，也没有保存原始 flags 与初始化发布屏障。该并发缺陷已修复：安装和恢复均在
+`d_lock` 下完成，保存/恢复完整 `d_flags`，并在 metadata 入链后使用 `smp_wmb()` 再发布指针；
+释放仍在 SRCU 排空并摘链后执行。修复后的模块已重新通过 android16-6.12 clang/Kbuild，
+但尚未再次执行 ENABLE。
+
+当前状态：首次 ENABLE 实验失败，HideLab active 回归未开始，产品状态保持 `unsupported`。
+下一次设备实验必须先有可观测的 kmsg/pstore 或最小化 shadow 发布范围，并继续保留自动重启后的
+恢复检查。
+
+## 轮次 33：修复版 ENABLE 第二次设备失败
+
+针对轮次 32 的 dentry 发布并发修复重新构建模块，并在新启动的 target PID `19811`、namespace
+`4026536036`、generation `1004` 上执行。`INSTALL` 成功，状态为 `INACTIVE`、mask `0x0fff`；
+`ENABLE` 没有返回状态，ADB 随即断开，设备再次自动重启。重连后 `sys.boot_completed=1`，
+模块未加载，说明修复未消除启用阶段故障。
+
+本轮停止继续设备重试。当前证据只能证明 inactive binding 和 LKM 装载安全，不能证明任何
+operation-table shadow 能在 myron 上稳定发布；HideLab active 回归和设备准入均被阻断。后续
+必须先通过更小范围的隔离实验或获得可留存的崩溃日志，不能继续把完整 shadow 当作可用后端。
+
+后续代码审查又发现 `d_revalidate` 原先在进入 SRCU 前从 `d_op` 反推 metadata，卸载线程可能
+在该窗口内完成恢复并释放对象，形成 UAF。现已调整为先进入 `hide1_srcu` 再解析 metadata，
+并重新通过 clang/Kbuild；新模块 SHA-256 为
+`61aa84be1d5879440b1e987a2cbf4e1b3c650d5ecb7e2da9079208e2d4b69030`。该修复尚未上机验证，
+之前两次 ENABLE 失败仍然有效。
+
+## 轮次 34：Hide 1.0 实验刷入包（未上机）
+
+为支持后续受控设备实验，新增独立目录 `experimental/hide-vfs/package/` 和
+`scripts/package-hide1-lab.ps1`。它与正式 `module/` 完全分离，包含：
+
+- `pathguard_hide1.ko`（本轮 SHA-256：
+  `61aa84be1d5879440b1e987a2cbf4e1b3c650d5ecb7e2da9079208e2d4b69030`）；
+- `hide1_control` 和 `hide1ctl` 手动控制入口；
+- 安装时的 arm64 与精确 `uname -r` 检查；
+- 不执行自动 `insmod`、`INSTALL` 或 `ENABLE` 的 `post-fs-data.sh`/`service.sh`；
+- 卸载时仅尝试 `DISABLE`、`CLEAR` 和 `rmmod`，不持久化启用状态。
+
+本地生成的包为 `dist/pathguard-hide1-lab-myron-v2.zip`，包含 12 个条目，
+`build-info.txt` 记录设备、内核 release、模块和控制程序哈希。所有 shell
+脚本通过 `sh -n`，ZIP 条目可正常读取。`dist/` 被 `.gitignore` 排除，包尚未
+刷入设备；因此本轮没有新增加载、绑定或 Hide 行为证据，产品状态仍为
+`unsupported`。
+
+该 v2 包已传送到已连接的 `myron` 设备临时路径
+`/data/local/tmp/pathguard-hide1-lab-myron-v2.zip`；设备端 SHA-256 为
+`bc6c43a92c51f77e51b3150bea5ed06cdaae717dd865919c532d42536b60a995`，与本地
+文件一致。传送后未执行模块安装、加载、绑定或 `ENABLE`。
+
+包内 `enable` 明确标记为高风险且不会自动重试。由于轮次 32、33 的完整
+shadow `ENABLE` 均导致设备重启，下一步应先使用更小范围的 shadow 隔离实验，
+并保留 pstore/kmsg 采集，再考虑执行完整 `ENABLE`。
+
+## 轮次 35：myron 刷入包安装与仅加载验证
+
+用户已在设备上安装 `pathguard-hide1-lab-myron-v2.zip` 并重启。设备信息仍为：
+
+```text
+product/model: myron / 25102RKBEC
+kernel: 6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+sys.boot_completed: 1
+ro.boot.bootreason: reboot,0,32628
+```
+
+通过设备内置 KernelSU CLI 执行：
+
+```text
+/data/adb/ksud insmod /data/adb/modules/pathguard_hide1_lab/bin/pathguard_hide1.ko
+```
+
+返回 `Loaded kernel module`，`/proc/modules` 显示：
+
+```text
+pathguard_hide1 36864 0 - Live 0x0000000000000000 (O)
+```
+
+`/dev/pathguard_hide1` 存在（权限 `0600`，root:root）。使用同一构建的
+`hide1_control` 临时复制到 `/data/local/tmp` 后读取状态，结果为：
+
+```text
+abi_version=1 size=184 state=0 last_error=-95 target_uid=0 target_pid=0
+target_mnt_ns=0 generation=0 operation_mask=0x0000000000000000 parent_inode=0
+release=6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+```
+
+这证明包内 LKM 可经 SukiSU loader 加载，且加载后仍保持 `UNSUPPORTED`，没有
+`INSTALL`、`ENABLE` 或 VFS shadow 发布；设备在观察窗口内保持在线并完成启动。
+
+同时观察到两类非通过信息：
+
+1. 安装时 `init` 对 `/data/adb/modules_update/pathguard_hide1_lab` 及包内文件有
+   SELinux `relabelfrom` 拒绝；KernelSU 仍将模块列为已启用，需后续确认 action/
+   service 脚本是否能在该设备上执行，不能假定脚本可用。
+2. 内核日志出现 `pathguard_hide1: no extended symbol version for module_layout`。
+   这是空 `__versions` + SukiSU 加载期解析路线的告警；本轮加载成功，但必须在
+   后续稳定性审计中保留该告警，不能将其记录为零告警通过。
+
+本轮结论：**LKM 加载和 inactive 状态验证通过；Hide 行为、shadow 稳定性和
+HideLab active 仍未验证，产品状态继续为 `unsupported`。**
+
+## 轮次 36：i_op-only 隔离实验包（待设备验证）
+
+为定位轮次 32、33 的完整 shadow 重启原因，`pathguard_hide1.c` 增加加载期
+`shadow_mode` 参数：`1=i_op-only`、`2=f_op-only`、`3=dentry-d_op-only`、
+`0=all`。隔离模式只发布对应 operation table，不安装其它类型的 shadow；
+`lookup` 中的 dentry shadow 也仅在 d_op 模式启用。
+
+本地 android16-6.12 DDK/Kbuild 构建成功，宿主 loader、VFS model 和 restricted
+loader 三项测试全部通过。实验包默认使用 `shadow_mode=1`，版本为
+`0.1.1-experimental-iop`，打包脚本默认输出到 `download/`。该包尚未传送或加载到
+设备；设备实验顺序固定为加载、`INSTALL`、单次 `ENABLE`、观察、`DISABLE`、
+`CLEAR`、卸载，任何断连/重启立即停止后续模式。
+
+本次构建指纹：模块 `pathguard_hide1.ko` SHA-256 为
+`b5989a64b43e01e5fe0611da8e4602fc0d19ebf61cf234d3f9d74b6ae816b781`；ZIP
+`download/pathguard-hide1-lab-myron-iop-v1.zip` SHA-256 为
+`2b7afeafd791ee57b7f74702db7b8e8f19b69214c038c6e8f355e207cfd6b020`。
+
+## 轮次 37：i_op-only 包设备加载验证
+
+用户安装 `download/pathguard-hide1-lab-myron-iop-v1.zip` 后重启。设备启动完成，
+`/proc/modules` 无旧模块，内核 release 仍为目标 `myron` 字符串。通过：
+
+```text
+/data/adb/ksud insmod /data/adb/modules/pathguard_hide1_lab/bin/pathguard_hide1.ko shadow_mode=1
+```
+
+返回 `Loaded kernel module`；`/sys/module/pathguard_hide1/parameters/shadow_mode`
+返回 `1`，`/proc/modules` 显示模块为 `Live`。使用同一控制程序读取状态：
+
+```text
+state=0 last_error=-95 target_uid=0 target_pid=0 target_mnt_ns=0
+generation=0 operation_mask=0x0000000000000000 parent_inode=0
+release=6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+```
+
+观察窗口内 ADB 在线、`sys.boot_completed=1`，没有执行 `INSTALL` 或 `ENABLE`，
+因此没有产生 VFS 指针发布或隐藏效果证据。安装日志仍包含 SELinux relabel 拒绝，
+内核仍提示 `pathguard_hide1: no extended symbol version for module_layout`；两项
+告警均保留为后续稳定性审计风险。
+
+本轮结论：**i_op-only LKM 加载和参数生效通过；i_op shadow 的设备 ENABLE 稳定性
+尚未验证，Hide 1.0 继续为 `unsupported`。**
+
+## 轮次 38：i_op-only ENABLE/恢复隔离实验结果
+
+在轮次 37 的已加载模块上启动 HideLab target，得到 UID `10549`、PID `19252`、
+mount namespace `4026535993`。在目标 namespace 中执行 `INSTALL`，generation
+`2001`，返回 `INACTIVE`、operation mask `0x0fff`、parent inode `15771`。
+
+单次执行 `ENABLE 2001` 返回成功并报告：
+
+```text
+state=2 target_uid=10549 target_pid=19252
+target_mnt_ns=4026535993 generation=2001 operation_mask=0x0fff
+```
+
+连续 5 次、间隔约 2 秒读取状态均保持 `ACTIVE`，ADB 在线。随后 target 进程被
+重新启动为 PID `22492`、namespace `4026536030`；旧 binding 正确不匹配新
+namespace，说明 namespace 隔离条件生效。为回收旧 binding 执行 `DISABLE`，命令
+期间 ADB 断开，设备随后重启。重连后：
+
+```text
+ro.boot.bootreason=reboot
+sys.boot_completed=1
+/proc/modules 无 pathguard_hide1
+/dev/pathguard_hide1 不存在
+/sys/fs/pstore 为空
+```
+
+本轮只证明 `i_op-only` 指针发布可短时进入 `ACTIVE`；**恢复/卸载路径仍会导致
+设备重启**。由于 target namespace 已在 ENABLE 后变化，本轮没有把 target APK
+的观察结果用于判定隐藏效果；完整 HideLab 仍未运行。实验状态为 `CRASH/设备
+重启`，产品状态继续为 `unsupported`，后续不得再执行同一恢复路径重试。
+
+## 轮次 39：DISABLE/恢复路径离线审查与修复
+
+依据 `refer/Kasumi-main` 的 iop/fop/dentry teardown 实现和
+`refer/hide-refer/nomount-master` 的 operation-table 恢复代码，对
+`experimental/hide-vfs/pathguard_hide1.c` 进行离线审查。确认原实现只调用一次
+`synchronize_srcu()`，没有覆盖“已加载 operation-table 指针但尚未进入 callback”的
+Tasks-RCU 窗口；dentry shadow 也在恢复后立即 `dput/kfree`，存在旧 callback 入口
+访问已释放 metadata 的风险。
+
+本轮修复：
+
+1. `DISABLE`/rollback/卸载改为 `retiring -> 恢复指针 -> Tasks-RCU -> SRCU ->
+   Tasks-RCU -> RCU -> 释放 metadata`，并使用 `__nocfi` 包装调用
+   `synchronize_rcu_tasks()`。
+2. dentry 恢复持有 `d_lock`，先恢复原始 flags/d_op，再执行 `d_drop()`；shadow
+   metadata 保留到所有 grace period 完成后才释放。
+3. 删除无效的 `dentry_shadows.next` 空链表判断；恢复过程中发现 operation pointer
+   已被其它 owner 改写时返回 `-EAGAIN`，不再伪报成功。
+4. f_op shadow 设置 `owner=THIS_MODULE`，并通过 open/release 计数阻止存在旧目录
+   fd 时执行 `CLEAR`，避免旧 fd 与新 binding 混用。
+
+离线验证：
+
+```text
+android16-6.12 DDK/Kbuild: CC -> MODPOST -> LD 全部通过
+host pathguard_hide_vfs_model_test: Passed
+host pathguard_hide_vfs_teardown_contract_test: Passed
+```
+
+本地 Kbuild 使用已准备的 `ddk-kdir-local-linux/android16-6.12` 输出；因环境未安装
+`pahole`，关闭模块 BTF 生成后完成链接。包含 f_op 旧 fd 门禁的最终模块 SHA-256
+为 `7DDA5964D6C4E79A0C62349F1D027CB955E48BB0D49096A73F85D18E078E86A4`。
+**尚未进行设备侧 ENABLE/DISABLE 回归，不能据此宣称恢复路径或 Hide 1.0 通过。**
+
+## 轮次 40：修复后模块加载与安全清理
+
+使用包含 Tasks-RCU/SRCU/RCU teardown 修复及 f_op 旧 fd 门禁的
+`pathguard-hide1-lab-myron-iop-v3.zip`。用户安装模块并重启后，设备侧确认：
+
+```text
+kernel=6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+fingerprint=Redmi/myron/myron:16/BP2A.250605.031.A3/OS3.0.23.0.WPMCNXM:user/release-keys
+module_sha256=7dda5964d6c4e79a0c62349f1d027cb955e48bb0d49096a73f85d18e078e86a4
+```
+
+通过 `/data/adb/ksu/bin/ksud insmod` 加载成功，`shadow_mode=1`，
+`/proc/modules` 显示 `pathguard_hide1 ... Live`，`/dev/pathguard_hide1` 已创建设备节点。
+加载后未执行 `INSTALL` 或 `ENABLE`。加载前使用包内 wrapper 查询状态时，由于模块尚未
+加载、`/dev/pathguard_hide1` 尚不存在，得到 `open: No such file`；wrapper 的全局日志
+重定向还掩盖了该错误。加载完成后直接调用包内 `hide1_control status` 确认：
+
+```text
+state=0 last_error=-95 generation=0 operation_mask=0x0000000000000000
+```
+
+随后执行低风险 `DISABLE`（无 active shadow）和 `CLEAR`，两者均返回 0，状态仍为
+`UNSUPPORTED`。直接 `rmmod` 在 SELinux enforcing 环境被内核拒绝为 `EPERM`，未继续
+强行操作，改由用户从 KernelSU 卸载模块并重启。
+
+## 轮次 41：用户卸载后的设备健康检查
+
+用户通过 KernelSU 卸载 `PathGuard Hide 1.0 Lab` 并重启。重连后证据：
+
+```text
+ro.boot.bootreason=reboot
+sys.boot_completed=1
+kernel=6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+fingerprint=Redmi/myron/myron:16/BP2A.250605.031.A3/OS3.0.23.0.WPMCNXM:user/release-keys
+```
+
+root 检查确认 `/proc/modules` 不再包含 `pathguard_hide1`，`/dev/pathguard_hide1`
+不存在，模块目录已清除；`/sys/fs/pstore` 未发现 panic、oops 或 watchdog 记录。
+本轮证明修复后模块在未启用 shadow 的情况下可安全加载、清理并由 KernelSU 卸载，
+**不构成 `INSTALL/ENABLE/DISABLE` active 回归，也不改变 Hide 1.0 的
+`unsupported` 状态。**
+
+## 轮次 42：v4 active DISABLE 设备回归失败与修复
+
+用户安装 `pathguard-hide1-lab-myron-iop-v4.zip` 并重启后，设备侧确认目标 release、
+模块加载、`INSTALL` 和单次 `ENABLE` 均成功。随后 target 被重新启动为不同 PID 和
+mount namespace，原 binding 与 probe 不再属于同一观察者，之前的文件可见性结果作废，
+不能归类为 LEAK。
+
+对旧 binding 执行 `DISABLE` 时 ADB 立即断开；设备重新上线后：
+
+```text
+ro.boot.bootreason=kernel_panic,null
+sys.boot_completed=1
+/proc/modules 无 pathguard_hide1
+```
+
+这证明 v4 的 active 恢复路径会触发设备级内核异常，HideLab active 回归立即停止，
+产品状态保持 `unsupported`。
+
+离线审查发现 v4 在没有活动回调计数的前提下，`DISABLE`/rollback/卸载无条件调用两次
+`synchronize_rcu_tasks()`，而现有 wrapper 已统一进入 `hide1_srcu`。修复版删除无条件
+Tasks-RCU 调用，采用“先恢复 operation pointers，再 `synchronize_srcu()`，最后
+`synchronize_rcu()`，然后释放 dentry metadata”的顺序，并同步更新 teardown 契约测试。
+该修复尚未重新打包或在设备上验证；不得把离线测试通过解释为设备恢复已修复。
+
+下一步是重新构建并审查新包，先做 `i_op-only` 的短时 ENABLE/观察/DISABLE 隔离实验；
+在确认设备不再 kernel panic 前，不允许进入完整 d_op/f_op active 矩阵。
+
+## 轮次 43：v5 i_op-only 有效序列与恢复重启
+
+用户安装 `pathguard-hide1-lab-myron-iop-v5.zip` 并重启。设备 release 和 fingerprint
+仍命中 myron allowlist，模块通过 SukiSU 加载，`shadow_mode=1`。目标进程固定为
+PID `20048`、mount namespace `4026535993`；在该 namespace 内完成：
+
+```text
+INSTALL uid=10549 pid=20048 generation=5001
+state=INACTIVE operation_mask=0x0fff parent_inode=788054
+ENABLE 20048 5001
+state=ACTIVE target_mnt_ns=4026535993
+```
+
+未 force-stop target，使用 `FLAG_ACTIVITY_CLEAR_TASK|NEW_TASK` 重新触发同一进程的
+probe，metadata 仍报告 namespace `4026535993`，因此观察序列有效。结果显示：
+
+```text
+Java exists/isDirectory/list = visible
+stat/lstat/access/open/opendir = success
+readdir/getdents64 (4K/32K/64K/128K) = visible
+```
+
+该结果归类为有效 `LEAK`。根因是 `shadow_mode=1` 不安装 dentry shadow；fixture
+中的目标目录在 `ENABLE` 前已经是 positive dentry，后续路径解析命中缓存，不会再次
+调用 parent `i_op.lookup`，所以仅替换 `i_op` 无法撤销正缓存可见性。i_op-only 不能
+进入 Hide 1.0 active 候选。
+
+随后对同一 active binding 执行 `DISABLE`，ADB 立即断开；设备重新上线后：
+
+```text
+sys.boot_completed=1
+ro.boot.bootreason=reboot
+/proc/modules 无 pathguard_hide1
+/sys/fs/pstore 为空
+```
+
+未获得 kernel panic/oops 的持久日志，但设备级重启已足以判定 v5 active 恢复路径
+不稳定。本轮停止后续 `ENABLE`，不得把 `reboot` 当作恢复成功。需要先在离线代码中
+重新设计 active callback/teardown 计数和 dentry 生命周期，再构建新包；在此之前产品
+状态仍为 `Hide 1.0 = unsupported`。
+## 轮次 44：按 shadow 类型条件化 teardown
+
+针对轮次 43 的恢复重启，继续收缩 teardown 的同步范围。`i_op`/`f_op` shadow
+本身嵌入 binding，在 `DISABLE` 后仍由 inactive binding 持有，不需要为动态 dentry
+metadata 执行全局 SRCU/RCU 排空；只有 `retired` dentry shadow 非空时才调用
+`synchronize_srcu()` 和 `synchronize_rcu()`，随后释放 dentry metadata。这样避免了
+`i_op-only` 隔离实验中无动态对象却进入全局同步路径，同时保留 dentry shadow 的回收
+顺序约束。
+
+离线验证通过：
+
+```text
+pathguard_hide_vfs_model_test: Passed
+pathguard_hide_vfs_teardown_contract_test: Passed
+android16-6.12 Kbuild: CC -> MODPOST -> LD -> BTF: Passed (PAHOLE=/bin/true)
+```
+
+新实验包已生成，尚未安装或在设备上验证：
+
+```text
+download/pathguard-hide1-lab-myron-iop-v6.zip
+module SHA-256: 85392b51d4985fb80f46f0d7dd5efffaee4a6903176c3dbbe9400a5cc2ce9924
+ZIP SHA-256:    592faac289adf649108d78b011913c769555ad7ee0bda31e2f95383ab8f7b69f
+```
+
+设备实验仍需从加载、稳定 target、`INSTALL`、`ENABLE`、probe、`DISABLE` 开始；在
+恢复稳定性确认前不得进入 d_op/f_op 全量矩阵，也不得改变产品 `unsupported` 状态。
+## 轮次 45：v6 i_op-only teardown 仍触发设备重启
+
+用户安装 `pathguard-hide1-lab-myron-iop-v6.zip` 并重启。设备 release/fingerprint
+命中 allowlist，模块以 `shadow_mode=1` 加载。target 固定为 PID `19583`、mount
+namespace `4026536007`；`INSTALL generation=6001` 与 `ENABLE` 均成功，probe 在
+同一 target 进程内完成。
+
+本轮重点验证条件化 teardown。对 active binding 执行 `DISABLE` 时命令返回码为 `255`
+且 ADB 断开；设备重连后连续观察得到：
+
+```text
+sys.boot_completed=1
+ro.boot.bootreason=reboot
+```
+
+模块未重新加载。由于应用私有目录在重启后不可访问，无法取得 probe 文件的持久副本；
+但设备级重启本身已足以判定 `DISABLE` 恢复路径仍不稳定。v6 不能作为 Hide 1.0 候选，
+不得继续 d_op/f_op 或完整 active 矩阵。
+
+当前根因尚未闭合：即使 i_op-only 没有动态 dentry shadow，恢复 operation pointer 后
+仍可能存在已加载旧回调、文件系统并发路径或 KernelSU 模块生命周期交互。下一步必须
+在离线代码中增加 i_op/f_op/dentry 各自的 active callback 计数与显式 quiesce 状态机，
+并建立可重复的 teardown 单元/并发测试；在获得新的离线证据前，不再向设备执行
+`ENABLE`/`DISABLE`。产品状态保持 `Hide 1.0 = unsupported`。
+## 轮次 46：参考项目 teardown 实现对照
+
+### Kasumi：完整的对象生命周期和 quiesce 状态机
+
+Kasumi 的 `kasumi_sop_shadow.c`、`kasumi_iop_override.c`、
+`kasumi_fop_override.c` 和 `kasumi_dirhijack.c` 采用同一类安全模型：
+
+1. 每个 inode/dentry/superblock 都有独立 metadata，metadata 通过 RCU hash/list
+   发布；不使用单个全局 binding 推断对象归属。
+2. 安装时保存原始 operation table，并持有 inode、dentry、superblock 和必要的
+   `THIS_MODULE` 引用。superblock shadow 额外持有 `s_active`，避免 shutdown 在
+   Kasumi 仍需要 reclaim 回调时开始。
+3. wrapper 进入时先增加活动计数，再在 RCU/SRCU 保护下查找 metadata；退出时减少
+   计数并唤醒等待者。`iop` 有全局 active callback 计数，`sop` 还有每个 superblock
+   的 `callback_active`，`fop` 另设 iterate client 的 SRCU 域。
+4. 清理不是一个 ioctl 内的直接 free，而是显式状态机：停止新请求和策略路由，恢复
+   原始指针，关闭新的 client/vnode 获取，执行第一轮 Tasks-RCU 以覆盖“已读到旧
+   pointer 但尚未进入 wrapper”的窗口，等待 active callback 归零，再执行第二轮
+   Tasks-RCU 覆盖 wrapper epilogue，最后 `synchronize_rcu()` 后才从 hash 移除并释放
+   metadata。
+5. dentry shadow 由 `dget()` 持有生命周期；恢复时在 `d_lock` 下先恢复完整 flags，
+   再恢复 `d_op`，随后 `d_drop()`。已失效 dentry 的回收转移到 workqueue，避免在
+   `d_revalidate()` 的 RCU-walk 上下文中执行 `dput/path_put/kfree`。
+6. f_op 还有旧 KMI bridge：ingress table 保留原 owner，文件真正打开时转移到 module-
+   owned live table，避免 VFS 多次 `fops_get()` 在替换窗口中拿到不一致 owner。
+7. 模块退出前要求 quiesce 状态达到 READY，并检查 control fd、proxy、active callback、
+   vnode、module refcount 等计数；任何计数不一致都拒绝卸载，而不是继续释放。
+
+关键源码位置：
+
+```text
+refer/Kasumi-main/src/core/kasumi_sop_shadow.c:38,95-110,365-390
+refer/Kasumi-main/src/features/kasumi_iop_override.c:38,330-404
+refer/Kasumi-main/src/features/kasumi_fop_override.c:100-190,328-390
+refer/Kasumi-main/src/core/kasumi_dirhijack.c:717-811,1586-1620
+refer/Kasumi-main/src/control/kasumi_ioctl.c:1590-1710
+```
+
+### NoMount：全局 hijack，恢复简单但不具备当前要求的完整安全证明
+
+NoMount 在 superblock/inode 层批量替换 `i_op`、`i_fop`、`s_op` 和 dentry d_op，
+通过 `kfree_rcu()`、`synchronize_rcu()`/`synchronize_srcu()` 回收规则数组和
+metadata；退出时 `shrink_dcache_sb()`、遍历 `s_inodes` 并恢复 operation table。
+实现没有 Kasumi 那样的 per-object callback_active、module pin、vnode/s_active
+生命周期门禁，且 `nomount_restore_superblocks()` 在遍历 superblock inode 列表时
+直接执行批量恢复。因此它可作为“恢复顺序和 dcache 处理”的参考，但不能直接移植
+到 PathGuard 的固定 target/namespace Hide 语义，也不能作为设备级稳定性依据。
+
+### PathMask：改 hook syscall/VFS 入口，不替换 operation table
+
+LKM-PathMask 通过 kretprobe 拦截 `inode_permission`、`vfs_getattr`、
+`__arm64_sys_getdents64` 及 `newfstatat/statx/faccessat/openat/openat2` 等入口，
+以 `(dev, inode)` 识别目标，返回 `-ENOENT` 或过滤 dirent。openat 命中后必须先调用
+解析得到的 `close_fd()`，再改写返回值，否则会产生 fd 泄漏；解析不到 `close_fd()`
+时自动放弃该 hook。它绕开了 positive dentry 与 operation-table 生命周期问题，
+但只能覆盖已实现的 syscall 表面，不能满足本项目要求的 VFS lookup/atomic_open/
+mutation/d_revalidate 全语义。
+
+### SUSFS：补丁内核能力，不是通用 LKM teardown 模板
+
+SUSFS 通过对 GKI/KernelSU 内核打补丁实现 `sus_path`、mount 隐藏、kstat spoof 和
+try-umount；用户态工具只提交规则。它要求与 kernel branch/defconfig 对齐，兼容性
+由重新构建内核保证，而不是依靠 LKM 运行时替换 operation table。因此 SUSFS 能说明
+“修改内核可获得更早、更稳定的拦截点”，但不能直接解决当前 LKM 的卸载恢复问题。
+
+### 对 PathGuard 当前原型的直接结论
+
+当前 `pathguard_hide1.c` 与 Kasumi 的差距不是同步函数数量，而是缺少四个结构性
+组件：
+
+1. i_op/f_op/d_op 各自的 active callback 计数和 wait queue；
+2. metadata 的 per-object RCU 索引，以及模块/inode/dentry 引用的独立生命周期；
+3. `STOP_NEW -> RESTORE -> first Tasks-RCU -> active=0 -> second Tasks-RCU ->
+   synchronize_rcu -> FREE` 的可观测 quiesce 状态机；
+4. f_op ingress/owner bridge，以及 dentry stale 回收 workqueue。
+
+在补齐这些组件并通过离线并发/卸载测试前，不能继续设备 active 实验，也不能把
+任何 `DISABLE` 后的 `reboot` 解释为恢复成功。产品状态保持 `Hide 1.0 = unsupported`。
+
+## 轮次 47：参考项目实现方式与 PathGuard 差距复核
+
+本轮重新逐文件核对 `refer/Kasumi-main`、`refer/hide-refer/nomount-master`、
+`refer/hide-refer/LKM-PathMask-main`、`refer/hide-refer/susfs4ksu-*` 和
+`refer/hide-refer/SukiSU-Ultra-main`。结论如下。
+
+### 1. Kasumi：对象级 shadow + 可证明的撤销顺序
+
+Kasumi 不是把一个静态操作表写入 inode 后直接恢复，而是为每个对象保存原始
+指针和独立 metadata：
+
+- `kasumi_iop_override.c` 以 inode 为键建立 RCU hash，shadow 只覆盖 `getattr`；
+  安装前 `ihold()`，恢复指针后 `hash_del_rcu()`，再经 `synchronize_rcu()` 和
+  `iput()`/RCU 回收。`stop_new` 先关闭安装门，再恢复所有仍由 Kasumi 持有的
+  `i_op`，随后通过 Tasks-RCU 关闭“读到旧指针但尚未进入 wrapper”的窗口。
+- `kasumi_fop_override.c` 按原始 `file_operations` 指针共享 template，并额外
+  保存 ingress/live 两套表。ingress 保留原 owner，live 表归模块所有；iterate
+  client 通过独立 SRCU 域发布和撤销，避免 `fops_get()` 在替换窗口拿到失效 owner。
+- `kasumi_dirhijack.c` 为每个 dentry 克隆完整 `dentry_operations`，只改写
+  `d_revalidate`，在 `d_lock` 下恢复原 flags 和 `d_op` 后 `d_drop()`；dentry
+  持有 `dget()`，失效回收放到 workqueue，绝不在 LOOKUP_RCU 回调里 `dput/kfree`。
+- `kasumi_sop_shadow.c` 还要持有 `s_active` 和模块引用，按 superblock 记录
+  `vnode_live`、`callback_active`、client 数，等待回调归零后才恢复 `s_op`、
+  删除 hash 并释放引用。
+
+Kasumi 的 lookup/readdir hide 语义仍只覆盖其 dirhijack 规则；虚拟目录的
+`create/mkdir/mknod/symlink/unlink/rmdir/link/rename` 是对“虚拟节点写穿”的
+实现（`kasumi_vnode.c`），不是对任意真实目录进行全局隐藏。因此不能把它误解为
+已经证明了 PathGuard 的全部 12 项隐藏语义。
+
+### 2. NoMount：覆盖面大，但生命周期证明不足
+
+NoMount 在 `nomount_hijack_dir_ops()` 中直接复制并替换 inode 的 `i_op/f_op`，
+在 superblock 层替换 `s_op`，dentry 则使用一个静态 `dentry_operations` 并清理
+原有 operation flags。规则数组用 seqcount + SRCU，退出时 `shrink_dcache_sb()`、
+遍历 `s_inodes` 恢复指针并 `kfree_rcu()`。
+
+这条路线适合参考“规则数组快照、虚拟 inode、dcache 收缩”的数据面，但它缺少
+Kasumi 级别的每对象 `callback_active`、模块 pin、superblock `s_active` 和
+明确的 STOP/RESTORE/DRAIN 状态机；静态 d_op 还可能覆盖文件系统原有回调。因此
+不能直接作为 PathGuard 的卸载模板。
+
+### 3. PathMask：syscall/kretprobe 遮罩的边界
+
+PathMask 不修改 operation table，而是以 `(dev, inode)` 识别目标，在
+`inode_permission`、`vfs_getattr`、`__arm64_sys_getdents64` 及若干 `__arm64_sys_*`
+入口返回 `-ENOENT` 或压缩 dirent。对 `openat/openat2`，它先调用解析到的
+`close_fd()` 再改写返回值，避免“调用者得到 ENOENT 但内核泄漏 fd”。无法解析
+`close_fd()` 时主动放弃该 hook。
+
+它绕开了 positive dentry 和 operation-table 回收难题，但覆盖的是 syscall 表面，
+不能保证 `lookup/atomic_open/d_revalidate`、相对路径、别名路径和全部 mutation
+语义；同时 kretprobe 位于热点路径，会引入可测量开销和可被探测的时序特征。
+
+### 4. SUSFS 与 SukiSU：稳定性来自内核集成/加载器，而非运行时替换
+
+SUSFS 的真正隐藏逻辑位于打补丁的内核 `fs/susfs.c` 和各处调用点，用户态
+`ksu_susfs` 只提交路径、mount、kstat 等规则。其 README 明确要求按 kernel branch、
+defconfig 和补丁版本重新构建；这提供了稳定拦截点，却没有可复用的 LKM teardown
+协议。
+
+SukiSU 的 `ksuinit` 则证明了另一层问题：它解析 `/proc/kallsyms`，将 LKM 未定义
+符号重定位为绝对地址，必要时从 kmsg 读取内核要求的 vermagic 后重试
+`init_module`；`check_symbol` 要求 `__versions` 为空。该机制只解决“模块如何进入
+当前内核”，不提供 VFS 隐藏数据面，也不能替代回调生命周期安全。
+
+### 对当前 `pathguard_hide1.c` 的具体判断
+
+当前原型已具备固定 parent/namespace、12 个回调入口、正负 dentry 的基本
+`d_revalidate` 逻辑和事务式安装回滚，但仍有以下结构性差距：
+
+1. 单个全局 `hide1_binding` 不能表示多个 inode/dentry 对象，metadata 也没有
+   RCU hash 索引；`hide1_dentry_shadows` 仅由自有 spinlock 保护，无法像 Kasumi
+   那样让回调无锁查找并安全跨代缓存。
+2. i_op/f_op/d_op 没有各自的 active callback 计数；当前 `SRCU` 只保护函数体，
+   不能证明“已读到 shadow 指针但尚未进入回调”的窗口已经关闭。
+3. f_op 只有一个静态 shadow 表和 `fop_open_count`，没有 ingress/live owner
+   bridge，不能覆盖 VFS 对 `f_op` 的多次读取及原 owner 生命周期。
+4. dentry 失效没有 workqueue 退休路径；`d_revalidate` 不能在 RCU-walk 中完成
+   `dput/kfree`，而 DISABLE/CLEAR 必须等待 stale callback 和 worker 全部结束。
+5. mutation wrapper 当前只是“命中目标名返回 `-ENOENT`，否则调用保存的原回调”，
+   尚未证明 create/unlink/rename 与 positive dentry、双端 rename、目标进程退出、
+   namespace 销毁之间的一致性。
+
+因此下一步不是继续打包或刷写设备，而是先按 Kasumi 的对象生命周期模型重构
+`pathguard_hide1.c`：分别建立 iop/fop/dop metadata 索引、活动计数和 wait queue，
+实现 `STOP_NEW -> RESTORE -> Tasks-RCU -> active=0 -> Tasks-RCU -> RCU -> FREE`，
+再补 fop ingress/owner bridge 与 dentry stale workqueue。离线并发/卸载契约测试
+通过后，才允许进行一次受控设备回归；Hide 1.0 仍保持 `unsupported`。
+
+### 轮次 48：VFS shadow 生命周期修复（2026-09-14）
+
+本轮将上述生命周期要求落实到 `experimental/hide-vfs/pathguard_hide1.c`：
+
+- `i_op`、`f_op`、`d_op` 分别使用按 inode/dentry 键控的 RCU hash；回调入口在
+  RCU 读侧内完成查找并立即增加全局及对象 active 计数，退出路径统一递减并唤醒
+  wait queue，避免“查找到 metadata 后尚未计数”窗口。
+- f_op 使用 ingress/live 两张表。ingress 接管 open/release/iterate，成功 open
+  后切换 live；两张表的 owner 都固定为本模块，并由 module pin 保证卸载期间代码
+  常驻。
+- 卸载前先检查所有 ingress 指针仍指向本模块；任一指针被外部替换即返回
+  `-EAGAIN`，不释放 metadata。正常路径依次执行 `STOP_NEW -> RESTORE -> DRAIN`，
+  摘除 RCU 索引后执行两次 `synchronize_rcu_tasks()`、active 归零等待和
+  `synchronize_rcu()`，再释放对象。
+- dentry shadow 在 `d_lock` 下恢复 flags/`d_op` 并 `d_drop()`；stale 对象由
+  workqueue 退休，DISABLE/CLEAR/模块退出先 `cancel_work_sync()`，避免 worker 与
+  teardown 并发回收。
+- dentry shadow 的重复安装在持锁窗口内变为幂等成功；CLEAR 在卸载失败时保留
+  binding，防止悬空 operation pointer。
+
+新增/更新离线测试：
+
+```text
+pathguard_hide_vfs_model_test              Passed
+pathguard_hide_vfs_teardown_contract_test  Passed
+pathguard_hide_vfs_concurrency_test       Passed
+```
+
+真实 Android DDK 编译仍被阻塞：下载的 `android16-6.12` 源码没有
+`include/generated/autoconf.h`、`include/generated/rustc_cfg` 和
+`include/config/auto.conf`，直接执行 `make -C experimental/hide-vfs KDIR=...`
+会在内核 `prepare` 阶段失败。因此本轮没有生成可刷写新模块，也没有进行设备验证；
+现有设备准入状态仍为 `Hide 1.0 = unsupported`。
+
+随后复用工作区已有 prepared tree `build/ddk-kdir-local-linux/android16-6.12`，并显式使用
+`build/ddk-clang-r536225/.../clang-r536225/bin` 工具链重新执行 Kbuild。源码编译、modpost
+和链接均通过；由于环境没有 `pahole`，BTF 步骤以 `PAHOLE=/bin/true` 仅完成实验模块生成。
+最终 `pathguard_hide1.ko` 大小为 351192 字节，`__versions` 段大小为 0，vermagic 为
+`6.12.76-4k SMP preempt mod_unload modversions aarch64`。该 vermagic 与 myron 目标
+release 不一致，且构建树是通用 prepared tree，因此产物只能用于离线加载器/符号审查，
+不能直接刷写设备或宣称 ABI 匹配。
+
+基于该产物生成了 `download/pathguard-hide1-lab-myron-iop-v7.zip`（177248 字节）。包内
+`automatic_load=no`、`automatic_enable=no`，默认 `shadow_mode=1`，仅用于人工控制的
+受控实验；模块 SHA-256 为
+`9e1a537de286e3500d54df69d88ebd564d2e6cf70b8353a08323cd355938191e`。在用户安装并重启
+前，不执行任何设备侧 ENABLE。
+
+### 轮次 49：v7 设备加载验证（2026-09-14）
+
+用户安装 `pathguard-hide1-lab-myron-iop-v7.zip` 并重启后，设备
+`25102RKBEC/myron` 在线。通过模块内控制器执行 `load 1` 成功，随后观察到：
+
+```text
+pathguard_hide1 ... Live ... (O)
+abi_version=1 size=184 state=0 last_error=-95
+release=6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+shadow_mode=1
+```
+
+这证明 SukiSU loader 能在目标设备上加载本轮 `.ko`，且模块初始化未导致重启；
+同时 `state=0`（UNSUPPORTED/INACTIVE）与 `last_error=-95`（`EOPNOTSUPP`）符合
+默认门禁。当前未执行 INSTALL/ENABLE，未产生 HideLab active 证据，产品状态继续为
+`unsupported`。
+
+### 轮次 52：DISABLE 死锁路径修复与 v8 构建（2026-09-14）
+
+对照 Kasumi 的 teardown 顺序，修复了两个结构性问题：`synchronize_rcu_tasks()`、
+active 等待和 `synchronize_rcu()` 不再持有 `hide1_lock`；`DISABLE/CLEAR` 在调用
+`cancel_work_sync()` 前先释放该锁，避免 stale worker 与控制线程互等。修复后使用
+prepared android16-6.12 tree 和 r536225 clang 完成真实 Kbuild、modpost、链接；三项
+VFS 离线测试继续全部通过。
+
+生成 `download/pathguard-hide1-lab-myron-iop-v8.zip`（177380 字节），模块 SHA-256：
+`d9fd2b53795d26bb379f4010679b8337b58087adcf863c84f8eb12a186e68406`。该包尚未上机；
+由于 vermagic 仍为通用 prepared tree 的 `6.12.76-4k`，必须先完成离线 ABI 审查后才能
+考虑再次设备实验。Hide 1.0 状态保持 `unsupported`。
+
+### 轮次 54：v8 ENABLE 进入 ACTIVE（观测参数无效）
+
+在 target PID `19278`、namespace `4026535993` 仍存活时执行 `hide1_control enable 2002`，
+返回 `state=2 (ACTIVE)`，设备未重启。随后启动探测 Activity 时使用了 `--es`，而 APK
+要求 `--esa observe_paths`；Activity 因已是 top-most 实例未重新执行，metadata 仍显示
+默认路径 `Pictures/Nagram` 和 `DCIM/Screenshots`，没有采集到本次 binding 的
+`v8-hidden/hidden` 路径。因此本轮没有有效 HideLab 结果，也未执行 DISABLE；产品状态
+继续为 `unsupported`，不得将 ACTIVE 状态当作 hide 通过。
+
+### 轮次 55：v8 ACTIVE 状态复核（2026-09-14）
+
+`hide1_control status` 持续返回 `state=2`，target PID `19278` 仍存活，设备 uptime
+稳定，模块在 `/proc/modules` 中为 Live。当前 Activity 为 top-most，探测 APK 没有重新
+读取新的 `--esa observe_paths` 参数，故未产生匹配本次 binding 的有效观测。没有执行
+DISABLE（此前该操作已证实会触发重启）；设备暂保持 ACTIVE 作为故障复现状态，Hide 1.0
+仍为 `unsupported`。
+
+### 轮次 56：HideLab Intent 刷新修复与 APK 构建（2026-09-14）
+
+修复 `ProbeActivity` 在 Activity 已经是 top-most 时不重新读取探测参数的问题：新增
+`onNewIntent()`，并将探测启动集中到 `startProbeFromIntent()`；该方法会取消旧的 probe
+task，再使用最新 `observe_paths`、`scenario` 和 `run_id` 启动采集。后续使用
+`am start --esa observe_paths ...` 时，路径参数不会静默退回默认值。
+
+本地验证命令：
+
+```text
+./gradlew.bat :app:testTargetDebugUnitTest :app:testControlDebugUnitTest \
+  :app:assembleTargetDebug :app:assembleControlDebug --stacktrace
+```
+
+结果：`BUILD SUCCESSFUL`；target/control 两组 Kotlin 单元测试均通过，两个 debug APK
+均构建成功。产物及 SHA-256：
+
+```text
+download/hidelab-app-target-intent-refresh-v1.apk
+B22F69E0E4C889F9D2310FC409FDCA17E3FFB3F9B5F6B4F7B4A87682BA1242B2
+
+download/hidelab-app-control-intent-refresh-v1.apk
+CDE24B5F8E238570EEE7EB8CF3B0CF06DD511CC15452E99F55508F677374345F
+```
+
+设备仍保持 v8 `ACTIVE`（PID `19278`、mount namespace `4026535993`、generation `2002`）。
+由于安装新版 target APK 通常会终止该进程并使现有 binding 失效，本轮仅完成构建和静态
+证据归档，未执行 `adb install`、`DISABLE` 或重启。已有 `hide1-enable-2002` 观测仍使用
+错误/default 路径，不能作为 HideLab active 证据；产品状态继续为 `Hide 1.0 = unsupported`。
+
+随后又将 `scenario`、`attack_mutations` 和 `run_id` 在提交后台 probe 前复制为不可变快照，
+避免 `onNewIntent()` 与旧任务并发时读取可变 Activity `intent`。重新构建后两 flavor 单元
+测试及 APK 构建再次 `BUILD SUCCESSFUL`。最新产物：
+
+```text
+download/hidelab-app-target-intent-refresh-v2.apk
+B1E6F369936FB9A35D04DC612664F7007D441A35EFD3739998A8C48CE76DA39F
+
+download/hidelab-app-control-intent-refresh-v2.apk
+CBD02480A4240F3B1C573CAA64C3CA8FA61E71546E4B645D582CBA7DCE7DDC71
+```
+
+### 轮次 57：安装新版 target 并验证参数快照（2026-09-14）
+
+按用户明确指示执行：
+
+```text
+adb install -r download/hidelab-app-target-intent-refresh-v2.apk
+```
+
+安装返回 `Success`。旧 target PID `19278` 已退出，模块控制器仍显示旧 binding：
+`state=2`、`target_pid=19278`、`target_mnt_ns=4026535993`、`generation=2002`；该 binding
+不再对应现存进程，不能作为新进程的保护证据。
+
+随后仅启动新版 target 做无写入参数验证，使用路径
+`/storage/emulated/0/Pictures/PathGuardHideLab/manual-v2-hidden`。探测完成并归档：
+
+```text
+build/device-evidence/hidelab-manual-v2-install/
+```
+
+metadata 正确记录 `observe_paths` 为 `manual-v2-hidden`，新进程 PID 为 `12005`、mount
+namespace 为 `4026536086`。这证明 APK 的 Intent 刷新和参数快照修复在设备上生效；由于
+新 namespace 与旧 binding 不同，本轮未执行 `INSTALL/ENABLE`，也未宣称任何隐藏能力。
+Hide 1.0 继续为 `unsupported`。
+
+### 轮次 58：新版 target 重新 INSTALL 被旧 ACTIVE binding 拒绝（2026-09-14）
+
+按用户明确指示启动新版 target 后，进程为 `PID 12005`、UID `10549`、mount namespace
+`4026536086`。创建一次性 fixture：
+
+```text
+/storage/emulated/0/Pictures/PathGuardHideLab/20260914-233102/hidden
+```
+
+执行：
+
+```text
+hide1ctl install 10549 12005 3001 \
+  /storage/emulated/0/Pictures/PathGuardHideLab/20260914-233102 hidden
+```
+
+内核返回 `Device or resource busy`（`-EBUSY`）。这是预期的状态保护：旧
+`ACTIVE` binding（`PID 19278`、namespace `4026535993`、generation `2002`）仍存在，
+`INSTALL` 不覆盖活动 shadow，也未发生部分提交。模块状态为 `state=2`、`last_error=-16`，
+fixture canary 哈希保持不变。完整证据归档于：
+
+```text
+build/device-evidence/hidelab-reinstall-20260914-233102/
+```
+
+本轮未执行 `ENABLE`、`DISABLE`、`CLEAR` 或重启。要继续重新绑定，必须先安排一次明确
+批准的恢复流程以清除旧 ACTIVE binding；在此之前不能把新 target 进程纳入 HideLab active
+验收，Hide 1.0 继续为 `unsupported`。
+
+### 轮次 59：恢复后重新 INSTALL/ENABLE 成功，但 HideLab 采集仍无效（2026-09-15）
+
+用户批准恢复流程后执行 `DISABLE`，设备两次均因该路径自动重启；第二次重启完成后，
+模块未自动加载，手动 `load 1` 成功。冷启动新版 target 后得到 `PID 21860`、UID `10549`、
+mount namespace `4026535990`，执行 `INSTALL generation=3002` 成功，随后
+`ENABLE 21860 3002` 成功，设备未再次断连。
+
+但在 ACTIVE 状态下通过 `onNewIntent()` 触发 HideLab 时，metadata 仍反复写入旧
+`run_id=reinstall-active-3002`，未写入请求的 `reinstall-active-3002-probe` 或
+`probe2`。原因是旧 native probe 已进入不可中断调用，取消 Future 不能中断底层任务；
+单线程 executor 等待旧任务完成后又覆盖输出。该结果证明参数修复尚未形成可靠的重复采集
+协议，本轮观测不能用于 HideLab 验收。
+
+最终状态：`state=2`、`target_pid=21860`、`target_mnt_ns=4026535990`、
+`generation=3002`、`operation_mask=0x0fff`。证据已追加到
+`build/device-evidence/hidelab-reinstall-20260914-233102/`。未执行新的 `DISABLE`，
+未清理 fixture；Hide 1.0 仍为 `unsupported`。
+
+### 轮次 60：修复 HideLab 任务生命周期（2026-09-15）
+
+根因确认：`Future.cancel(true)` 无法中断 JNI/native 探测；旧任务会在新 Intent 到达后
+继续运行，并覆盖共享的 `status`、`metadata.json` 和 `observations.jsonl`。
+
+新增 `ProbeRunGate`：每次 Intent 产生单调递增 run token，只有当前 token 可以发布
+canonical 输出；旧任务即使完成也只能丢弃结果。`onDestroy()` 会使当前 token 失效，
+避免 Activity 销毁后后台任务发布状态。新增单元测试覆盖新 Intent 淘汰旧任务和销毁失效。
+
+验证：`testTargetDebugUnitTest`、`testControlDebugUnitTest`、`assembleTargetDebug` 和
+`assembleControlDebug` 均 `BUILD SUCCESSFUL`。
+
+产物：
+
+```text
+download/hidelab-app-target-run-gate-v1.apk
+SHA-256 0226FF67C925438C529E74F0B310BE1B0011613B8AFB73C1F67FE3AF808FB6CF
+download/hidelab-app-control-run-gate-v1.apk
+SHA-256 2C9687506FD2EE2FEF6D8DCEF2DCF3E3904274C2416CC867F2007C9E24710B9F
+```
+
+设备未安装新 APK，当前仍为 `ACTIVE`（PID `21860`、namespace `4026535990`、generation
+`3002`）。修复尚未完成真实设备重复 Intent 回归；下一次必须冷启动新 target 或等待旧
+native 任务结束，再检查新 run id、输出原子性和 HideLab 全矩阵。产品状态继续为
+`unsupported`。
+### 轮次 61：run-gate APK 真机回归（2026-09-15）
+
+按批准安装 `download/hidelab-app-target-run-gate-v1.apk`，恢复旧 ACTIVE binding 时
+`DISABLE` 触发一次重启。重启后手动加载 LKM、冷启动 target，并完成 `INSTALL 10551
+19958 5001` 与 `ENABLE 19958 5001`，模块进入 `ACTIVE`。
+
+连续发送 `run-gate-v2-second-a` 和 `run-gate-v2-second-b` 两个 Intent。最终 metadata
+的 `run_id` 为 `run-gate-v2-second-b`，status 为 `complete`，证明旧 native 任务不能
+覆盖新任务结果；`singleTop` 路由、run token 门控和 status 代次标记在真机生效。
+
+证据目录：`build/device-evidence/hidelab-run-gate-v2/`。observations 中
+`external.0.stat/lstat/open/readdir/getdents64_*` 仍可见，属于 `LEAK`；这证明任务
+生命周期修复通过，但不是隐藏能力通过。最终模块状态为 `ACTIVE`、generation `5001`，
+产品状态仍为 `Hide 1.0 = unsupported`。

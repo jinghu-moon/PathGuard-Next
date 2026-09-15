@@ -30,14 +30,19 @@ private:
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_dev_pathguard_hideprobe_NativeProbe_run(
-    JNIEnv* env, jclass, jstring sandbox, jobjectArray observed_paths) {
+    JNIEnv* env, jclass, jstring sandbox, jobjectArray observed_paths,
+    jboolean attack_mutations, jstring scenario) {
     if (sandbox == nullptr || observed_paths == nullptr) return nullptr;
 
     UtfChars sandbox_chars(env, sandbox);
     if (sandbox_chars.get() == nullptr) return nullptr;
 
+    if (scenario == nullptr) return nullptr;
+    UtfChars scenario_chars(env, scenario);
+    if (scenario_chars.get() == nullptr) return nullptr;
     std::vector<std::string> arguments = {
-        "pathguard_hide_app_probe", "--sandbox", sandbox_chars.get()};
+        "pathguard_hide_app_probe", "--sandbox", sandbox_chars.get(),
+        "--scenario", scenario_chars.get()};
     const jsize count = env->GetArrayLength(observed_paths);
     arguments.reserve(3 + static_cast<size_t>(count) * 2);
     for (jsize index = 0; index < count; ++index) {
@@ -55,6 +60,7 @@ Java_dev_pathguard_hideprobe_NativeProbe_run(
         }
         env->DeleteLocalRef(value);
     }
+    if (attack_mutations == JNI_TRUE) arguments.emplace_back("--attack-mutations");
 
     std::vector<char*> argv;
     argv.reserve(arguments.size());

@@ -130,6 +130,24 @@ add_executable(pathguard_hide_loader_test
 target_link_libraries(pathguard_hide_loader_test PRIVATE pathguard_hide_loader)
 add_test(NAME pathguard_hide_loader_test COMMAND pathguard_hide_loader_test)
 
+add_executable(pathguard_hide_vfs_model_test
+  unit/hide_vfs_model_test.cpp)
+target_link_libraries(pathguard_hide_vfs_model_test PRIVATE pathguard_hide_vfs_model)
+add_test(NAME pathguard_hide_vfs_model_test COMMAND pathguard_hide_vfs_model_test)
+
+add_executable(pathguard_hide_vfs_teardown_contract_test
+  unit/hide_vfs_teardown_contract_test.cpp)
+target_compile_definitions(pathguard_hide_vfs_teardown_contract_test PRIVATE
+  PATHGUARD_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME pathguard_hide_vfs_teardown_contract_test
+  COMMAND pathguard_hide_vfs_teardown_contract_test)
+
+add_executable(pathguard_hide_vfs_concurrency_test
+  unit/hide_vfs_concurrency_test.cpp)
+target_link_libraries(pathguard_hide_vfs_concurrency_test PRIVATE pathguard_hide_vfs_model)
+add_test(NAME pathguard_hide_vfs_concurrency_test
+  COMMAND pathguard_hide_vfs_concurrency_test)
+
 add_executable(pathguard_restricted_loader_test
   unit/restricted_loader_test.cpp)
 target_link_libraries(pathguard_restricted_loader_test PRIVATE pathguard_hide_loader)

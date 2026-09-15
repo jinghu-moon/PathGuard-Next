@@ -1,0 +1,6 @@
+id=pathguard_hide1_lab
+name=PathGuard Hide 1.0 Lab
+version=0.1.1-experimental-iop
+versionCode=101
+author=PathGuard contributors
+description=Experimental fixed-device Hide 1.0 i_op-only shadow; manual control only, inactive by default

@@ -77,7 +77,8 @@ LOCAL_SRC_FILES := ../tests/device/hide/hide_app_probe_jni.cpp \
     ../tests/device/hide/hide_probe_contract.cpp
 LOCAL_C_INCLUDES := $(ROOT_PATH)/tests/device/hide
 LOCAL_CPPFLAGS := -Wall -Wextra -Werror \
-    -DPATHGUARD_HIDE_PROBE_NO_MAIN=1
+    -DPATHGUARD_HIDE_PROBE_NO_MAIN=1 \
+    -DPATHGUARD_HIDE_PROBE_APP=1
 include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "capability": "hide-1.0-direct-vfs",
+  "entries": [
+    {
+      "device": "myron",
+      "product": "Redmi/myron/myron",
+      "fingerprint": "Redmi/myron/myron:16/BP2A.250605.031.A3/OS3.0.23.0.WPMCNXM:user/release-keys",
+      "kernel_release": "6.12.23-android16-5-g16e473de48a3-abogki462654244-4k",
+      "module_vermagic_release": "6.12.23-android16-5-gf79b0b15da3a-mi-4k",
+      "kmi": "android16-6.12",
+      "reference_symbol_crcs": {
+        "module_layout": "0xe976b219",
+        "misc_register": "0xd9a13df1",
+        "misc_deregister": "0x78d4940f",
+        "init_uts_ns": "0x16cbd34a",
+        "bcmp": "0x5bf0d3e8",
+        "memcpy": "0x8a7493b2"
+      },
+      "arch": "aarch64",
+      "required_operations": [
+        "lookup", "atomic_open", "readdir", "create", "mkdir", "mknod",
+        "symlink", "unlink", "rmdir", "link", "rename", "d_revalidate"
+      ],
+      "ota_policy": "fingerprint-and-kernel-release-must-match; otherwise unsupported"
+    }
+  ]
+}
