@@ -3273,3 +3273,28 @@ reliability 扩展，因此只证明 mode 4 只读 backend 在单设备/单 UID/
 不存在，boot ID 保持不变，设备在线。产品状态仍为 `Hide 1.0 = unsupported`。下一步只能在
 审查诊断计数和恢复证据后，单独设计 cache-order、并发及生命周期回归；mutation 封闭、设备
 准入和正式集成继续冻结。
+
+### 轮次 75：只读 cache-order、并发与生命周期回归（2026-09-17）
+
+在同一 myron 设备上固定 Target PID `8062`、UID `10551`、mount namespace
+`4026536035`，使用 generation `7103` 完成 v3 只读后端复验。cache-order 证据为
+`build/device-evidence/hide1-fuse-ro-v3-cache-order/20260917-002731/`，五种顺序
+（cold open、cold opendir、stat-then-open、readdir-then-open、positive-warm-then-open）
+在主路径 `/storage/emulated/0/Pictures/Nagram` 均返回 `-ENOENT`，summary 为 `PASS`。
+
+并发证据为 `build/device-evidence/hide1-fuse-ro-v3-concurrency/20260917-003012/`。20
+线程的 stat/open/readdir 计数均为 0 次泄漏，Target/Control Oracle 与 fixture 未变化，
+summary 为 `PASS`。高并发后 status 仍正常，未观察到安装失败、崩溃或卡死。
+
+reliability 证据为 `build/device-evidence/hide1-fuse-ro-v3-reliability/20260917-003119/`。
+主路径 1000 次 stat/open/readdir 均无泄漏；generation、capacity、namespace、unload
+控制项按当前 ABI 返回 `unsupported`，未将未实现能力伪装为通过，summary 为 `PASS`。
+
+随后执行 DISABLE、CLEAR，恢复 baseline 证实目标重新可见（证据目录
+`build/device-evidence/hide1-fuse-ro-v3-restore/20260917-003328/`），再执行 rmmod。
+boot ID `e11d7fc0-4d48-40d3-a809-449a5cea370f` 保持不变，模块和设备节点均消失，设备
+在线。部分 alias 路径因 Android 权限返回 `EACCES/setup_error`，不纳入主路径隐藏通过依据。
+
+本轮只证明只读 cache-order、并发访问和 DISABLE/CLEAR/卸载恢复在当前单设备实验范围内
+通过；未实现 mutation 封闭、真正的 namespace 销毁/OTA 重新准入或完整生命周期控制 ABI。
+Hide 1.0 继续保持 `unsupported`。

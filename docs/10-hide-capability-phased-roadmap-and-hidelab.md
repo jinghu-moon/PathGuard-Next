@@ -2965,3 +2965,22 @@ Control Oracle 和 fixture 均未变化。该结果只覆盖只读 FUSE-aware ba
 单 namespace、单 basename 范围；未覆盖 mutation、cache-order、并发、生命周期和 OTA 准入。
 测试结束后 DISABLE、CLEAR、rmmod 成功，boot ID 未变化，设备节点消失。Hide 1.0 仍保持
 `unsupported`，不得据此激活或建立正式白名单。
+
+## 56. 只读 cache-order、并发和恢复回归（2026-09-17）
+
+在 v3 只读 FUSE-aware backend 上完成三组后续验证。主路径
+`/storage/emulated/0/Pictures/Nagram` 的 cold/warm cache 顺序全部返回 ENOENT；20 线程
+并发 stat/open/readdir 无隐藏泄漏；reliability 主访问循环也无泄漏。DISABLE/CLEAR 后恢复
+baseline 可见，随后 rmmod 成功，boot ID 未变化，设备节点消失。
+
+本轮证据分别位于：
+
+- `build/device-evidence/hide1-fuse-ro-v3-cache-order/20260917-002731/`
+- `build/device-evidence/hide1-fuse-ro-v3-concurrency/20260917-003012/`
+- `build/device-evidence/hide1-fuse-ro-v3-reliability/20260917-003119/`
+- `build/device-evidence/hide1-fuse-ro-v3-restore/20260917-003328/`
+
+可靠性场景中的 generation、capacity、namespace、unload 仍报告 `unsupported`，因为当前
+实验 ABI 没有提供这些控制接口；这属于正确的能力收缩，不是生命周期全覆盖。部分 Android
+alias 由于权限限制返回 EACCES/setup_error，不能据此扩展结论。mutation 封闭、真实 namespace
+销毁、OTA/slot 重新准入和正式 PathGuard 集成仍未完成，产品状态保持 `Hide 1.0 = unsupported`。
