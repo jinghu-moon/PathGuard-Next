@@ -56,7 +56,9 @@ function Invoke-Adb([string[]]$Arguments) {
 
 function Invoke-Root([string]$Command) {
     if ($Command -match '[\r\n"]') { throw 'Root command contains an unsupported character' }
-    & $adb shell ('su -c "' + $Command + '"')
+    # SukiSU requires the whitelist-preserving -W path for shared-storage
+    # operations; plain su -c may leave the shell in the ksu SELinux domain.
+    & $adb shell ('su -W -c "' + $Command + '"')
     if ($LASTEXITCODE -ne 0) { throw "root command failed: $Command" }
 }
 
@@ -82,7 +84,7 @@ function Invoke-Probe([string]$Role, [string]$Package) {
         if (-not $pinnedPid -or $pinnedPid -notmatch '^\d+$') {
             throw 'KeepTargetProcess requires the already-bound target PID to be alive'
         }
-        $pinnedNamespace = ((& $adb shell su -c "readlink /proc/$pinnedPid/ns/mnt" 2>$null) -join '').Trim()
+        $pinnedNamespace = ((& $adb shell su -W -c "readlink /proc/$pinnedPid/ns/mnt" 2>$null) -join '').Trim()
         if (-not $pinnedNamespace -or $pinnedNamespace -notmatch '^mnt:\[\d+\]$') {
             throw "cannot read target mount namespace for PID $pinnedPid"
         }
@@ -127,7 +129,7 @@ function Invoke-Probe([string]$Role, [string]$Package) {
         if (-not $pidNow -or $pidNow -notmatch '^\d+$' -or $pidNow -ne $pinnedPid) {
             throw 'HideLab target exited while namespace was pinned'
         }
-        $nsNow = ((& $adb shell su -c "readlink /proc/$pidNow/ns/mnt" 2>$null) -join '').Trim()
+        $nsNow = ((& $adb shell su -W -c "readlink /proc/$pidNow/ns/mnt" 2>$null) -join '').Trim()
         if ($nsNow -ne $pinnedNamespace -or
             ($metadata.mount_namespace -and $nsNow -ne $metadata.mount_namespace)) {
             throw "HideLab target mount namespace changed: $pinnedNamespace -> $nsNow"
