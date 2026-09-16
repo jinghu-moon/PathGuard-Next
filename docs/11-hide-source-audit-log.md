@@ -3324,3 +3324,20 @@ wsl make -C experimental/hide-vfs KDIR=.../build/ddk-kdir-local-linux/android16-
 `experimental/hide-vfs/pathguard_hide1.ko`。本轮没有安装、加载或执行设备 mutation；阶段 1
 只证明离线生命周期和构建契约，产品状态仍为 `Hide 1.0 = unsupported`。下一步是基于该
 生命周期基础实现并审查 mutation 前置封闭，仍须先完成离线矩阵。
+
+### 轮次 77：mutation 前置封闭离线实现（2026-09-17）
+
+在阶段 1 生命周期基础上完成第一轮 mutation 数据面：`create/mkdir/mknod/symlink/unlink/rmdir`
+在原始 filesystem callback 前统一执行 target、parent、basename 判定；`link` 同时检查
+source dentry、source parent/superblock、目标 dentry 和固定隐藏 inode；`rename` 同时检查
+source/destination，两端 superblock 不一致返回 `-EXDEV`，所有非零 flags 在未有完整语义
+前返回 `-EOPNOTSUPP`；`atomic_open` 对普通 open、`O_CREAT`、`O_EXCL`、`O_TRUNC` 分支统一
+在真实 callback 之前拒绝隐藏 basename。status 增加 mutation 总调用、前置拒绝、原始回调和
+unsupported 计数，便于设备回归确认拒绝发生在数据修改之前。
+
+模型新增 link source/destination 与 atomic-open flag 矩阵，源码契约测试新增 operation
+顺序和 fail-closed flags 断言。宿主 `pathguard_hide_vfs_model_test`、
+`pathguard_hide_vfs_concurrency_test`、`pathguard_hide_vfs_teardown_contract_test` 全部通过；
+Android clang r536225 + prepared `android16-6.12` tree 完成 `CC -> MODPOST -> LD -> BTF`。
+本轮未安装、加载或执行设备 mutation，尚无 disposable fixture Root Oracle 证据，产品状态仍
+为 `Hide 1.0 = unsupported`。

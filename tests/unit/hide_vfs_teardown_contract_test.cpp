@@ -81,6 +81,10 @@ int main() {
     assert(source.find("hide1_required_operation_mask") != std::string::npos);
     assert(atomic_open.find("hide1_install_dentry_shadow") ==
            std::string::npos);
+    assert(atomic_open.find("O_CREAT | O_EXCL | O_TRUNC") !=
+           std::string::npos);
+    assert(atomic_open.find("hide1_mutation_blocked_calls") !=
+           std::string::npos);
     assert(atomic_open.find("d_drop(") == std::string::npos);
     assert(dentry_presence.find("spin_lock(&dentry->d_lock)") !=
            std::string::npos);
@@ -148,6 +152,26 @@ int main() {
     assert(source.find("PATHGUARD_HIDE1_LIFECYCLE_RESTORE") != std::string::npos);
     assert(source.find("struct hide1_iop_meta") != std::string::npos);
     assert(source.find("struct hide1_fop_meta") != std::string::npos);
+    assert(source.find("struct inode *hidden_inode") != std::string::npos);
+    const std::string link = FunctionBody(
+        source, "static int hide1_link(struct dentry *old_dentry",
+        "static int hide1_rename(struct mnt_idmap *idmap");
+    RequireOrder(link, {
+        "hide1_mutation_blocked(binding, dir, new_dentry)",
+        "hide1_hidden_source(binding, old_dentry)",
+        "meta->orig->link",
+    });
+    const std::string rename = FunctionBody(
+        source, "static int hide1_rename", "static int hide1_shadow_install_locked");
+    RequireOrder(rename, {
+        "if (flags)",
+        "-EOPNOTSUPP",
+        "old_dir->i_sb != new_dir->i_sb",
+        "-EXDEV",
+        "hide1_mutation_blocked(binding, old_dir, old_dentry)",
+        "hide1_mutation_blocked(binding, new_dir, new_dentry)",
+        "meta->orig->rename",
+    });
     assert(source.find("struct task_struct *target_task") != std::string::npos);
     assert(source.find("same_thread_group(current, binding->target_task)") !=
            std::string::npos);
@@ -169,6 +193,9 @@ int main() {
     assert(source.find("atomic_t hide1_fop_active") != std::string::npos);
     assert(source.find("atomic_t hide1_dop_active") != std::string::npos);
     assert(source.find("atomic_t open_count") != std::string::npos);
+    assert(source.find("hide1_mutation_calls") != std::string::npos);
+    assert(source.find("hide1_mutation_blocked_calls") != std::string::npos);
+    assert(source.find("status.mutation_unsupported") != std::string::npos);
     assert(source.find("hide1_lookup_calls") != std::string::npos);
     assert(source.find("hide1_dentry_install_success") != std::string::npos);
     assert(source.find("status.lookup_calls") != std::string::npos);

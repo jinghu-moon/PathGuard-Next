@@ -100,6 +100,7 @@ struct hide1_binding {
     struct pathguard_hide1_rule rule;
     struct path parent_path;
     struct inode *parent_inode;
+    struct inode *hidden_inode;
     struct super_block *parent_sb;
     struct task_struct *target_task;
     struct nsproxy *target_nsproxy;
@@ -109,6 +110,7 @@ struct hide1_binding {
     const struct dentry_operations *parent_dop;
     struct list_head dentry_shadows;
     spinlock_t dentry_lock;
+    spinlock_t identity_lock;
     bool retiring;
 };
 
@@ -142,6 +144,10 @@ static atomic64_t hide1_d_revalidate_hidden = ATOMIC64_INIT(0);
 static atomic64_t hide1_dentry_install_calls = ATOMIC64_INIT(0);
 static atomic64_t hide1_dentry_install_success = ATOMIC64_INIT(0);
 static atomic64_t hide1_dentry_install_failures = ATOMIC64_INIT(0);
+static atomic64_t hide1_mutation_calls = ATOMIC64_INIT(0);
+static atomic64_t hide1_mutation_blocked_calls = ATOMIC64_INIT(0);
+static atomic64_t hide1_mutation_original = ATOMIC64_INIT(0);
+static atomic64_t hide1_mutation_unsupported = ATOMIC64_INIT(0);
 
 static struct hide1_iop_meta *hide1_iop_lookup_rcu(const struct inode *inode)
 {
@@ -236,6 +242,8 @@ static int hide1_rename(struct mnt_idmap *, struct inode *, struct dentry *,
                         struct inode *, struct dentry *, unsigned int);
 static int hide1_d_revalidate(struct dentry *, unsigned int);
 static void hide1_free_dentry_shadows(struct list_head *retired);
+static void hide1_record_hidden_inode(struct hide1_binding *binding,
+                                      struct inode *inode);
 
 static void hide1_mark_dentry_stale(struct hide1_dentry_shadow *meta)
 {
@@ -493,6 +501,7 @@ static int hide1_install_named_dentry_shadow(struct hide1_binding *binding)
         path_put(&child);
         return -EXDEV;
     }
+    hide1_record_hidden_inode(binding, d_backing_inode(child.dentry));
     ret = hide1_install_dentry_shadow(binding, child.dentry);
     path_put(&child);
     return ret;
@@ -731,6 +740,10 @@ static int hide1_atomic_open(struct inode *dir, struct dentry *dentry,
     }
     if (hide1_should_hide(binding, dir, dentry)) {
         atomic64_inc(&hide1_atomic_open_hidden);
+        if (open_flag & (O_CREAT | O_EXCL | O_TRUNC)) {
+            atomic64_inc(&hide1_mutation_calls);
+            atomic64_inc(&hide1_mutation_blocked_calls);
+        }
         /* Kasumi deliberately keeps dentry installation in lookup().  The
          * FUSE atomic_open path may own an in-lookup dentry and perform its
          * own lookup/create transition; do not change d_op or hash state from
@@ -738,9 +751,17 @@ static int hide1_atomic_open(struct inode *dir, struct dentry *dentry,
         ret = -ENOENT;
     } else {
         orig = meta->orig;
+        if (open_flag & (O_CREAT | O_EXCL | O_TRUNC))
+            atomic64_inc(&hide1_mutation_calls);
         ret = orig && orig->atomic_open ?
               orig->atomic_open(dir, dentry, file, open_flag, create_mode) :
               -EOPNOTSUPP;
+        if (open_flag & (O_CREAT | O_EXCL | O_TRUNC)) {
+            if (orig && orig->atomic_open)
+                atomic64_inc(&hide1_mutation_original);
+            else
+                atomic64_inc(&hide1_mutation_unsupported);
+        }
     }
     hide1_callback_exit(&hide1_iop_active, &meta->active,
                         &hide1_iop_wait, &meta->wait);
@@ -867,6 +888,37 @@ static bool hide1_mutation_blocked(struct hide1_binding *binding,
     return hide1_should_hide(binding, parent, dentry);
 }
 
+static bool hide1_hidden_source(struct hide1_binding *binding,
+                                struct dentry *old_dentry)
+{
+    struct inode *old_inode;
+    bool match;
+
+    if (!binding || !old_dentry)
+        return false;
+    old_inode = d_backing_inode(old_dentry);
+    spin_lock(&binding->identity_lock);
+    match = old_inode && binding->hidden_inode &&
+            old_inode == binding->hidden_inode;
+    spin_unlock(&binding->identity_lock);
+    return match;
+}
+
+static void hide1_record_hidden_inode(struct hide1_binding *binding,
+                                      struct inode *inode)
+{
+    struct inode *old;
+
+    if (!binding || !inode || !igrab(inode))
+        return;
+    spin_lock(&binding->identity_lock);
+    old = binding->hidden_inode;
+    binding->hidden_inode = inode;
+    spin_unlock(&binding->identity_lock);
+    if (old)
+        iput(old);
+}
+
 #define HIDE1_IOP_GUARD(_inode, _meta, _binding, _idx)                 \
     (_meta) = hide1_iop_enter((_inode));                               \
     (_binding) = (_meta) ? (_meta)->binding : NULL;                   \
@@ -886,13 +938,18 @@ static int hide1_create(struct mnt_idmap *idmap, struct inode *dir,
     struct hide1_binding *binding;
     int idx;
     int ret;
+    atomic64_inc(&hide1_mutation_calls);
     HIDE1_IOP_GUARD(dir, meta, binding, idx);
-    if (hide1_mutation_blocked(binding, dir, dentry))
+    if (hide1_mutation_blocked(binding, dir, dentry)) {
+        atomic64_inc(&hide1_mutation_blocked_calls);
         ret = -ENOENT;
-    else if (meta->orig && meta->orig->create)
+    } else if (meta->orig && meta->orig->create) {
+        atomic64_inc(&hide1_mutation_original);
         ret = meta->orig->create(idmap, dir, dentry, mode, excl);
-    else
+    } else {
+        atomic64_inc(&hide1_mutation_unsupported);
         ret = -EOPNOTSUPP;
+    }
     HIDE1_IOP_UNGUARD(meta, idx);
     return ret;
 }
@@ -904,13 +961,18 @@ static int hide1_mkdir(struct mnt_idmap *idmap, struct inode *dir,
     struct hide1_binding *binding;
     int idx;
     int ret;
+    atomic64_inc(&hide1_mutation_calls);
     HIDE1_IOP_GUARD(dir, meta, binding, idx);
-    if (hide1_mutation_blocked(binding, dir, dentry))
+    if (hide1_mutation_blocked(binding, dir, dentry)) {
+        atomic64_inc(&hide1_mutation_blocked_calls);
         ret = -ENOENT;
-    else if (meta->orig && meta->orig->mkdir)
+    } else if (meta->orig && meta->orig->mkdir) {
+        atomic64_inc(&hide1_mutation_original);
         ret = meta->orig->mkdir(idmap, dir, dentry, mode);
-    else
+    } else {
+        atomic64_inc(&hide1_mutation_unsupported);
         ret = -EOPNOTSUPP;
+    }
     HIDE1_IOP_UNGUARD(meta, idx);
     return ret;
 }
@@ -922,13 +984,18 @@ static int hide1_mknod(struct mnt_idmap *idmap, struct inode *dir,
     struct hide1_binding *binding;
     int idx;
     int ret;
+    atomic64_inc(&hide1_mutation_calls);
     HIDE1_IOP_GUARD(dir, meta, binding, idx);
-    if (hide1_mutation_blocked(binding, dir, dentry))
+    if (hide1_mutation_blocked(binding, dir, dentry)) {
+        atomic64_inc(&hide1_mutation_blocked_calls);
         ret = -ENOENT;
-    else if (meta->orig && meta->orig->mknod)
+    } else if (meta->orig && meta->orig->mknod) {
+        atomic64_inc(&hide1_mutation_original);
         ret = meta->orig->mknod(idmap, dir, dentry, mode, dev);
-    else
+    } else {
+        atomic64_inc(&hide1_mutation_unsupported);
         ret = -EOPNOTSUPP;
+    }
     HIDE1_IOP_UNGUARD(meta, idx);
     return ret;
 }
@@ -940,13 +1007,18 @@ static int hide1_symlink(struct mnt_idmap *idmap, struct inode *dir,
     struct hide1_binding *binding;
     int idx;
     int ret;
+    atomic64_inc(&hide1_mutation_calls);
     HIDE1_IOP_GUARD(dir, meta, binding, idx);
-    if (hide1_mutation_blocked(binding, dir, dentry))
+    if (hide1_mutation_blocked(binding, dir, dentry)) {
+        atomic64_inc(&hide1_mutation_blocked_calls);
         ret = -ENOENT;
-    else if (meta->orig && meta->orig->symlink)
+    } else if (meta->orig && meta->orig->symlink) {
+        atomic64_inc(&hide1_mutation_original);
         ret = meta->orig->symlink(idmap, dir, dentry, symname);
-    else
+    } else {
+        atomic64_inc(&hide1_mutation_unsupported);
         ret = -EOPNOTSUPP;
+    }
     HIDE1_IOP_UNGUARD(meta, idx);
     return ret;
 }
@@ -957,13 +1029,18 @@ static int hide1_unlink(struct inode *dir, struct dentry *dentry)
     struct hide1_binding *binding;
     int idx;
     int ret;
+    atomic64_inc(&hide1_mutation_calls);
     HIDE1_IOP_GUARD(dir, meta, binding, idx);
-    if (hide1_mutation_blocked(binding, dir, dentry))
+    if (hide1_mutation_blocked(binding, dir, dentry)) {
+        atomic64_inc(&hide1_mutation_blocked_calls);
         ret = -ENOENT;
-    else if (meta->orig && meta->orig->unlink)
+    } else if (meta->orig && meta->orig->unlink) {
+        atomic64_inc(&hide1_mutation_original);
         ret = meta->orig->unlink(dir, dentry);
-    else
+    } else {
+        atomic64_inc(&hide1_mutation_unsupported);
         ret = -EOPNOTSUPP;
+    }
     HIDE1_IOP_UNGUARD(meta, idx);
     return ret;
 }
@@ -974,13 +1051,18 @@ static int hide1_rmdir(struct inode *dir, struct dentry *dentry)
     struct hide1_binding *binding;
     int idx;
     int ret;
+    atomic64_inc(&hide1_mutation_calls);
     HIDE1_IOP_GUARD(dir, meta, binding, idx);
-    if (hide1_mutation_blocked(binding, dir, dentry))
+    if (hide1_mutation_blocked(binding, dir, dentry)) {
+        atomic64_inc(&hide1_mutation_blocked_calls);
         ret = -ENOENT;
-    else if (meta->orig && meta->orig->rmdir)
+    } else if (meta->orig && meta->orig->rmdir) {
+        atomic64_inc(&hide1_mutation_original);
         ret = meta->orig->rmdir(dir, dentry);
-    else
+    } else {
+        atomic64_inc(&hide1_mutation_unsupported);
         ret = -EOPNOTSUPP;
+    }
     HIDE1_IOP_UNGUARD(meta, idx);
     return ret;
 }
@@ -992,13 +1074,22 @@ static int hide1_link(struct dentry *old_dentry, struct inode *dir,
     struct hide1_binding *binding;
     int idx;
     int ret;
+    atomic64_inc(&hide1_mutation_calls);
     HIDE1_IOP_GUARD(dir, meta, binding, idx);
-    if (hide1_mutation_blocked(binding, dir, new_dentry))
+    if (hide1_mutation_blocked(binding, dir, new_dentry) ||
+        hide1_hidden_source(binding, old_dentry) ||
+        (old_dentry->d_parent &&
+         hide1_mutation_blocked(binding, d_backing_inode(old_dentry->d_parent),
+                                old_dentry))) {
+        atomic64_inc(&hide1_mutation_blocked_calls);
         ret = -ENOENT;
-    else if (meta->orig && meta->orig->link)
+    } else if (meta->orig && meta->orig->link) {
+        atomic64_inc(&hide1_mutation_original);
         ret = meta->orig->link(old_dentry, dir, new_dentry);
-    else
+    } else {
+        atomic64_inc(&hide1_mutation_unsupported);
         ret = -EOPNOTSUPP;
+    }
     HIDE1_IOP_UNGUARD(meta, idx);
     return ret;
 }
@@ -1011,15 +1102,27 @@ static int hide1_rename(struct mnt_idmap *idmap, struct inode *old_dir,
     struct hide1_binding *binding;
     int idx;
     int ret;
+    atomic64_inc(&hide1_mutation_calls);
     HIDE1_IOP_GUARD(old_dir, meta, binding, idx);
-    if (hide1_mutation_blocked(binding, old_dir, old_dentry) ||
-        hide1_mutation_blocked(binding, new_dir, new_dentry))
-        ret = -ENOENT;
-    else if (meta->orig && meta->orig->rename)
-        ret = meta->orig->rename(idmap, old_dir, old_dentry,
-                                               new_dir, new_dentry, flags);
-    else
+    if (flags) {
+        atomic64_inc(&hide1_mutation_unsupported);
         ret = -EOPNOTSUPP;
+    } else if (old_dir->i_sb != new_dir->i_sb) {
+        atomic64_inc(&hide1_mutation_unsupported);
+        ret = -EXDEV;
+    } else if (hide1_mutation_blocked(binding, old_dir, old_dentry) ||
+               hide1_mutation_blocked(binding, new_dir, new_dentry) ||
+               hide1_hidden_source(binding, old_dentry)) {
+        atomic64_inc(&hide1_mutation_blocked_calls);
+        ret = -ENOENT;
+    } else if (meta->orig && meta->orig->rename) {
+        atomic64_inc(&hide1_mutation_original);
+        ret = meta->orig->rename(idmap, old_dir, old_dentry,
+                                                new_dir, new_dentry, flags);
+    } else {
+        atomic64_inc(&hide1_mutation_unsupported);
+        ret = -EOPNOTSUPP;
+    }
     HIDE1_IOP_UNGUARD(meta, idx);
     return ret;
 }
@@ -1308,6 +1411,14 @@ static void hide1_release_binding(struct hide1_binding *binding)
         iput(binding->parent_inode);
         binding->parent_inode = NULL;
     }
+    if (binding->hidden_inode) {
+        struct inode *hidden;
+        spin_lock(&binding->identity_lock);
+        hidden = binding->hidden_inode;
+        binding->hidden_inode = NULL;
+        spin_unlock(&binding->identity_lock);
+        iput(hidden);
+    }
     binding->parent_sb = NULL;
     if (binding->target_task) {
         put_task_struct(binding->target_task);
@@ -1441,6 +1552,7 @@ static int hide1_prepare_binding(const struct pathguard_hide1_rule *rule,
     binding->target_task = task;
     binding->target_nsproxy = nsproxy;
     binding->target_mnt_ns = nsproxy->mnt_ns;
+    binding->hidden_inode = NULL;
     binding->operation_mask = operation_mask;
     binding->shadow.orig_iop = inode->i_op;
     binding->shadow.orig_fop = inode->i_fop;
@@ -1450,6 +1562,7 @@ static int hide1_prepare_binding(const struct pathguard_hide1_rule *rule,
     binding->parent_dop = parent.dentry->d_op;
     INIT_LIST_HEAD(&binding->dentry_shadows);
     spin_lock_init(&binding->dentry_lock);
+    spin_lock_init(&binding->identity_lock);
     binding->retiring = false;
     return 0;
 }
@@ -1472,11 +1585,13 @@ static void hide1_commit_binding(struct hide1_binding *binding)
     hide1_binding.target_task = binding->target_task;
     hide1_binding.target_nsproxy = binding->target_nsproxy;
     hide1_binding.target_mnt_ns = binding->target_mnt_ns;
+    hide1_binding.hidden_inode = binding->hidden_inode;
     hide1_binding.operation_mask = binding->operation_mask;
     hide1_binding.shadow = binding->shadow;
     hide1_binding.parent_dop = binding->parent_dop;
     INIT_LIST_HEAD(&hide1_binding.dentry_shadows);
     spin_lock_init(&hide1_binding.dentry_lock);
+    spin_lock_init(&hide1_binding.identity_lock);
     hide1_binding.retiring = false;
 
     /* Ownership moved to hide1_binding.  The caller always releases the
@@ -1639,6 +1754,10 @@ static long hide1_ioctl(struct file *file, unsigned int command,
         status.dop_active = atomic_read(&hide1_dop_active);
         status.fop_open_count = hide1_binding.shadow.fop_meta ?
             atomic_read(&hide1_binding.shadow.fop_meta->open_count) : 0;
+        status.mutation_calls = atomic64_read(&hide1_mutation_calls);
+        status.mutation_blocked = atomic64_read(&hide1_mutation_blocked_calls);
+        status.mutation_original = atomic64_read(&hide1_mutation_original);
+        status.mutation_unsupported = atomic64_read(&hide1_mutation_unsupported);
         mutex_unlock(&hide1_lock);
         return copy_to_user((void __user *)argument, &status, sizeof(status))
                    ? -EFAULT
@@ -1672,6 +1791,7 @@ static int __init hide1_init(void)
         return -ENODEV;
     INIT_LIST_HEAD(&hide1_binding.dentry_shadows);
     spin_lock_init(&hide1_binding.dentry_lock);
+    spin_lock_init(&hide1_binding.identity_lock);
     hash_init(hide1_iop_table);
     hash_init(hide1_fop_table);
     hash_init(hide1_dop_table);

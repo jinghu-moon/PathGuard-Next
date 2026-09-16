@@ -107,6 +107,25 @@ struct pg_hide1_decision pg_hide1_evaluate_rename(
     const char *destination_basename,
     pg_hide1_u16 destination_basename_length);
 
+struct pg_hide1_decision pg_hide1_evaluate_link(
+    const struct pg_hide1_rule_model *rule,
+    const struct pg_hide1_observer *observer,
+    struct pg_hide1_parent_identity source_parent,
+    const char *source_basename,
+    pg_hide1_u16 source_basename_length,
+    int source_is_hidden_inode,
+    struct pg_hide1_parent_identity destination_parent,
+    const char *destination_basename,
+    pg_hide1_u16 destination_basename_length);
+
+struct pg_hide1_decision pg_hide1_evaluate_atomic_open(
+    const struct pg_hide1_rule_model *rule,
+    const struct pg_hide1_observer *observer,
+    struct pg_hide1_parent_identity parent,
+    const char *basename,
+    pg_hide1_u16 basename_length,
+    unsigned int open_flags);
+
 #ifdef __cplusplus
 }
 #endif

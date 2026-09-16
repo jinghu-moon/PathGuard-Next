@@ -663,18 +663,26 @@ lifecycle 编号和 i_op/f_op/d_op 全局及 per-object active/open 计数暴露
 
 ### 下一阶段：mutation
 
-- [ ] create；
-- [ ] mkdir；
-- [ ] mknod；
-- [ ] symlink；
-- [ ] link source/destination 双端；
-- [ ] unlink；
-- [ ] rmdir；
-- [ ] rename source/destination 双端和 flags；
-- [ ] atomic_open 的普通 open、O_CREAT、O_EXCL、O_TRUNC；
+- [x] create；
+- [x] mkdir；
+- [x] mknod；
+- [x] symlink；
+- [x] link source/destination 双端；
+- [x] unlink；
+- [x] rmdir；
+- [x] rename source/destination 双端和 flags；
+- [x] atomic_open 的普通 open、O_CREAT、O_EXCL、O_TRUNC；
 - [ ] disposable fixture 的 Root Oracle；
-- [ ] 离线 mutation matrix；
+- [x] 离线 mutation matrix；
 - [ ] 真机受控 mutation matrix。
+
+阶段 3 离线实现记录（2026-09-17）：mutation wrapper 增加调用、前置拒绝、原始回调和
+unsupported 计数；`link` 同时检查目标 dentry、源 parent/name 以及已知隐藏 inode，避免
+通过 hard-link alias 重新暴露对象；`rename` 对 source/destination 双端检查，未实现的
+`RENAME_NOREPLACE`、`RENAME_EXCHANGE`、`RENAME_WHITEOUT` 以及跨 superblock 路径 fail
+closed；`atomic_open` 对普通 open 与 `O_CREAT/O_EXCL/O_TRUNC` 分支统一在真实 callback
+之前拒绝隐藏 basename。宿主模型和源码契约测试已覆盖这些矩阵，但 disposable fixture
+和真机 mutation 尚未执行。
 
 ### 最终准入
 

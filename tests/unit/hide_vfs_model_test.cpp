@@ -133,6 +133,23 @@ int main() {
     assert(pg_hide1_evaluate_rename(&rule, &kControl,
                kPictures, "hidden", 6, kPictures, "new", 3).outcome ==
            PG_HIDE1_PASS);
+    const unsigned int atomic_flags[] = {0U, 0x40U, 0x80U, 0x200U};
+    for (const unsigned int flags : atomic_flags) {
+        assert(pg_hide1_evaluate_atomic_open(
+                   &rule, &kTarget, kPictures, "hidden", 6, flags).outcome ==
+               PG_HIDE1_REJECT);
+        assert(pg_hide1_evaluate_atomic_open(
+                   &rule, &kControl, kPictures, "hidden", 6, flags).outcome ==
+               PG_HIDE1_PASS);
+    }
+    assert(pg_hide1_evaluate_link(&rule, &kTarget, kPictures, "visible", 7,
+               1, kPictures, "new-link", 8).outcome == PG_HIDE1_REJECT);
+    assert(pg_hide1_evaluate_link(&rule, &kTarget, kPictures, "hidden", 6,
+               0, kPictures, "new-link", 8).outcome == PG_HIDE1_REJECT);
+    assert(pg_hide1_evaluate_link(&rule, &kTarget, kPictures, "visible", 7,
+               0, kPictures, "hidden", 6).outcome == PG_HIDE1_REJECT);
+    assert(pg_hide1_evaluate_link(&rule, &kTarget, kPictures, "visible", 7,
+               0, {281, 1}, "new-link", 8).outcome == PG_HIDE1_PASS);
     assert(pg_hide1_evaluate(&rule,
                static_cast<pg_hide1_operation>(999), &kTarget,
                kPictures, "hidden", 6).outcome == PG_HIDE1_PASS);

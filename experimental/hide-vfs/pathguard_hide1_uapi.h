@@ -71,6 +71,10 @@ struct pathguard_hide1_status {
     __u64 fop_active;
     __u64 dop_active;
     __u64 fop_open_count;
+    __u64 mutation_calls;
+    __u64 mutation_blocked;
+    __u64 mutation_original;
+    __u64 mutation_unsupported;
     char kernel_release[128];
 };
 

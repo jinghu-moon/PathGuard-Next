@@ -194,3 +194,38 @@ struct pg_hide1_decision pg_hide1_evaluate_rename(
         return reject_decision();
     return pass_decision();
 }
+
+struct pg_hide1_decision pg_hide1_evaluate_link(
+    const struct pg_hide1_rule_model *rule,
+    const struct pg_hide1_observer *observer,
+    struct pg_hide1_parent_identity source_parent,
+    const char *source_basename,
+    pg_hide1_u16 source_basename_length,
+    int source_is_hidden_inode,
+    struct pg_hide1_parent_identity destination_parent,
+    const char *destination_basename,
+    pg_hide1_u16 destination_basename_length)
+{
+    if (!pg_hide1_rule_valid(rule) || !observer_is_target(rule, observer))
+        return pass_decision();
+    if (source_is_hidden_inode ||
+        entry_matches(rule, source_parent, source_basename,
+                      source_basename_length) ||
+        entry_matches(rule, destination_parent, destination_basename,
+                      destination_basename_length))
+        return reject_decision();
+    return pass_decision();
+}
+
+struct pg_hide1_decision pg_hide1_evaluate_atomic_open(
+    const struct pg_hide1_rule_model *rule,
+    const struct pg_hide1_observer *observer,
+    struct pg_hide1_parent_identity parent,
+    const char *basename,
+    pg_hide1_u16 basename_length,
+    unsigned int open_flags)
+{
+    (void)open_flags;
+    return pg_hide1_evaluate(rule, PG_HIDE1_ATOMIC_OPEN, observer, parent,
+                             basename, basename_length);
+}

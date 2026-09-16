@@ -73,6 +73,7 @@ static int print_status(int fd)
            " dentry_install=%" PRIu64 "/%" PRIu64 "/%" PRIu64
            " active=%" PRIu64 "/%" PRIu64 "/%" PRIu64
            " open_count=%" PRIu64
+           " mutation=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
            " release=%s\n",
            status.abi_version, status.size, status.state, status.lifecycle,
            status.last_error,
@@ -94,6 +95,10 @@ static int print_status(int fd)
            (uint64_t)status.fop_active,
            (uint64_t)status.dop_active,
            (uint64_t)status.fop_open_count,
+           (uint64_t)status.mutation_calls,
+           (uint64_t)status.mutation_blocked,
+           (uint64_t)status.mutation_original,
+           (uint64_t)status.mutation_unsupported,
            status.kernel_release);
     return 0;
 }
