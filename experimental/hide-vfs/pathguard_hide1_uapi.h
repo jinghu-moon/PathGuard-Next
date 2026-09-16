@@ -5,13 +5,20 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define PATHGUARD_HIDE1_ABI_VERSION 1U
+#define PATHGUARD_HIDE1_ABI_VERSION 2U
 #define PATHGUARD_HIDE1_PATH_MAX 384U
 #define PATHGUARD_HIDE1_NAME_MAX 255U
 
 #define PATHGUARD_HIDE1_STATE_UNSUPPORTED 0U
 #define PATHGUARD_HIDE1_STATE_INACTIVE 1U
 #define PATHGUARD_HIDE1_STATE_ACTIVE 2U
+
+#define PATHGUARD_HIDE1_LIFECYCLE_FREE       0U
+#define PATHGUARD_HIDE1_LIFECYCLE_READY      1U
+#define PATHGUARD_HIDE1_LIFECYCLE_RUNNING    2U
+#define PATHGUARD_HIDE1_LIFECYCLE_STOP_NEW   3U
+#define PATHGUARD_HIDE1_LIFECYCLE_RESTORE    4U
+#define PATHGUARD_HIDE1_LIFECYCLE_DRAINING   5U
 
 #define PATHGUARD_HIDE1_OP_LOOKUP       (1ULL << 0)
 #define PATHGUARD_HIDE1_OP_ATOMIC_OPEN  (1ULL << 1)
@@ -41,6 +48,7 @@ struct pathguard_hide1_status {
     __u32 abi_version;
     __u32 size;
     __u32 state;
+    __u32 lifecycle;
     __s32 last_error;
     __u32 target_uid;
     __s32 target_pid;
@@ -59,6 +67,10 @@ struct pathguard_hide1_status {
     __u64 dentry_install_calls;
     __u64 dentry_install_success;
     __u64 dentry_install_failures;
+    __u64 iop_active;
+    __u64 fop_active;
+    __u64 dop_active;
+    __u64 fop_open_count;
     char kernel_release[128];
 };
 

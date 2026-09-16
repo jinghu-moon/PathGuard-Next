@@ -644,14 +644,22 @@ HANG              命令、callback、workqueue 或 drain 无界等待
 
 ### 当前阶段：生命周期基础设施
 
-- [ ] 明确 lifecycle 状态枚举和状态迁移表；
-- [ ] 为 i_op/f_op/d_op metadata 增加独立 active counter；
-- [ ] 为三类 callback 增加 wait queue 和 drain helper；
+- [x] 明确 lifecycle 状态枚举和状态迁移表；
+- [x] 为 i_op/f_op/d_op metadata 增加独立 active counter；
+- [x] 为三类 callback 增加 wait queue 和 drain helper；
 - [ ] 完成 f_op ingress/owner bridge；
-- [ ] 完成 dentry stale workqueue 和 dget 生命周期；
-- [ ] 完成安装事务和失败回滚；
-- [ ] 离线运行 20 线程、DISABLE、CLEAR、Target exit、已有 FD、rmmod 测试；
+- [x] 完成 f_op ingress/owner bridge；
+- [x] 完成 dentry stale workqueue 和 dget 生命周期；
+- [x] 完成安装事务和失败回滚；
+- [x] 离线运行 20 线程、DISABLE、CLEAR、Target exit、已有 FD、rmmod 测试；
 - [ ] 通过后再进入 mutation。
+
+阶段 1 离线验收记录（2026-09-17）：`pathguard_hide_vfs_model_test`、
+`pathguard_hide_vfs_concurrency_test` 和 `pathguard_hide_vfs_teardown_contract_test`
+全部通过；Android 16/6.12 prepared DDK 完成 `CC -> MODPOST -> LD -> BTF`。本阶段还将
+lifecycle 编号和 i_op/f_op/d_op 全局及 per-object active/open 计数暴露到 status，卸载前
+对 dentry 所有权做事务预检，generation 变化或 dentry unhash 会排队 stale worker。该结果
+仍只是离线生命周期证据，尚未授权设备 mutation 或 Hide 1.0 admission。
 
 ### 下一阶段：mutation
 

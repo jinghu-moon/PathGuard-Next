@@ -61,6 +61,7 @@ static int print_status(int fd)
         return 1;
     }
     printf("abi_version=%" PRIu32 " size=%" PRIu32 " state=%" PRIu32
+           " lifecycle=%" PRIu32
            " last_error=%" PRId32 " target_uid=%" PRIu32
            " target_pid=%" PRId32
            " target_mnt_ns=%" PRIu64 " generation=%" PRIu64
@@ -70,8 +71,11 @@ static int print_status(int fd)
            " readdir=%" PRIu64 "/%" PRIu64
            " revalidate=%" PRIu64 "/%" PRIu64
            " dentry_install=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " active=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " open_count=%" PRIu64
            " release=%s\n",
-           status.abi_version, status.size, status.state, status.last_error,
+           status.abi_version, status.size, status.state, status.lifecycle,
+           status.last_error,
            status.target_uid, status.target_pid,
            (uint64_t)status.target_mnt_ns,
            (uint64_t)status.generation, (uint64_t)status.operation_mask,
@@ -86,6 +90,10 @@ static int print_status(int fd)
            (uint64_t)status.dentry_install_calls,
            (uint64_t)status.dentry_install_success,
            (uint64_t)status.dentry_install_failures,
+           (uint64_t)status.iop_active,
+           (uint64_t)status.fop_active,
+           (uint64_t)status.dop_active,
+           (uint64_t)status.fop_open_count,
            status.kernel_release);
     return 0;
 }

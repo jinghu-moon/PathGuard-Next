@@ -3298,3 +3298,29 @@ boot ID `e11d7fc0-4d48-40d3-a809-449a5cea370f` 保持不变，模块和设备节
 本轮只证明只读 cache-order、并发访问和 DISABLE/CLEAR/卸载恢复在当前单设备实验范围内
 通过；未实现 mutation 封闭、真正的 namespace 销毁/OTA 重新准入或完整生命周期控制 ABI。
 Hide 1.0 继续保持 `unsupported`。
+
+### 轮次 76：shadow lifecycle 离线实现与 Kbuild 验收（2026-09-17）
+
+本轮先修复生命周期根因，再进入 mutation：
+
+- UAPI ABI 升为 `2`，status 增加 `lifecycle`、i_op/f_op/d_op active 计数和 f_op
+  `open_count`，使 STOP_NEW、RESTORE、DRAIN、FREE 的运行时状态可观察；
+- i_op/f_op/d_op metadata 各自增加 wait queue，callback exit 同时唤醒全局和对象级 drain；
+- dentry shadow 的 RCU hash 发布纳入 `hide1_meta_lock`，卸载前先预检所有 dentry 的当前
+  `d_op` 所有权，发现外部替换则保持原安装状态并返回 `-EAGAIN`；
+- generation 变化或 dentry unhash 时标记 stale 并调度 workqueue，worker 在 SRCU、RCU、
+  active 计数完成后才释放 dentry 引用和 metadata；
+- 安装事务失败继续按逆序恢复 i_fop/i_op/d_op，等待 callback drain 后才释放对象和 module pin。
+
+离线验证命令：
+
+```text
+cmake --build build --target pathguard_hide_vfs_teardown_contract_test pathguard_hide_vfs_model_test pathguard_hide_vfs_concurrency_test --config Debug -j 4
+ctest --test-dir build -C Debug -R pathguard_hide_vfs_(model|concurrency|teardown_contract) --output-on-failure
+wsl make -C experimental/hide-vfs KDIR=.../build/ddk-kdir-local-linux/android16-6.12 LLVM=1 LLVM_IAS=1 PAHOLE=/bin/true clean all
+```
+
+三项宿主测试全部通过；真实 Kbuild 完成 `CC -> MODPOST -> LD -> BTF`，产出新的
+`experimental/hide-vfs/pathguard_hide1.ko`。本轮没有安装、加载或执行设备 mutation；阶段 1
+只证明离线生命周期和构建契约，产品状态仍为 `Hide 1.0 = unsupported`。下一步是基于该
+生命周期基础实现并审查 mutation 前置封闭，仍须先完成离线矩阵。

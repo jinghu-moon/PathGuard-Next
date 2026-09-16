@@ -57,6 +57,7 @@ struct hide1_iop_meta {
     const struct inode_operations *orig;
     struct inode_operations shadow;
     atomic_t active;
+    wait_queue_head_t wait;
 };
 
 struct hide1_fop_meta {
@@ -69,6 +70,7 @@ struct hide1_fop_meta {
     struct file_operations live;
     atomic_t active;
     atomic_t open_count;
+    wait_queue_head_t wait;
 };
 
 struct hide1_dentry_shadow {
@@ -80,6 +82,7 @@ struct hide1_dentry_shadow {
     struct hide1_binding *binding;
     unsigned int orig_flags;
     atomic_t active;
+    wait_queue_head_t wait;
     unsigned long state;
 };
 
@@ -122,14 +125,7 @@ static DECLARE_WAIT_QUEUE_HEAD(hide1_fop_wait);
 static DECLARE_WAIT_QUEUE_HEAD(hide1_dop_wait);
 static struct work_struct hide1_dop_stale_work;
 #define HIDE1_DOP_STALE 0
-static enum {
-    HIDE1_LIFECYCLE_FREE = 0,
-    HIDE1_LIFECYCLE_READY,
-    HIDE1_LIFECYCLE_RUNNING,
-    HIDE1_LIFECYCLE_STOP_NEW,
-    HIDE1_LIFECYCLE_RESTORE,
-    HIDE1_LIFECYCLE_DRAINING,
-} hide1_lifecycle = HIDE1_LIFECYCLE_FREE;
+static u32 hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_FREE;
 static struct pathguard_hide1_status hide1_status = {
     .abi_version = PATHGUARD_HIDE1_ABI_VERSION,
     .size = sizeof(struct pathguard_hide1_status),
@@ -181,22 +177,43 @@ static struct hide1_dentry_shadow *hide1_dop_lookup_rcu(
     return NULL;
 }
 
-static void hide1_callback_enter(atomic_t *global, atomic_t *local,
-                                 wait_queue_head_t *wait)
+static void hide1_callback_enter(atomic_t *global, atomic_t *local)
 {
     atomic_inc(global);
     if (local)
         atomic_inc(local);
-    (void)wait;
 }
 
 static void hide1_callback_exit(atomic_t *global, atomic_t *local,
-                                wait_queue_head_t *wait)
+                                wait_queue_head_t *global_wait,
+                                wait_queue_head_t *local_wait)
 {
     if (local && atomic_dec_and_test(local))
-        wake_up_all(wait);
+        wake_up_all(local_wait);
     if (atomic_dec_and_test(global))
-        wake_up_all(wait);
+        wake_up_all(global_wait);
+}
+
+static int hide1_preflight_dentry_restore(struct hide1_binding *binding)
+{
+    const struct hide1_dentry_shadow *meta;
+    unsigned long flags;
+    int ret = 0;
+
+    if (!binding)
+        return -EINVAL;
+    spin_lock_irqsave(&binding->dentry_lock, flags);
+    list_for_each_entry(meta, &binding->dentry_shadows, node) {
+        spin_lock(&meta->dentry->d_lock);
+        if (READ_ONCE(meta->dentry->d_op) != &meta->shadow_dop &&
+            READ_ONCE(meta->dentry->d_op) != meta->orig_dop)
+            ret = -EAGAIN;
+        spin_unlock(&meta->dentry->d_lock);
+        if (ret)
+            break;
+    }
+    spin_unlock_irqrestore(&binding->dentry_lock, flags);
+    return ret;
 }
 
 static struct dentry *hide1_lookup(struct inode *, struct dentry *, unsigned int);
@@ -219,6 +236,15 @@ static int hide1_rename(struct mnt_idmap *, struct inode *, struct dentry *,
                         struct inode *, struct dentry *, unsigned int);
 static int hide1_d_revalidate(struct dentry *, unsigned int);
 static void hide1_free_dentry_shadows(struct list_head *retired);
+
+static void hide1_mark_dentry_stale(struct hide1_dentry_shadow *meta)
+{
+    if (!meta || READ_ONCE(hide1_lifecycle) !=
+        PATHGUARD_HIDE1_LIFECYCLE_RUNNING)
+        return;
+    if (!test_and_set_bit(HIDE1_DOP_STALE, &meta->state))
+        schedule_work(&hide1_dop_stale_work);
+}
 
 static void hide1_free_fop_meta(struct hide1_fop_meta *meta)
 {
@@ -268,6 +294,8 @@ static void hide1_dop_stale_workfn(struct work_struct *work)
      * its policy work.  Do not free a stale shadow while such a callback can
      * still dereference its metadata. */
     wait_event(hide1_dop_wait, atomic_read(&hide1_dop_active) == 0);
+    list_for_each_entry(meta, &retired, node)
+        wait_event(meta->wait, atomic_read(&meta->active) == 0);
     hide1_free_dentry_shadows(&retired);
 }
 
@@ -400,6 +428,7 @@ static int hide1_install_dentry_shadow(struct hide1_binding *binding,
     meta->shadow_dop.d_revalidate = hide1_d_revalidate;
 
     atomic_set(&meta->active, 0);
+    init_waitqueue_head(&meta->wait);
     spin_lock_irqsave(&binding->dentry_lock, flags);
     spin_lock(&dentry->d_lock);
     if (binding->retiring) {
@@ -430,8 +459,10 @@ static int hide1_install_dentry_shadow(struct hide1_binding *binding,
     }
     meta->orig_flags = READ_ONCE(dentry->d_flags);
     list_add_tail(&meta->node, &binding->dentry_shadows);
+    spin_lock(&hide1_meta_lock);
     hash_add_rcu(hide1_dop_table, &meta->hash_node,
                  (unsigned long)dentry);
+    spin_unlock(&hide1_meta_lock);
     smp_wmb();
     WRITE_ONCE(dentry->d_op, &meta->shadow_dop);
     WRITE_ONCE(dentry->d_flags, meta->orig_flags | DCACHE_OP_REVALIDATE);
@@ -531,13 +562,24 @@ static void hide1_drain_retired_dentries(struct list_head *retired)
     synchronize_rcu();
 }
 
-static void hide1_drain_callbacks(void)
+static void hide1_drain_callbacks(struct hide1_iop_meta *im,
+                                  struct hide1_fop_meta *fm,
+                                  struct list_head *retired)
 {
+    struct hide1_dentry_shadow *dm;
+
     /* The first Tasks-RCU pass is issued by the RESTORE stage before indices
      * are removed.  Here we close the active-callback and reclamation sides. */
     wait_event(hide1_iop_wait, atomic_read(&hide1_iop_active) == 0);
     wait_event(hide1_fop_wait, atomic_read(&hide1_fop_active) == 0);
     wait_event(hide1_dop_wait, atomic_read(&hide1_dop_active) == 0);
+    if (im)
+        wait_event(im->wait, atomic_read(&im->active) == 0);
+    if (fm)
+        wait_event(fm->wait, atomic_read(&fm->active) == 0);
+    if (retired)
+        list_for_each_entry(dm, retired, node)
+            wait_event(dm->wait, atomic_read(&dm->active) == 0);
     synchronize_rcu_tasks();
     synchronize_rcu();
 }
@@ -551,8 +593,7 @@ static struct hide1_iop_meta *hide1_iop_enter(struct inode *inode)
     if (!meta || READ_ONCE(inode->i_op) != &meta->shadow)
         meta = NULL;
     if (meta)
-        hide1_callback_enter(&hide1_iop_active, &meta->active,
-                             &hide1_iop_wait);
+        hide1_callback_enter(&hide1_iop_active, &meta->active);
     rcu_read_unlock();
     return meta;
 }
@@ -569,8 +610,7 @@ static struct hide1_fop_meta *hide1_fop_enter(struct file *file)
                   READ_ONCE(file->f_op) != &meta->live))
         meta = NULL;
     if (meta)
-        hide1_callback_enter(&hide1_fop_active, &meta->active,
-                             &hide1_fop_wait);
+        hide1_callback_enter(&hide1_fop_active, &meta->active);
     rcu_read_unlock();
     return meta;
 }
@@ -583,8 +623,7 @@ static struct hide1_dentry_shadow *hide1_dop_enter(
     rcu_read_lock();
     meta = hide1_dop_lookup_rcu(dentry);
     if (meta)
-        hide1_callback_enter(&hide1_dop_active, &meta->active,
-                             &hide1_dop_wait);
+        hide1_callback_enter(&hide1_dop_active, &meta->active);
     rcu_read_unlock();
     return meta;
 }
@@ -608,7 +647,8 @@ static int hide1_fop_open(struct inode *inode, struct file *file)
         atomic_dec(&meta->open_count);
     else
         WRITE_ONCE(file->f_op, &meta->live);
-    hide1_callback_exit(&hide1_fop_active, &meta->active, &hide1_fop_wait);
+    hide1_callback_exit(&hide1_fop_active, &meta->active,
+                        &hide1_fop_wait, &meta->wait);
     srcu_read_unlock(&hide1_srcu, idx);
     return ret;
 }
@@ -628,7 +668,8 @@ static int hide1_fop_release(struct inode *inode, struct file *file)
     if (orig && orig->release)
         ret = orig->release(inode, file);
     atomic_dec(&meta->open_count);
-    hide1_callback_exit(&hide1_fop_active, &meta->active, &hide1_fop_wait);
+    hide1_callback_exit(&hide1_fop_active, &meta->active,
+                        &hide1_fop_wait, &meta->wait);
     srcu_read_unlock(&hide1_srcu, idx);
     return ret;
 }
@@ -667,7 +708,8 @@ static struct dentry *hide1_lookup(struct inode *dir, struct dentry *dentry,
     result = orig && orig->lookup ? orig->lookup(dir, dentry, flags) : NULL;
     ret = result;
 out:
-    hide1_callback_exit(&hide1_iop_active, &meta->active, &hide1_iop_wait);
+    hide1_callback_exit(&hide1_iop_active, &meta->active,
+                        &hide1_iop_wait, &meta->wait);
     srcu_read_unlock(&hide1_srcu, idx);
     return ret;
 }
@@ -700,7 +742,8 @@ static int hide1_atomic_open(struct inode *dir, struct dentry *dentry,
               orig->atomic_open(dir, dentry, file, open_flag, create_mode) :
               -EOPNOTSUPP;
     }
-    hide1_callback_exit(&hide1_iop_active, &meta->active, &hide1_iop_wait);
+    hide1_callback_exit(&hide1_iop_active, &meta->active,
+                        &hide1_iop_wait, &meta->wait);
     srcu_read_unlock(&hide1_srcu, idx);
     return ret;
 }
@@ -756,14 +799,16 @@ static int hide1_iterate_shared(struct file *file, struct dir_context *ctx)
     idx = srcu_read_lock(&hide1_srcu);
     orig = meta->orig;
     if (!orig || !orig->iterate_shared) {
-        hide1_callback_exit(&hide1_fop_active, &meta->active, &hide1_fop_wait);
+        hide1_callback_exit(&hide1_fop_active, &meta->active,
+                            &hide1_fop_wait, &meta->wait);
         srcu_read_unlock(&hide1_srcu, idx);
         return -EOPNOTSUPP;
     }
     if (!hide1_is_target_observer(binding) ||
         file_inode(file) != binding->parent_inode) {
         ret = orig->iterate_shared(file, ctx);
-        hide1_callback_exit(&hide1_fop_active, &meta->active, &hide1_fop_wait);
+        hide1_callback_exit(&hide1_fop_active, &meta->active,
+                            &hide1_fop_wait, &meta->wait);
         srcu_read_unlock(&hide1_srcu, idx);
         return ret;
     }
@@ -774,7 +819,8 @@ static int hide1_iterate_shared(struct file *file, struct dir_context *ctx)
     proxy.dir_inode = file_inode(file);
     ret = orig->iterate_shared(file, &proxy.ctx);
     ctx->pos = proxy.ctx.pos;
-    hide1_callback_exit(&hide1_fop_active, &meta->active, &hide1_fop_wait);
+    hide1_callback_exit(&hide1_fop_active, &meta->active,
+                        &hide1_fop_wait, &meta->wait);
     srcu_read_unlock(&hide1_srcu, idx);
     return ret;
 }
@@ -794,9 +840,13 @@ static int hide1_d_revalidate(struct dentry *dentry, unsigned int flags)
         srcu_read_unlock(&hide1_srcu, idx);
         return 1;
     }
+    if (READ_ONCE(hide1_status.generation) != binding->rule.expected_generation ||
+        d_unhashed(dentry))
+        hide1_mark_dentry_stale(meta);
     if (hide1_should_hide(binding, d_backing_inode(dentry->d_parent), dentry)) {
         atomic64_inc(&hide1_d_revalidate_hidden);
-        hide1_callback_exit(&hide1_dop_active, &meta->active, &hide1_dop_wait);
+        hide1_callback_exit(&hide1_dop_active, &meta->active,
+                            &hide1_dop_wait, &meta->wait);
         srcu_read_unlock(&hide1_srcu, idx);
         if (flags & LOOKUP_RCU)
             return -ECHILD;
@@ -804,7 +854,8 @@ static int hide1_d_revalidate(struct dentry *dentry, unsigned int flags)
     }
     ret = meta->orig_dop && meta->orig_dop->d_revalidate ?
           meta->orig_dop->d_revalidate(dentry, flags) : 1;
-    hide1_callback_exit(&hide1_dop_active, &meta->active, &hide1_dop_wait);
+    hide1_callback_exit(&hide1_dop_active, &meta->active,
+                        &hide1_dop_wait, &meta->wait);
     srcu_read_unlock(&hide1_srcu, idx);
     return ret;
 }
@@ -825,7 +876,7 @@ static bool hide1_mutation_blocked(struct hide1_binding *binding,
 
 #define HIDE1_IOP_UNGUARD(_meta, _idx)                                 \
     hide1_callback_exit(&hide1_iop_active, &(_meta)->active,           \
-                        &hide1_iop_wait);                              \
+                        &hide1_iop_wait, &(_meta)->wait);              \
     srcu_read_unlock(&hide1_srcu, (_idx))
 
 static int hide1_create(struct mnt_idmap *idmap, struct inode *dir,
@@ -981,6 +1032,7 @@ static int hide1_shadow_install_locked(struct hide1_binding *binding)
     struct hide1_fop_meta *fm = NULL;
     struct dentry *cached;
     struct qstr name;
+    LIST_HEAD(retired);
     size_t name_len;
     int ret;
 
@@ -1021,6 +1073,7 @@ static int hide1_shadow_install_locked(struct hide1_binding *binding)
             im->shadow.rename = hide1_rename;
         }
         atomic_set(&im->active, 0);
+        init_waitqueue_head(&im->wait);
         spin_lock(&hide1_meta_lock);
         hash_add_rcu(hide1_iop_table, &im->node, (unsigned long)inode);
         spin_unlock(&hide1_meta_lock);
@@ -1053,6 +1106,7 @@ static int hide1_shadow_install_locked(struct hide1_binding *binding)
         fm->live.iterate_shared = hide1_iterate_shared;
         atomic_set(&fm->active, 0);
         atomic_set(&fm->open_count, 0);
+        init_waitqueue_head(&fm->wait);
         spin_lock(&hide1_meta_lock);
         hash_add_rcu(hide1_fop_table, &fm->node, (unsigned long)inode);
         spin_unlock(&hide1_meta_lock);
@@ -1098,12 +1152,7 @@ rollback:
         smp_store_release(&inode->i_op, shadow->orig_iop);
         shadow->iop_installed = false;
     }
-    {
-        LIST_HEAD(retired);
-        (void)hide1_restore_dentry_shadows(binding, &retired);
-        hide1_drain_retired_dentries(&retired);
-        hide1_free_dentry_shadows(&retired);
-    }
+    (void)hide1_restore_dentry_shadows(binding, &retired);
     spin_lock(&hide1_meta_lock);
     if (shadow->iop_meta) {
         hash_del_rcu(&shadow->iop_meta->node);
@@ -1120,7 +1169,9 @@ rollback:
     /* A wrapper drops the short RCU read-side section immediately after
      * taking an active reference.  RCU alone therefore does not prove that
      * the wrapper stopped dereferencing metadata. */
-    hide1_drain_callbacks();
+    hide1_drain_callbacks(im, fm, &retired);
+    hide1_drain_retired_dentries(&retired);
+    hide1_free_dentry_shadows(&retired);
     kfree(im);
     hide1_free_fop_meta(fm);
     if (shadow->module_pin) {
@@ -1147,6 +1198,13 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
         atomic_read(&shadow->fop_meta->open_count) != 0)
         return -EBUSY;
 
+    /* Dentry ownership is part of the same uninstall transaction.  Refuse
+     * before publishing any original inode/file vector if another owner has
+     * replaced a governed d_op. */
+    ret = hide1_preflight_dentry_restore(binding);
+    if (ret)
+        return ret;
+
     /* Preflight all ingress pointers.  If another subsystem replaced one,
      * leave every shadow and its metadata untouched for an explicit retry. */
     if (shadow->fop_installed &&
@@ -1163,7 +1221,7 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
         return 0;
 
     /* STOP_NEW: block policy decisions before publishing original vectors. */
-    hide1_lifecycle = HIDE1_LIFECYCLE_STOP_NEW;
+    hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_STOP_NEW;
     WRITE_ONCE(binding->retiring, true);
     WRITE_ONCE(hide1_status.state, PATHGUARD_HIDE1_STATE_INACTIVE);
 
@@ -1175,7 +1233,7 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
     shadow->iop_installed = false;
 
     /* RESTORE: all ingress pointers now reference the original filesystem. */
-    hide1_lifecycle = HIDE1_LIFECYCLE_RESTORE;
+    hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_RESTORE;
 
     /* Restore operation pointers first.  This prevents new calls from
      * entering the shadow; SRCU drains wrappers that already entered it and
@@ -1186,7 +1244,7 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
     /* DRAIN: close the stale-pointer window before withdrawing indices.  The
      * grace period must not run while hide1_lock is held: a callback or stale
      * worker may legitimately need that mutex to finish its epilogue. */
-    hide1_lifecycle = HIDE1_LIFECYCLE_DRAINING;
+    hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_DRAINING;
     mutex_unlock(&hide1_lock);
     synchronize_rcu_tasks();
     mutex_lock(&hide1_lock);
@@ -1204,7 +1262,7 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
     spin_unlock(&hide1_meta_lock);
 
     mutex_unlock(&hide1_lock);
-    hide1_drain_callbacks();
+    hide1_drain_callbacks(im, fm, &retired);
     mutex_lock(&hide1_lock);
     hide1_drain_retired_dentries(&retired);
     hide1_free_dentry_shadows(&retired);
@@ -1279,7 +1337,7 @@ static int hide1_reset_locked(void)
         return ret;
 
     hide1_release_binding(&hide1_binding);
-    hide1_lifecycle = HIDE1_LIFECYCLE_FREE;
+    hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_FREE;
     hide1_status.state = PATHGUARD_HIDE1_STATE_UNSUPPORTED;
     hide1_status.last_error = -EOPNOTSUPP;
     hide1_status.target_uid = 0;
@@ -1490,7 +1548,7 @@ static long hide1_ioctl(struct file *file, unsigned int command,
                 hide1_status.last_error = ret;
             } else {
                 hide1_commit_binding(binding);
-                hide1_lifecycle = HIDE1_LIFECYCLE_READY;
+                hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_READY;
             }
         }
         hide1_release_binding(binding);
@@ -1515,7 +1573,7 @@ static long hide1_ioctl(struct file *file, unsigned int command,
             return -EALREADY;
         }
         if (hide1_status.state != PATHGUARD_HIDE1_STATE_INACTIVE ||
-            hide1_lifecycle != HIDE1_LIFECYCLE_READY) {
+            hide1_lifecycle != PATHGUARD_HIDE1_LIFECYCLE_READY) {
             hide1_status.last_error = -EOPNOTSUPP;
             mutex_unlock(&hide1_lock);
             return -EOPNOTSUPP;
@@ -1525,14 +1583,14 @@ static long hide1_ioctl(struct file *file, unsigned int command,
         if (ret) {
             /* Installation rollback has restored all published vectors. */
             hide1_binding.retiring = false;
-            hide1_lifecycle = HIDE1_LIFECYCLE_READY;
+            hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_READY;
             hide1_status.last_error = ret;
             hide1_status.state = PATHGUARD_HIDE1_STATE_INACTIVE;
             mutex_unlock(&hide1_lock);
             return ret;
         }
         hide1_binding.retiring = false;
-        hide1_lifecycle = HIDE1_LIFECYCLE_RUNNING;
+        hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_RUNNING;
         hide1_status.state = PATHGUARD_HIDE1_STATE_ACTIVE;
         hide1_status.last_error = 0;
         mutex_unlock(&hide1_lock);
@@ -1546,7 +1604,7 @@ static long hide1_ioctl(struct file *file, unsigned int command,
              * STOP_NEW and published INACTIVE itself. */
             if (hide1_status.state == PATHGUARD_HIDE1_STATE_INACTIVE) {
                 hide1_binding.retiring = false;
-                hide1_lifecycle = HIDE1_LIFECYCLE_READY;
+                hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_READY;
             }
             hide1_status.last_error = ret;
             mutex_unlock(&hide1_lock);
@@ -1564,6 +1622,7 @@ static long hide1_ioctl(struct file *file, unsigned int command,
 
     case PATHGUARD_HIDE1_IOC_STATUS:
         status = hide1_status;
+        status.lifecycle = hide1_lifecycle;
         status.lookup_calls = atomic64_read(&hide1_lookup_calls);
         status.lookup_hidden = atomic64_read(&hide1_lookup_hidden);
         status.atomic_open_calls = atomic64_read(&hide1_atomic_open_calls);
@@ -1575,6 +1634,11 @@ static long hide1_ioctl(struct file *file, unsigned int command,
         status.dentry_install_calls = atomic64_read(&hide1_dentry_install_calls);
         status.dentry_install_success = atomic64_read(&hide1_dentry_install_success);
         status.dentry_install_failures = atomic64_read(&hide1_dentry_install_failures);
+        status.iop_active = atomic_read(&hide1_iop_active);
+        status.fop_active = atomic_read(&hide1_fop_active);
+        status.dop_active = atomic_read(&hide1_dop_active);
+        status.fop_open_count = hide1_binding.shadow.fop_meta ?
+            atomic_read(&hide1_binding.shadow.fop_meta->open_count) : 0;
         mutex_unlock(&hide1_lock);
         return copy_to_user((void __user *)argument, &status, sizeof(status))
                    ? -EFAULT
@@ -1612,7 +1676,7 @@ static int __init hide1_init(void)
     hash_init(hide1_fop_table);
     hash_init(hide1_dop_table);
     INIT_WORK(&hide1_dop_stale_work, hide1_dop_stale_workfn);
-    hide1_lifecycle = HIDE1_LIFECYCLE_READY;
+    hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_READY;
     strscpy(hide1_status.kernel_release, init_utsname()->release,
             sizeof(hide1_status.kernel_release));
     hide1_status.last_error = -EOPNOTSUPP;
@@ -1622,7 +1686,6 @@ static int __init hide1_init(void)
 static void __exit hide1_exit(void)
 {
     misc_deregister(&hide1_device);
-    hide1_lifecycle = HIDE1_LIFECYCLE_STOP_NEW;
     cancel_work_sync(&hide1_dop_stale_work);
     mutex_lock(&hide1_lock);
     (void)hide1_reset_locked();

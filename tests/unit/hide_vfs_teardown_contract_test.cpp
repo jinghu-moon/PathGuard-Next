@@ -98,23 +98,30 @@ int main() {
            std::string::npos);
     assert(d_revalidate.find("hide1_d_revalidate_hidden") !=
            std::string::npos);
-    assert(d_revalidate.find("set_bit(HIDE1_DOP_STALE") == std::string::npos);
-    assert(d_revalidate.find("schedule_work(&hide1_dop_stale_work)") ==
+    assert(d_revalidate.find("hide1_mark_dentry_stale(meta)") !=
            std::string::npos);
+    const std::string stale_marker = FunctionBody(
+        source, "static void hide1_mark_dentry_stale",
+        "static void hide1_free_fop_meta");
+    RequireOrder(stale_marker, {
+        "PATHGUARD_HIDE1_LIFECYCLE_RUNNING",
+        "test_and_set_bit(HIDE1_DOP_STALE",
+        "schedule_work(&hide1_dop_stale_work)",
+    });
     assert(install_mode.find("if (!hide1_mode_is_readonly())") !=
            std::string::npos);
 
     assert(uninstall.find("!binding->dentry_shadows.next") == std::string::npos);
     RequireOrder(uninstall, {
-        "hide1_lifecycle = HIDE1_LIFECYCLE_STOP_NEW",
+        "hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_STOP_NEW",
         "WRITE_ONCE(binding->retiring, true)",
         "WRITE_ONCE(hide1_status.state, PATHGUARD_HIDE1_STATE_INACTIVE)",
         "smp_store_release(&inode->i_fop",
         "smp_store_release(&inode->i_op",
-        "hide1_lifecycle = HIDE1_LIFECYCLE_RESTORE",
+        "hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_RESTORE",
         "hide1_restore_dentry_shadows(binding, &retired)",
-        "hide1_lifecycle = HIDE1_LIFECYCLE_DRAINING",
-        "hide1_drain_callbacks()",
+        "hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_DRAINING",
+        "hide1_drain_callbacks(im, fm, &retired)",
         "hide1_drain_retired_dentries(&retired)",
         "hide1_free_dentry_shadows(&retired)",
         "return ret",
@@ -138,7 +145,7 @@ int main() {
         "d_drop(meta->dentry)",
     });
     assert(source.find("synchronize_rcu_tasks();") != std::string::npos);
-    assert(source.find("HIDE1_LIFECYCLE_RESTORE") != std::string::npos);
+    assert(source.find("PATHGUARD_HIDE1_LIFECYCLE_RESTORE") != std::string::npos);
     assert(source.find("struct hide1_iop_meta") != std::string::npos);
     assert(source.find("struct hide1_fop_meta") != std::string::npos);
     assert(source.find("struct task_struct *target_task") != std::string::npos);
@@ -175,8 +182,8 @@ int main() {
         "wait_event(hide1_dop_wait, atomic_read(&hide1_dop_active) == 0);",
         "hide1_free_dentry_shadows(&retired);",
     });
-    assert(source.find("HIDE1_LIFECYCLE_STOP_NEW") != std::string::npos);
-    assert(source.find("HIDE1_LIFECYCLE_DRAINING") != std::string::npos);
+    assert(source.find("PATHGUARD_HIDE1_LIFECYCLE_STOP_NEW") != std::string::npos);
+    assert(source.find("PATHGUARD_HIDE1_LIFECYCLE_DRAINING") != std::string::npos);
     assert(source.find("hide1_status.state == PATHGUARD_HIDE1_STATE_ACTIVE ||") !=
            std::string::npos);
     assert(source.find("return -EBUSY") != std::string::npos);
@@ -199,7 +206,7 @@ int main() {
         "rollback:",
         "hash_del_rcu(&shadow->iop_meta->node)",
         "synchronize_rcu();",
-        "hide1_drain_callbacks();",
+        "hide1_drain_callbacks(im, fm, &retired);",
         "kfree(im)",
     });
     const std::string reset = FunctionBody(
