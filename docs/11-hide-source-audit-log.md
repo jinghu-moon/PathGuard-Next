@@ -3341,3 +3341,18 @@ unsupported 计数，便于设备回归确认拒绝发生在数据修改之前�
 Android clang r536225 + prepared `android16-6.12` tree 完成 `CC -> MODPOST -> LD -> BTF`。
 本轮未安装、加载或执行设备 mutation，尚无 disposable fixture Root Oracle 证据，产品状态仍
 为 `Hide 1.0 = unsupported`。
+
+### 轮次 78：HideLab SukiSU root wrapper 修复与设备解锁前置（2026-09-17）
+
+离线检查发现 HideLab runner 的 Root Oracle 和 mount namespace 读取仍使用普通
+`su -c`。在当前 SukiSU 设备上该路径进入 `ksu` SELinux 域，无法创建
+`/storage/emulated/0/Pictures/PathGuardHideLab/<run-id>` disposable fixture，导致
+测试在 fixture 初始化阶段失败。runner 已统一改为 `su -W -c`，包括 fixture 创建、清理、
+target mount namespace 读取和结束时复核；该修复已通过现有三项宿主 VFS contract 测试。
+
+真机重跑暂未开始：设备当前 `sys.boot_completed=1` 但用户尚未解锁，
+`locksettings get-state` 返回存在锁屏凭据且未提供旧凭据，`ce_available` 为空，
+因此测试 APK 的 CE 数据目录不可用，Activity 无法解析。模块状态保持
+`state=0/lifecycle=1`，无活动 callback、fd 或 mutation 计数；未执行 ENABLE、INSTALL 或
+任何 mutation。设备解锁后才能继续 disposable fixture、INSTALL/ENABLE 及真机 mutation
+回归，产品状态仍为 `Hide 1.0 = unsupported`。
