@@ -65,12 +65,27 @@ static int print_status(int fd)
            " target_pid=%" PRId32
            " target_mnt_ns=%" PRIu64 " generation=%" PRIu64
            " operation_mask=0x%016" PRIx64 " parent_inode=%" PRIu64
+           " lookup=%" PRIu64 "/%" PRIu64
+           " atomic_open=%" PRIu64 "/%" PRIu64
+           " readdir=%" PRIu64 "/%" PRIu64
+           " revalidate=%" PRIu64 "/%" PRIu64
+           " dentry_install=%" PRIu64 "/%" PRIu64 "/%" PRIu64
            " release=%s\n",
            status.abi_version, status.size, status.state, status.last_error,
            status.target_uid, status.target_pid,
            (uint64_t)status.target_mnt_ns,
            (uint64_t)status.generation, (uint64_t)status.operation_mask,
            (uint64_t)status.parent_inode,
+           (uint64_t)status.lookup_calls, (uint64_t)status.lookup_hidden,
+           (uint64_t)status.atomic_open_calls,
+           (uint64_t)status.atomic_open_hidden,
+           (uint64_t)status.readdir_calls,
+           (uint64_t)status.readdir_filtered,
+           (uint64_t)status.d_revalidate_calls,
+           (uint64_t)status.d_revalidate_hidden,
+           (uint64_t)status.dentry_install_calls,
+           (uint64_t)status.dentry_install_success,
+           (uint64_t)status.dentry_install_failures,
            status.kernel_release);
     return 0;
 }

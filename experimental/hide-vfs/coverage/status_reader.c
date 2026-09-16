@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <stdint.h>
 
 #include "pathguard_vfs_coverage_probe_uapi.h"
 
@@ -25,15 +26,21 @@ int main(void)
 	}
 	printf("abi_version=%" PRIu32 " size=%" PRIu32 " state=%" PRIu32
 	       " last_error=%" PRId32 " probes=%" PRIu32 " registered=%" PRIu32
-	       " release=%s\n", status.abi_version, status.size, status.state,
-	       status.last_error, status.probe_count, status.registered_count,
+	       " required=%" PRIu32 "/%" PRIu32 " release=%s\n", status.abi_version,
+	       status.size, status.state, status.last_error, status.probe_count,
+	       status.registered_count, status.required_registered_count,
+	       status.required_count,
 	       status.kernel_release);
 	for (index = 0; index < status.probe_count &&
 		 index < PATHGUARD_VFS_COVERAGE_MAX_PROBES; ++index)
 		printf("probe[%u]=%s registered=%" PRIu32 " hits=%" PRIu64
-		       " nmissed=%" PRIu64 "\n", index, status.counters[index].name,
-		       status.counters[index].registered, status.counters[index].hits,
-		       status.counters[index].nmissed);
+		       " nmissed=%" PRIu64 " required=%" PRIu32 " error=%" PRId32 "\n",
+		       index, status.counters[index].name,
+		       status.counters[index].registered,
+		       (uint64_t)status.counters[index].hits,
+		       (uint64_t)status.counters[index].nmissed,
+		       status.counters[index].required,
+		       status.counters[index].register_error);
 	close(fd);
 	return 0;
 }

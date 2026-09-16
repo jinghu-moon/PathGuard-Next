@@ -2335,6 +2335,99 @@ hide 追求声明范围内不可发现，并接受更严格的设备准入。
 
 分阶段交付能降低工程风险，但不能降低每个阶段已经承诺的语义质量。HideLab 是判断这条边界是否真实成立的“矛”；没有通过它的后端，只能继续保持 `unsupported`。
 
+## 29. 2026-09-15：myron storage topology preflight
+
+为进入只读 FUSE-aware 后端，重新构建了 ABI v2 的 operation-table preflight，并在
+Redmi K90 Pro Max（`myron`）上加载后采集 `/storage/emulated/0`、`/sdcard` 和
+`/storage/self/primary`。证据位于：
+
+```text
+build/device-evidence/vfs-topology/20260915/
+```
+
+三个 alias 的结果完全一致：
+
+```text
+filesystem = fuse
+dev        = 0:280
+parent_inode = 14139
+operation_mask = 0x0000000000000fff
+```
+
+mount、superblock、parent inode、dentry、`i_op`、`f_op` 和 `d_op` 地址身份也完全一致。
+因此，针对这三个 alias 的第一版实验后端可以共享一个 FUSE parent identity，而不必为
+三个字符串路径分别安装 shadow。
+
+同一 mount namespace 的 `mountinfo` 同时显示：
+
+```text
+9726  ... /storage/emulated              - fuse   /dev/fuse
+9727  ... /mnt/user/0/emulated           - fuse   /dev/fuse
+9818  ... /mnt/androidwritable/0/emulated - fuse  /dev/fuse
+9870  ... /mnt/installer/0/emulated      - fuse   /dev/fuse
+9931  ... /mnt/pass_through/0/emulated   - f2fs   /dev/block/dm-55
+```
+
+这确认了两个必须保留的边界：
+
+1. `/storage/emulated` 前台是 FUSE，coverage probe 实测命中 `fuse_atomic_open`、
+   `fuse_readdir` 和 `fuse_dentry_revalidate`；只替换普通 `lookup` 不能形成完整隐藏。
+2. `/mnt/pass_through/0/emulated` 是独立 F2FS backing 平面。FUSE parent identity 的
+   preflight 结果不能推导 backing 平面也已隐藏；若规则允许该路径可达，必须单独绑定或
+   在 admission 阶段拒绝该 profile。
+
+本轮探针只读观察，加载后已卸载。它不改变 Hide 1.0 状态，产品仍为 `unsupported`。
+下一步进入阶段 2：固定该 FUSE parent、单 target UID、单 mount namespace 和单 basename，
+实现 lookup、`atomic_open`、readdir、`d_revalidate` 的只读实验后端。
+
+### 29.1 阶段 2 离线实现边界
+
+基于上述拓扑结果，`pathguard_hide1` 原型增加了以下 fail-closed 约束：
+
+- `INSTALL` 只接受 `fuse` superblock；F2FS backing 路径返回 `-EOPNOTSUPP`，不会被误判为
+  同一隐藏平面。
+- observer 判断同时校验 mount namespace、fsuid、superblock 和 parent inode identity，
+  并要求当前 policy generation 仍等于安装 generation。
+- `atomic_open` 隐藏分支现在安装 per-dentry shadow，并在返回 `-ENOENT` 前丢弃已存在的
+  positive dentry，覆盖 FUSE cold-cache open 入口。
+- `d_revalidate` 在 `LOOKUP_RCU` 下返回 `-ECHILD`，迫使 namei 进入可睡眠慢路径重新执行
+  observer 判断；普通路径继续安排 stale dentry 回收。
+- 实验包默认切换为 `shadow_mode=0`，同时安装 i_op、f_op 和 d_op shadow。`shadow_mode=1`
+  仅保留为显式隔离调试模式，不能用于阶段 2 的隐藏结论。
+
+本轮仅完成离线编译检查，尚未在设备上加载新的 Hide 后端。下一步必须在不执行 mutation
+的前提下，重新构建实验包并进行受控 `INSTALL/ENABLE`，优先验证 FUSE `atomic_open`、
+readdir、positive dentry 和 Control observer 是否保持原始语义；任何 `LEAK`、
+`OVERBLOCK`、`CRASH` 或 `STATE_LIE` 都阻止进入阶段 3。
+
+### 29.2 2026-09-15：FUSE read-only shadow 首次受控 ENABLE
+
+设备安装了 `pathguard-hide1-lab-myron-fuse-ro-v1.zip`。模块以
+`shadow_mode=0` 加载，`INSTALL` 成功绑定：
+
+```text
+target_uid=10551
+target_pid=20451
+target_mnt_ns=4026535994
+generation=6001
+operation_mask=0x0000000000000fff
+parent_inode=15771
+```
+
+执行 `ENABLE` 后控制命令没有返回状态，ADB 连接立即断开；设备随后重新上线，
+`ro.boot.bootreason` 和 `sys.boot.reason` 均为 `reboot`。重启后的 `/proc/modules`
+中没有 `pathguard_hide1`，`/sys/fs/pstore` 为空，未取得可用的 kernel panic trace。
+
+本轮结论为 `CRASH`，不是 `PASS`、`LEAK` 或 `ACTIVE`。证据归档于：
+
+```text
+build/device-evidence/hide1-fuse-ro-v1/20260915-enable-crash/
+```
+
+该结果阻止阶段 2 进入 HideLab active 回归。下一步必须离线审查 ENABLE 的事务安装
+顺序、FUSE operation callback 的 CFI/owner 约束、现有正 dentry/打开目录 FD 处理，
+并在没有新的离线安全证据前禁止再次执行 `ENABLE`。
+
 ## 28. 2026-09-13：inactive binding 阶段完成
 
 `pathguard_hide1` 已采用 SukiSU Ultra 在 myron 上验证过的 android16-6.12 DDK LKM 路线。
@@ -2537,3 +2630,338 @@ run-gate v2 修复后的 target APK 安装后，恢复旧 binding 触发一次�
 但 direct VFS 的 `stat/open/readdir/getdents64` 仍可见目标，结论为 `LEAK`，不是 Hide 1.0
 通过。证据目录：`build/device-evidence/hidelab-run-gate-v2/`，产品状态继续为
 `unsupported`。
+
+## 44. 2026-09-15：fuse-ro-v1 ENABLE 回归定位
+
+对比稳定提交 `5590eab` 与 `pathguard-hide1-lab-myron-fuse-ro-v1` 后确认，稳定包的默认
+加载模式是 `shadow_mode=1`，只替换父目录 inode 的 `i_op`；本轮 fuse-ro-v1 将默认改为
+`shadow_mode=0`，同时替换 `i_op`、`i_fop` 和逐 dentry 的 `d_op`。本轮还在 `atomic_open`
+回调中安装 dentry shadow 并对正 dentry 执行 `d_drop`。设备在 INSTALL 成功后执行 ENABLE
+即断开 ADB 并重启，且没有 pstore 记录；该时间关系与新增 f_op/d_op 和 atomic_open 改写
+一致，而不是稳定 i_op-only 路径的已知行为。
+
+参考 Kasumi 的实现，dentry shadow 只在 lookup 结果路径安装，atomic_open 不修改 d_op、
+不主动 drop 受 VFS 锁定的 dentry；f_op 则由独立的 ingress/live bridge 管理。当前原型的
+默认值已恢复为 `shadow_mode=1`，并移除 atomic_open 中的 dentry 安装/drop。`f_op`、`d_op`
+及完整模式仍可显式加载，但在 bridge、并发和设备 ENABLE 回归完成前不得作为默认或
+Hide 1.0 依据。产品状态继续为 `unsupported`，本轮不重复执行 ENABLE。
+
+## 46. 2026-09-15：target 身份绑定与采集闸门修复
+
+针对 safe-v2 后续采集失效，内核 binding 增加 `target_task` 引用和 thread-group/退出态
+校验，target 进程退出或 PID 复用时自动 fail-closed。HideLab runner 新增
+`-KeepTargetProcess`、`-GrantReadMediaImages` 和只读 `-ExistingHiddenPath`；其中
+`-KeepTargetProcess` 跳过 target 重装与 force-stop，并验证采集期间 mount namespace
+不变。宿主 PowerShell 语法、VFS model/teardown/concurrency 测试以及 Android 16/6.12
+Kbuild 全部通过。
+
+生成并传送 `download/pathguard-hide1-lab-myron-fuse-iop-safe-v4.zip`（KO SHA-256
+`934945c3b8e651902ccc2ea8657e2e962977844396e97ae5e0aa4251fa40ddab`，ZIP SHA-256
+`e2e8b7e07971d0d097fb564ed06c1c15bc8f795d20eba7424d84dc46e3747d74`）。当前设备未安装
+safe-v4，产品状态保持 `unsupported`。
+
+## 45. 2026-09-15：safe-v2 i_op-only 真机 ENABLE 复验
+
+安装并重启 `pathguard-hide1-lab-myron-fuse-iop-safe-v2.zip` 后，模块未自动加载；手动
+`load 1` 成功。对 UID `10551`、PID `19500`、mount namespace `4026535993` 执行
+`INSTALL generation=7001` 和 `ENABLE` 均成功，状态进入 `ACTIVE`，设备保持在线且无
+pstore 崩溃记录。由此确认将默认模式恢复为 `shadow_mode=1` 后，fuse-ro-v1 的 ENABLE
+重启回归未复现。
+
+后续探测因 force-stop/restart 产生新的 namespace `4026536013`，与 binding 不一致，且
+存储访问返回 `EACCES`；本轮没有可用于 HideLab 的有效隐藏结果。不得将 ACTIVE 或本次
+稳定性复验视为 Hide 1.0 通过。当前 binding 未执行 DISABLE，产品状态保持
+`unsupported`。
+
+## 47. 2026-09-15：binding 提交/回滚与 stale dentry 生命周期修复
+
+离线审查修复了 binding 所有权转移、安装回滚和 dentry stale worker 的三个 UAF/损坏窗口：
+提交不再复制包含链表头和自旋锁的整个临时结构；所有 metadata 释放前都等待 active callback
+计数归零。HideLab `-KeepTargetProcess` 同步锁定 PID、mount namespace 和当前 run id，拒绝
+target 重启、namespace 失配及陈旧输出。验证包括宿主六项 hide/loader 测试、PowerShell
+语法检查和 Android 16/6.12 Kbuild 全部通过；没有新的设备侧 ENABLE，Hide 1.0 仍为
+`unsupported`。
+
+修复后的未安装实验包：`download/pathguard-hide1-lab-myron-fuse-iop-safe-v5.zip`，KO
+SHA-256 为 `0f03015e74966542c9089b76e92779971270b3230080ee85b69365772f370759`，ZIP
+SHA-256 为 `e47acb79067e9229eee250e08f635d62d48e621e8fd96b97f40f69b57d7bc4a9`。
+
+## 48. 2026-09-15：safe-v5 active baseline 仍为 LEAK
+
+safe-v5 在 myron 上安装、重启、SukiSU 加载、INSTALL 和 i_op-only ENABLE 均稳定，设备未
+重启，binding 为 PID `20371`、namespace `4026536101`、generation `8001`。固定同一身份
+执行 active HideLab baseline 后，已有 `Nagram` 目录的 Java、direct-VFS 和目录读取接口
+仍全部可见，结论为 `LEAK`；control 对照、fixture 和 root Oracle 未变化。证据位于
+`build/device-evidence/hidelab-v5-active-baseline/20260915-231900/`。根因是目标路径已有
+positive dentry/cache 未被 i_op-only 安装阶段失效；必须先实现并验证正 dentry 失效与 alias
+处理，再进行后续回归。Hide 1.0 继续为 `unsupported`。
+
+## 49. 2026-09-15：从 per-object shadow 转向分层 Virtual View
+
+本轮重新审查 `refer/Kasumi-main`、`refer/hide-refer/nomount-master`、
+`refer/hide-refer/susfs4ksu-master`、`refer/hide-refer/LKM-PathMask-main`，并检索
+Kasumi、NoMount、HymoFS、ZeroMount、Linux VFS 文档及 SUSFS 的 FUSE 修复记录。
+结论是：继续向当前单 binding、单 basename、父目录 `i_op` shadow 叠加
+`f_op/d_op/atomic_open`，不能从根因上解决 FUSE positive dentry、alias 和路径
+上下文问题。
+
+### 新的主架构
+
+PathGuard 改为按能力分层的 **Virtual View**：
+
+1. **规则层**：完整路径组件树、per-directory 节点、RCU children snapshot、UID/
+   mount namespace/generation 作用域。规则身份不再只由 basename 或 inode 决定。
+2. **VFS shadow 后端**：针对 ext4/erofs 等非 FUSE 文件系统，采用 Kasumi/NoMount
+   的 parent lookup + iterate + per-dentry `d_revalidate` + synthetic vnode/superblock
+   生命周期模型。纯隐藏只返回 synthetic negative；只有重定向/注入才创建 virtual
+   inode。
+3. **FUSE namei 后端**：针对 `/storage/emulated/0`、`/sdcard`、
+   `/storage/self/primary`，必须在 dcache 命中之前覆盖 `lookup_fast/lookup_slow`、
+   open/namei、getattr/statx、readdir/filldir 等路径，并处理 FUSE 的 fake-qstr、
+   inode 查询和 alias。普通父目录 `i_op->lookup` shadow 不足以覆盖这些入口。
+4. **syscall mask 后端**：仅作为观测和补洞 feature，借鉴 PathMask 覆盖
+   `statx/newfstatat/faccessat2/openat/openat2/getdents64` 等；不作为唯一隐藏数据面，
+   不用“打开后关闭 fd”伪造 mutation 失败。
+5. **namespace 后端**：仅用于受控应用实验。bind/overlay 视图可作为兼容性后备，
+   但 mountinfo、传播、FUSE 共享存储和 namespace 切换必须单独验收，不能称为真隐藏。
+
+### 设备准入重新定义
+
+- **Hide 1.0-LKM**：只准入非 FUSE、单设备、单 UID、单 namespace、单路径、只读
+  场景；必须通过 positive/negative dentry、alias、cold/warm cache、相对路径、
+  `O_PATH`、statx、readdir 和 teardown 全矩阵。
+- **Hide 2.0-Kernel/FUSE**：只有取得精确设备内核构建输入，或在设备内核中稳定挂接
+  namei/FUSE 核心路径并通过全量回归后，才允许覆盖共享存储 FUSE。该阶段通用性显著
+  降低，必须按 fingerprint、kernel release、KMI、工具链和模块哈希建立白名单。
+- 当前 Redmi K90 Pro Max 的 `/storage/emulated/0` 仍保持 `unsupported`；不能因模块
+  Live、`INSTALL` 或 iop shadow 稳定而进入 admitted。
+
+### 参考项目与网页结论
+
+- Kasumi：VFS lookup/vnode、fop bridge、dentry revalidate、synthetic inode 和
+  superblock 回收值得借鉴；公开 README 在不同镜像/提交间存在 protocol 16/17 及
+  syscall TSR/VFS-only 的描述漂移，必须以本地提交为准。
+- NoMount：规则树、virtual directory topology、RCU children、lookup/readdir 和
+  无 mount 表污染适合规则层与 VFS 后端；其 LKM 仍不是 FUSE 全路径保证。
+- SUSFS：直接修改 namei/open/readdir 关键路径，且公开提交专门修复 FUSE
+  `getdents/readdir` 泄漏并限制 fuse/tmpfs 的 `SUS_PATH`，证明 FUSE 需要独立后端，
+  不能简单套用 inode 标记。
+- PathMask：syscall kretprobe 覆盖面广但有 inline、热点时序、fd 泄漏和只覆盖用户
+  syscall 的限制，只能作为 fallback/diagnostic。
+- HymoFS/ZeroMount：说明真正的 mountless path view 通常需要内核级 namei 集成或
+  定制内核；ZeroMount 的 VFS→OverlayFS→MagicMount 级联可借鉴为后备策略编排，
+  不能把 OverlayFS/MagicMount 当成无痕隐藏。
+- Linux VFS 文档明确 dcache 可直接返回已有 dentry，且同一 inode 可被多个 dentry
+  引用；这正是当前 iop-only `LEAK` 的根因。
+
+后续工作顺序改为：离线 Virtual View 模型和规则树 → 非 FUSE VFS shadow 后端 →
+FUSE namei coverage 探针/实验后端 → 各后端独立 HideLab 回归 → 设备白名单准入。未
+完成 FUSE namei coverage 前，不再把完整 iop/fop/dop 组合直接部署到设备。
+
+## 50. 2026-09-15：网上“Redmi K90 Pro Max 定制 GKI”路线核验
+
+网页检索和本地 `myron-prebuilt` 证据表明，社区所称“为 K90 Pro Max 定制 GKI”至少
+包含四种不同技术路线，不能把它们都视为“拥有 myron 完整内核源码”。
+
+| 路线 | 实际修改物 | 是否需要 myron 内核源码 | 对 Hide 的意义 |
+|---|---|---:|---|
+| KernelSU/SukiSU LKM | 保留 stock `boot`/kernel，只在 `init_boot` ramdisk 加载外部 `.ko` | 否 | 可做 operation shadow、探针和有限 fallback；不能覆盖未导出的 namei/FUSE 核心路径 |
+| 通用 GKI 重编译 | 用 AOSP `android16-6.12` 或其它 SM8850 源码生成新的 `Image`，替换 `boot.img` 的 kernel | 否，但需要兼容的 vendor 镜像/DT/模块 | 可把 SUSFS/namei 改动编入内核；必须以设备实测证明兼容，不能只看 6.12.23 |
+| stock kernel + vendor/GKI LKM | 使用 ROM 中原厂 kernel，按 GKI KMI 构建 `.ko`，通过 `system_dlkm/vendor_dlkm` 或 SukiSU loader 加载 | 通常不需要完整源码，但需要精确 KMI/符号输入 | 适合模块级功能；不能凭通用 `Module.symvers` 证明 FUSE/namei ABI |
+| 真正 myron kernel rebuild | 获取 Xiaomi myron 源码、defconfig、DT、Kleaf 输出、符号和签名后重建 kernel/模块 | 是 | 才能严格实现并验证 Hide 2.0 的内核级 FUSE/namei 修改 |
+
+### 社区项目实际采用的方式
+
+- `cofor1ae-byte/xiaomi-kernel-for_sm8850` 和 `lsfqxd2006/RainKissM_Mi17pm_GkiKernel`
+  的公开说明明确写着：6.12.23/6.12.38 主要基于 OnePlus 15、OnePlus Ace 6T 或
+  通用 AOSP/SM8850 源码，“其它同内核版本非 SM8850 机型部分可兼容”。这证明的是
+  平台级 GKI 可启动性，不是 `myron` 的精确 ABI。
+- `LokumKernel-SM8850/lokum-release` 只覆盖 Xiaomi 17 系列，并根据静态 ROM 分析
+  复用 stock Android 16/6.12 kernel payload；其 README 仍要求其它代号先用
+  `fastboot boot` 验证，不等于 K90 Pro Max 已获准入。
+- `haohao3001/android_device_xiaomi_myron` 是 Recovery/设备树项目，使用
+  `myron-prebuilt` 复制 kernel、DTB、DTBO 和模块，并不是可重建的 myron kernel tree。
+- 官方 MiCode 针对 myron 的 kernel source/device tree/vendor blob 请求仍是公开 issue；
+  这与本地 prebuilt 仓库只有二进制 kernel/模块、没有 `Module.symvers`、`vmlinux`、
+  `.config` 的结果一致。
+
+### 为什么通用 GKI 有时能启动
+
+Android GKI 将通用 kernel `Image`、vendor ramdisk、DT/DTBO、vendor/system DLKM 分离，
+并通过同一 LTS/KMI 约束模块接口。社区构建者通常只替换 `boot.img` 中的 `Image`，继续
+使用原厂 `vendor_boot`、`vendor_dlkm`、`system_dlkm` 和固件；如果设备实际依赖的
+符号、DT、模块 ABI 和启动参数没有发生不兼容变化，就可能正常启动。
+
+但以下做法不能制造精确兼容性：
+
+- 把 `6.12.23` 或 `-4k` 写入 localversion；
+- 把 OnePlus/Xiaomi 17 的 git hash 改成 `g16e473de48a3`；
+- 只复制 `vermagic` 或关闭版本检查；
+- 用另一个设备的 `Module.symvers` 代替 myron 的 CRC/CFI 输入。
+
+### 对 PathGuard 的直接结论
+
+如果目标是 **SUSFS/Hide 2.0 的 FUSE namei 隐藏**，最有希望的路线是：
+
+1. 先保留当前 stock kernel，继续用 SukiSU LKM 做规则层、探针和非 FUSE View backend。
+2. 另行构建一个可回滚的 SM8850/Android 16 GKI candidate，把 SUSFS/namei 改动编入
+   `Image`，只替换 boot kernel，保留原厂 vendor 分区。
+3. 通过 `fastboot boot` 或备份 slot 进行启动、硬件、模块、OTA 和 HideLab 验证。
+4. 只有设备侧 `uname -r`、KMI、system/vendor DLKM 依赖、pstore 和全量 HideLab 都
+   通过，才建立 candidate 白名单；否则继续保持 `unsupported`。
+
+因此，网上“定制 GKI 能用”回答的是“GKI kernel image 可以在相近 SM8850 设备上启动”，
+不是“已经获得了 K90 Pro Max 的精确内核 ABI”，更不是“FUSE 隐藏已经实现”。
+
+## 51. 2026-09-16：LunarKernel AnyKernel3 包审计
+
+审计对象：
+`refer/hide-refer/LunarKernel6.12-V1.7-fix1-20260915-223331-os4-612-g1faff188861d-AnyKernel3`。
+
+### 包内容与内核身份
+
+该目录是 AnyKernel3 刷机包，不是可重建的内核源码或 prepared output tree。包内只有预编译
+`Image`、`Resuki.lkpatch`、AnyKernel3 脚本、工具和 `lunarkernelmodule`；未发现源码、
+`.config`、`Module.symvers`、`vmlinux`、`vmlinux.symvers`、`System.map`、Kleaf manifest、
+DTB/DTBO 或 vendor/system DLKM 镜像。
+
+`Image` 中的 release 为：
+
+```text
+6.12.69-android16-6-g1faff188861d-LunarKernel-V1.7-fix1
+```
+
+包内 `version` 同时声明 4K pages、基础 `CONFIG_KSU=n`，以及可选的 ReSukiSU + SUSFS
+二进制修补。设备当前 release 是
+`6.12.23-android16-5-g16e473de48a3-abogki462654244-4k`，两者的 LTS 版本、GKI generation、
+commit 和 KMI build 均不同，不能把 LunarKernel `Image` 或补丁直接用于 myron。
+
+附加模块的 `capabilities.prop` 还包含
+`6.12.69-android16-6-gb1493ec68d4a-abogki514973465-4k`，与 Image 自身 release 不一致；
+该字段只能视为模块配置/展示值，不能作为设备 ABI 证据。
+
+### 刷写路径
+
+`anykernel.sh` 设置 `do.devicecheck=0`、`block=boot`、`is_slot_device=auto`，先检查运行内核
+主版本为 `6.12*`，再将包内 Image 重打包进当前 slot 的 boot 分区。若用户选择 root 版本，
+脚本执行 `lkpatch apply Image Resuki.lkpatch Image.resuki`，并用补丁目标 SHA-256 校验后替换
+Image；`Resuki.lkpatch` 文件头为 `LKPATCH1`，内部包含 BSDIFF 数据，属于针对特定 Image 的
+二进制差分，不是可移植源码补丁。
+
+`write_boot()` 虽然还会调用 `flash_generic vendor_boot`、`vendor_kernel_boot`、
+`vendor_dlkm`、`system_dlkm` 和 `dtbo`，但 `flash_generic` 仅在包内存在对应镜像时执行。
+本包没有这些文件，因此实际刷写范围是 boot（以及重打包时保留的原 boot ramdisk）；
+`do.devicecheck=0` 也意味着包本身不做机型 allowlist 防护。对 myron 直接刷写此类包属于高风险
+boot 替换实验，不能作为 PathGuard 模块的安装方式。
+
+### 对 Hide 2.0 的借鉴
+
+LunarKernel 可借鉴的只是发布工程流程：预编译 GKI Image、针对同一 Image 的可选二进制
+ReSukiSU/SUSFS patch、AnyKernel3 交互式选择、目标哈希校验、slot 感知和附加模块的事务式
+安装。其 `lunarkernelmodule` 只控制 CPU/调度/渲染、daemon、属性和 uname 展示，不包含
+VFS、FUSE、namei 或路径隐藏实现。
+
+因此本项目不能以该包作为 Hide 2.0 的内核基础。继续路线仍应是：保留 stock myron kernel
+做 LKM/规则层开发；另行取得与目标设备匹配的 GKI candidate 输入后，才构建独立 boot Image，
+保留原厂 vendor 分区并用备用 slot 或 `fastboot boot` 验证。没有精确 release/KMI、模块依赖、
+启动日志和 HideLab 全量证据前，设备准入和产品状态继续保持 `unsupported`。
+
+### 51.1 预编译 Image 的可能来源链
+
+包内没有源码仓库 URL、manifest、CI run ID 或构建脚本，无法从包本身证明唯一上游。现有证据
+支持以下分层判断：
+
+1. **公开 GKI 基线**：Image 的 `6.12.69-android16-6`、Clang/LLD 19.0.1 与 AOSP
+   `android16-6.12` 的 6.12.69 release line 一致。AOSP 的 release artifact 说明该线可提供
+   Image、System.map、vmlinux、vmlinux.symvers 和 pinned manifest；但本包没有携带这些配套
+   构建产物。
+2. **社区/私有补丁层**：Image release 的 commit `g1faff188861d` 在公开
+   `android.googlesource.com/kernel/common` 和 GitHub commit 搜索中没有命中，且 Image 包含
+   `LunarKernel-DEV: Tsukiko Hakura&arclightx`、`sched_ext`、`mi_sched_ext_ops`、
+   `Xiaomi dispatch zones` 等非纯 AOSP GKI 标识。这说明它不是未经修改的官方 GKI Image，
+   而是另一个构建树或私有补丁树的结果。
+3. **LunarKernel 打包层**：`version`、AnyKernel3 脚本和 `Resuki.lkpatch` 表明 LunarKernel
+   团队拿到该构建结果后，按自己的版本号重新打包，并提供针对该 Image SHA-256 的可选
+   ReSukiSU/SUSFS 二进制 patch。
+
+因此最稳妥的表述是：
+
+```text
+AOSP android16-6.12 / 6.12.69 GKI 基线
+        + 未公开的 Xiaomi/sched_ext/LunarKernel 补丁或构建树
+        -> LunarKernel Image
+        + 针对该 Image 的 ReSukiSU/SUSFS lkpatch
+        -> AnyKernel3 刷机包
+```
+
+这不是已证实的唯一源码来源。要把“可能来自”升级为可复现来源，必须取得发布者的
+`manifest_<build>.xml`、源码 commit、`.config`/defconfig、构建日志、`Module.symvers`/
+`vmlinux.symvers` 以及对应 CI artifact；仅凭 `uname` 字符串、6.12.69 版本号或 Image
+中的 commit 文本不能重建它。
+
+## 52. myron coverage probe 设备回归（2026-09-16）
+
+在清理陈旧的 `pathguard_hide1 ACTIVE` 绑定后，使用 SukiSU `ksud insmod` 加载 ABI v2
+只读 coverage probe。设备精确 release 为
+`6.12.23-android16-5-g16e473de48a3-abogki462654244-4k`，模块状态为 `READY`，required
+入口注册 `3/3`，总注册 `13/15`，所有已注册入口 `nmissed=0`。
+
+共享存储 FUSE 路径的只读回归命中 `iterate_dir`、`fuse_readdir`、`fuse_lookup`、
+`fuse_dentry_revalidate`、`path_openat` 和 `do_filp_open`；模块卸载后设备未重启，旧
+Hide 模块保持 `INACTIVE`。未执行 mutation，因此 `fuse_atomic_open` 尚无命中。
+
+该结果仅完成 coverage/namei 观测门禁，不改变 Hide 1.0 的 `unsupported` 状态。后续仍需
+实现并验证 operation-table shadow、mutation 封闭、正缓存失效、并发和完整 HideLab 回归。
+
+## 53. 只读 FUSE-aware backend 离线实现（2026-09-16）
+
+新增 `shadow_mode=4` 作为只读实验阶段：只发布 lookup、atomic_open、iterate_shared 和
+dentry revalidate wrapper；不替换九个 mutation callback。目录枚举过滤限定到绑定的 parent
+inode，INSTALL 在该模式只要求四项 capability，默认 mode 1 不变。
+
+宿主契约测试和 Android 16/6.12 Kbuild 均通过。该模块尚未在设备上 INSTALL/ENABLE；下一步
+是使用 mode 4 做受控设备回归，验证 positive/negative dentry cache、target/control namespace
+隔离和 dentry revalidate 行为。mutation 必须保持原始回调，任何泄漏、过阻、语义漂移或设备
+异常都阻止进入 Hide 1.0 admitted。
+
+后续离线审查修复了两个 mode 4 正确性问题：dentry shadow 安装的存在性检查改为在
+`dentry->d_lock` 下读取当前 `d_op`，避免把 RCU 元数据指针带出保护区；`iterate_shared`
+代理同步原始 actor 的 `ctx->pos`，并让被过滤项推进 native cookie。该修复不扩大只读
+backend 的语义范围，设备准入和 `unsupported` 状态不变。
+
+另行确认 mode 4 的生命周期边界：ENABLE 前已打开的目录 FD 保留原始 `file->f_op`，不会
+被后续 inode shadow 自动改写。HideLab 必须把该场景列为独立 LEAK 用例；在没有关闭并重建
+这些 FD 的情况下，不能把新打开 FD 的 readdir 通过结果外推到全部访问面。
+
+## 54. mode 4 首次受控设备结果（2026-09-16）
+
+myron 上以 `shadow_mode=4` 完成 generation `7101` 的 INSTALL/ENABLE。设备没有重启或内核
+异常，Target/Control Oracle 均未变化，DISABLE/CLEAR/rmmod 和恢复基线全部成功。
+
+HideLab baseline 仍判定为 `LEAK`：Target 的 readdir/getdents 和 Java/NIO 目录枚举成功过滤
+`Nagram`，但 Java exists、stat/lstat/access/open/openat 等直接解析仍然成功；Control 保持
+完全可见。说明 `iterate_shared` shadow 已在真实 FUSE 数据面工作，但 positive dentry、
+lookup 和 `d_revalidate` 链路尚未建立 observer 一致性。按 fail-closed 门禁，本轮在第一次
+LEAK 后停止，未继续并发或 mutation。
+
+下一阶段收缩为只读根因定位：给 lookup、atomic_open、d_revalidate、dentry shadow 安装和
+scope reject 分支增加可读取计数，分别做 cold dentry 与 positive warm dentry 实验。只有直接
+解析全部返回 ENOENT 后，才恢复 cache-order 和 concurrency；mutation 阶段继续冻结。
+
+轮次 73 已完成离线修复：ENABLE 会主动解析并 shadow 绑定的正 dentry；目标命中的
+`d_revalidate` 不再异步撤销 shadow。status 新增只读诊断计数，下一轮设备实验先读取计数，
+再判断是否进入 cold/warm cache 回归。mutation 和 Hide 1.0 admission 继续冻结。
+
+## 55. v3 诊断包真机只读回归通过（2026-09-16）
+
+在 myron 上完成 v3 `shadow_mode=4` 受控验证。Target UID/PID 为 `10551/20230`，mount
+namespace 为 `4026536018`，绑定 `/storage/emulated/0/Pictures/Nagram`，generation 为
+`7102`。LOAD、INSTALL、ENABLE 成功，诊断计数显示 lookup、atomic_open、readdir、
+d_revalidate 和正 dentry shadow 均实际命中；`dentry_install=32/32/0`。
+
+HideLab baseline 证据位于
+`build/device-evidence/hide1-fuse-ro-v3/20260916-233538/`，summary 为 `PASS`，Target/
+Control Oracle 和 fixture 均未变化。该结果只覆盖只读 FUSE-aware backend 的单设备、单 UID、
+单 namespace、单 basename 范围；未覆盖 mutation、cache-order、并发、生命周期和 OTA 准入。
+测试结束后 DISABLE、CLEAR、rmmod 成功，boot ID 未变化，设备节点消失。Hide 1.0 仍保持
+`unsupported`，不得据此激活或建立正式白名单。

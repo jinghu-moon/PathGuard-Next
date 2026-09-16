@@ -2,9 +2,14 @@ param(
     [Parameter(Mandatory = $true)] [string]$TargetApk,
     [Parameter(Mandatory = $true)] [string]$ControlApk,
     [switch]$GrantAllFilesAccess,
+    [switch]$GrantReadMediaImages,
+    [switch]$KeepTargetProcess,
+    [string]$ExistingHiddenPath,
     [switch]$RunMutations,
     [switch]$ConfirmMutation,
     [switch]$BaselineOnly,
+    [ValidatePattern('^[A-Za-z0-9._-]+$')]
+    [string]$Backend = 'pathguard-hide1',
     [string]$OutputDirectory = 'build/device-evidence/hide1-regression'
 )
 
@@ -18,8 +23,12 @@ $runId = [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')
 $out = Join-Path (Join-Path $root $OutputDirectory) $runId
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $common = @('-TargetApk', $TargetApk, '-ControlApk', $ControlApk,
-            '-OutputDirectory', "$OutputDirectory/$runId")
+            '-OutputDirectory', "$OutputDirectory/$runId",
+            '-Backend', $(if ($BaselineOnly) { 'none' } else { $Backend }))
 if ($GrantAllFilesAccess) { $common += '-GrantAllFilesAccess' }
+if ($GrantReadMediaImages) { $common += '-GrantReadMediaImages' }
+if ($KeepTargetProcess) { $common += '-KeepTargetProcess' }
+if ($ExistingHiddenPath) { $common += @('-ExistingHiddenPath', $ExistingHiddenPath) }
 if (-not $BaselineOnly) { $common += '-ExpectTargetHidden' }
 $scenarios = @('baseline', 'cache-order', 'concurrency', 'reliability')
 $results = [System.Collections.Generic.List[object]]::new()

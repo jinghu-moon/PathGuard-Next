@@ -48,6 +48,17 @@ struct pathguard_hide1_status {
     __u64 generation;
     __u64 operation_mask;
     __u64 parent_inode;
+    __u64 lookup_calls;
+    __u64 lookup_hidden;
+    __u64 atomic_open_calls;
+    __u64 atomic_open_hidden;
+    __u64 readdir_calls;
+    __u64 readdir_filtered;
+    __u64 d_revalidate_calls;
+    __u64 d_revalidate_hidden;
+    __u64 dentry_install_calls;
+    __u64 dentry_install_success;
+    __u64 dentry_install_failures;
     char kernel_release[128];
 };
 

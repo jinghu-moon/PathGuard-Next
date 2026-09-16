@@ -3,17 +3,25 @@ param(
     [Parameter(Mandatory = $true)] [string]$ControlApk,
     [string]$OutputDirectory = 'build/device-evidence/hidelab-baseline',
     [switch]$GrantAllFilesAccess,
+    [switch]$GrantReadMediaImages,
+    [switch]$KeepTargetProcess,
+    [string]$ExistingHiddenPath,
     [ValidateSet('baseline', 'cache-order', 'concurrency', 'reliability')]
     [string]$Scenario = 'baseline',
     [switch]$AttackMutations,
     [switch]$ConfirmMutation,
     [switch]$ExpectTargetHidden,
+    [ValidatePattern('^[A-Za-z0-9._-]+$')]
+    [string]$Backend = 'none',
     [ValidateRange(10, 180)] [int]$TimeoutSeconds = 60
 )
 
 $ErrorActionPreference = 'Stop'
 if ($AttackMutations -and -not $ConfirmMutation) {
     throw 'AttackMutations changes the shared-storage fixture; pass -ConfirmMutation explicitly'
+}
+if ($ExistingHiddenPath -and $AttackMutations) {
+    throw 'AttackMutations is not allowed with ExistingHiddenPath; use a disposable fixture'
 }
 $targetPackage = 'dev.pathguard.hideprobe.target'
 $controlPackage = 'dev.pathguard.hideprobe.control'
@@ -25,10 +33,18 @@ if ($devices.Count -ne 1) { throw "HideLab requires exactly one ready device, go
 $targetApkPath = (Resolve-Path -LiteralPath $TargetApk -ErrorAction Stop).Path
 $controlApkPath = (Resolve-Path -LiteralPath $ControlApk -ErrorAction Stop).Path
 $runId = [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')
-$fixtureRoot = "/storage/emulated/0/Pictures/PathGuardHideLab/$runId"
-$hiddenPath = "$fixtureRoot/hidden"
-if ($fixtureRoot -notmatch '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
-    throw "unexpected fixture path: $fixtureRoot"
+if ($ExistingHiddenPath) {
+    if ($ExistingHiddenPath -notmatch '^/storage/emulated/0/Pictures/[A-Za-z0-9._/-]+$' -or $ExistingHiddenPath.EndsWith('/')) {
+        throw "unexpected existing hidden path: $ExistingHiddenPath"
+    }
+    $hiddenPath = $ExistingHiddenPath
+    $fixtureRoot = $hiddenPath
+} else {
+    $fixtureRoot = "/storage/emulated/0/Pictures/PathGuardHideLab/$runId"
+    $hiddenPath = "$fixtureRoot/hidden"
+    if ($fixtureRoot -notmatch '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
+        throw "unexpected fixture path: $fixtureRoot"
+    }
 }
 $runOutput = Join-Path (Join-Path $root $OutputDirectory) $runId
 New-Item -ItemType Directory -Force -Path $runOutput | Out-Null
@@ -51,6 +67,7 @@ function Get-OracleSnapshot([string]$Name) {
 }
 
 function Reset-Fixture {
+    if ($ExistingHiddenPath) { return }
     if ($fixtureRoot -notmatch '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
         throw "refusing to reset unexpected fixture path: $fixtureRoot"
     }
@@ -58,7 +75,21 @@ function Reset-Fixture {
 }
 
 function Invoke-Probe([string]$Role, [string]$Package) {
-    Invoke-Adb @('shell', 'am', 'force-stop', $Package)
+    $pinnedPid = $null
+    $pinnedNamespace = $null
+    if ($Role -eq 'target' -and $KeepTargetProcess) {
+        $pinnedPid = ((& $adb shell pidof $Package 2>$null) -join '').Trim()
+        if (-not $pinnedPid -or $pinnedPid -notmatch '^\d+$') {
+            throw 'KeepTargetProcess requires the already-bound target PID to be alive'
+        }
+        $pinnedNamespace = ((& $adb shell su -c "readlink /proc/$pinnedPid/ns/mnt" 2>$null) -join '').Trim()
+        if (-not $pinnedNamespace -or $pinnedNamespace -notmatch '^mnt:\[\d+\]$') {
+            throw "cannot read target mount namespace for PID $pinnedPid"
+        }
+    }
+    if (-not ($KeepTargetProcess -and $Role -eq 'target')) {
+        Invoke-Adb @('shell', 'am', 'force-stop', $Package)
+    }
     $startArguments = @('shell', 'am', 'start', '-W', '-n', "$Package/dev.pathguard.hideprobe.ProbeActivity", '--esa', 'observe_paths', $hiddenPath, '--es', 'scenario', $Scenario, '--es', 'run_id', $runId)
     if ($AttackMutations) { $startArguments += @('--ez', 'attack_mutations', 'true') }
     Invoke-Adb $startArguments
@@ -66,12 +97,42 @@ function Invoke-Probe([string]$Role, [string]$Package) {
     do {
         Start-Sleep -Milliseconds 250
         $status = ((& $adb shell run-as $Package cat files/hide-h0/status 2>$null) -join '').Trim()
-    } while ($status -ne 'complete' -and -not $status.StartsWith('failed:') -and [DateTimeOffset]::Now -lt $deadline)
-    if ($status -ne 'complete') { throw "HideLab $Role did not complete: $status" }
+        $metadataReady = $false
+        if ($status -eq 'complete') {
+            $metadataProbe = ((& $adb shell run-as $Package cat files/hide-h0/metadata.json 2>$null) -join '').Trim()
+            if ($metadataProbe) {
+                try {
+                    $metadataCandidate = $metadataProbe | ConvertFrom-Json -ErrorAction Stop
+                    $metadataReady = $metadataCandidate.run_id -eq $runId -and
+                        $metadataCandidate.scenario -eq $Scenario
+                } catch {
+                    $metadataReady = $false
+                }
+            }
+        }
+    } while ((($status -ne 'complete') -or -not $metadataReady) -and
+             -not $status.StartsWith('failed:') -and
+             [DateTimeOffset]::Now -lt $deadline)
+    if ($status -ne 'complete' -or -not $metadataReady) {
+        throw "HideLab $Role did not complete current run: $status"
+    }
     & $adb exec-out run-as $Package cat files/hide-h0/metadata.json |
         Set-Content -LiteralPath (Join-Path $runOutput "$Role-metadata.json") -Encoding utf8
     & $adb exec-out run-as $Package cat files/hide-h0/observations.jsonl |
         Set-Content -LiteralPath (Join-Path $runOutput "$Role-observations.jsonl") -Encoding utf8
+    if ($Role -eq 'target' -and $KeepTargetProcess) {
+        $metadata = Get-Content -Raw -LiteralPath (Join-Path $runOutput "$Role-metadata.json") |
+            ConvertFrom-Json -ErrorAction Stop
+        $pidNow = ((& $adb shell pidof $Package 2>$null) -join '').Trim()
+        if (-not $pidNow -or $pidNow -notmatch '^\d+$' -or $pidNow -ne $pinnedPid) {
+            throw 'HideLab target exited while namespace was pinned'
+        }
+        $nsNow = ((& $adb shell su -c "readlink /proc/$pidNow/ns/mnt" 2>$null) -join '').Trim()
+        if ($nsNow -ne $pinnedNamespace -or
+            ($metadata.mount_namespace -and $nsNow -ne $metadata.mount_namespace)) {
+            throw "HideLab target mount namespace changed: $pinnedNamespace -> $nsNow"
+        }
+    }
 }
 
 function Assert-BaselineVisible([string]$Role) {
@@ -201,8 +262,17 @@ function Assert-Reliability([string]$Role, [bool]$ExpectHidden) {
 }
 
 try {
-    Invoke-Adb @('install', '-r', $targetApkPath)
+    if ($KeepTargetProcess) {
+        $targetPackagePath = ((& $adb shell pm path $targetPackage 2>$null) -join '').Trim()
+        if (-not $targetPackagePath) { throw 'KeepTargetProcess requires an installed target APK' }
+    } else {
+        Invoke-Adb @('install', '-r', $targetApkPath)
+    }
     Invoke-Adb @('install', '-r', $controlApkPath)
+    if ($GrantReadMediaImages) {
+        Invoke-Adb @('shell', 'pm', 'grant', $targetPackage, 'android.permission.READ_MEDIA_IMAGES')
+        Invoke-Adb @('shell', 'pm', 'grant', $controlPackage, 'android.permission.READ_MEDIA_IMAGES')
+    }
     if ($GrantAllFilesAccess) {
         Invoke-Adb @('shell', 'appops', 'set', $targetPackage, 'MANAGE_EXTERNAL_STORAGE', 'allow')
         Invoke-Adb @('shell', 'appops', 'set', $controlPackage, 'MANAGE_EXTERNAL_STORAGE', 'allow')
@@ -249,7 +319,7 @@ try {
     $after = Get-OracleSnapshot 'oracle-after'
     if (-not $AttackMutations -and $before -ne $after) { throw 'Root Oracle detected fixture mutation during no-backend baseline' }
     $summary = [ordered]@{
-        schema = 2; run_id = $runId; phase = $Scenario; backend = 'none'; attack_mutations = [bool]$AttackMutations; fixture_root = $fixtureRoot
+        schema = 2; run_id = $runId; phase = $Scenario; backend = $Backend; attack_mutations = [bool]$AttackMutations; fixture_root = $fixtureRoot
         target_package = $targetPackage; control_package = $controlPackage
         fixture_unchanged = ($before -eq $after); target_oracle_changed = $targetOracleChanged; control_oracle_changed = $controlOracleChanged
         conclusion = if ($ExpectTargetHidden -and $targetOracleChanged) { 'DESTRUCTIVE_FAIL' } elseif ($ExpectTargetHidden -and $controlError) { 'OVERBLOCK' } elseif ($ExpectTargetHidden -and $targetError -like 'SEMANTIC_DRIFT:*') { 'SEMANTIC_DRIFT' } elseif ($ExpectTargetHidden -and $targetError) { 'LEAK' } elseif ($ExpectTargetHidden) { 'PASS' } elseif ($AttackMutations) { 'BASELINE_MUTATION_VISIBLE' } elseif ($Scenario -eq 'cache-order') { 'BASELINE_CACHE_ORDER_VISIBLE_NOT_HIDE_PASS' } else { 'BASELINE_VISIBLE_NOT_HIDE_PASS' }
@@ -258,7 +328,7 @@ try {
     Set-Content -LiteralPath (Join-Path $runOutput 'summary.json') -Value $summary -Encoding utf8
     Write-Output "HIDELAB_EVIDENCE:$runOutput"
 } finally {
-    if ($fixtureRoot -match '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
+    if (-not $ExistingHiddenPath -and $fixtureRoot -match '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
         Invoke-Root "rm -rf $fixtureRoot" 2>$null
     }
 }

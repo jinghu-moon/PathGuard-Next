@@ -56,8 +56,8 @@ case "${1:-status}" in
     KSU="$(ksud_bin)" || die "SukiSU/KernelSU ksud not found"
     MODE="${2:-1}"
     case "$MODE" in
-      0|1|2|3) ;;
-      *) die "shadow mode must be 0(all), 1(i_op), 2(f_op), or 3(d_op)" ;;
+      0|1|2|3|4) ;;
+      *) die "shadow mode must be 0(all), 1(i_op), 2(f_op), 3(d_op), or 4(fuse-ro)" ;;
     esac
     log "loading $KO through $KSU with shadow_mode=$MODE"
     "$KSU" insmod "$KO" "shadow_mode=$MODE" || die "ksud insmod failed"
@@ -92,7 +92,7 @@ case "${1:-status}" in
   *)
     cat >&2 <<EOF
 PathGuard Hide 1.0 Lab: manual controls only
-  $0 load [mode: 1=i_op, 2=f_op, 3=d_op, 0=all]
+  $0 load [mode: 1=i_op, 2=f_op, 3=d_op, 4=fuse-ro, 0=all]
   $0 status
   $0 install <uid> <pid> <generation> <parent> <basename>
   $0 enable <pid> <generation>   # high-risk; may reboot this device

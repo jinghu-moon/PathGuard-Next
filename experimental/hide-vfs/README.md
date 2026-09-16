@@ -26,6 +26,18 @@ mutations. Other fsuid or mount-namespace observers call the saved callbacks.
 The implementation is still a fixed-device prototype: it has one binding,
 one basename, and no production admission.
 
+`shadow_mode=4` is the read-only FUSE-aware stage. It installs only lookup,
+atomic_open, iterate_shared and dentry revalidation wrappers, scopes directory
+filtering to the pinned parent inode, and does not replace mutation callbacks.
+It remains an experiment and cannot be admitted as Hide 1.0 without HideLab
+cache, namespace, concurrency and lifecycle evidence.
+
+The f_op bridge applies to directory files opened after ENABLE. A directory FD
+that was opened before ENABLE retains the filesystem's original `file->f_op` and
+is therefore an explicit read-only regression case, not an implicit pass. The
+device gate must close or recreate such FDs before claiming readdir coverage;
+otherwise the result is a LEAK and mode 4 remains unsupported.
+
 The install caller must already be in the target mount namespace. This is an
 intentional fail-closed constraint: `kern_path()` resolves in the caller's
 namespace, so a cross-namespace call returns `EXDEV` instead of binding a
@@ -46,6 +58,8 @@ device release allowlist, runtime symbol checks, CFI constraints, and device
 regression requirements remain mandatory.
 
 `hide1_control` supports `status`, `install`, `enable`, `disable`, and `clear`.
+The status line also exposes read-only mode-4 counters for lookup,
+atomic_open, readdir, dentry revalidation, and dentry shadow installation.
 `DISABLE` preserves an inactive binding; `CLEAR` releases it. Failed replacement
 installs are transactional and preserve the previous binding.
 

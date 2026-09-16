@@ -40,10 +40,16 @@ int main(int argc, char **argv)
 	printf("abi_version=%" PRIu32 " size=%" PRIu32 " state=%" PRIu32
 	       " last_error=%" PRId32 " operation_mask=0x%016" PRIx64
 	       " parent_inode=%" PRIu64 " mode=0%o dev=%" PRIu32 ":%" PRIu32
-	       " fs=%s parent=%s release=%s\n", status.abi_version, status.size,
+	       " mount=0x%016" PRIx64 " sb=0x%016" PRIx64
+	       " inode=0x%016" PRIx64 " dentry=0x%016" PRIx64
+	       " i_op=0x%016" PRIx64 " f_op=0x%016" PRIx64
+	       " d_op=0x%016" PRIx64 " fs=%s parent=%s release=%s\n", status.abi_version, status.size,
 	       status.state, status.last_error, status.operation_mask,
 	       status.parent_inode, status.parent_mode, status.parent_dev_major,
-	       status.parent_dev_minor, status.filesystem, status.parent,
+	       status.parent_dev_minor, status.mount_address,
+	       status.superblock_address, status.inode_address,
+	       status.dentry_address, status.i_op_address, status.f_op_address,
+	       status.d_op_address, status.filesystem, status.parent,
 	       status.kernel_release);
 	close(fd);
 	return 0;

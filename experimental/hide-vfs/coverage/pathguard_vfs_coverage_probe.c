@@ -22,6 +22,8 @@ struct pathguard_coverage_entry {
 	struct kprobe probe;
 	atomic64_t hits;
 	const char *name;
+	bool required;
+	int register_error;
 };
 
 static int coverage_pre_handler(struct kprobe *probe, struct pt_regs *regs)
@@ -36,8 +38,21 @@ static int coverage_pre_handler(struct kprobe *probe, struct pt_regs *regs)
 
 static struct pathguard_coverage_entry coverage_entries[] = {
 	{
+		.probe = { .symbol_name = "lookup_fast", .pre_handler = coverage_pre_handler },
+		.name = "lookup_fast",
+	},
+	{
+		.probe = { .symbol_name = "lookup_slow", .pre_handler = coverage_pre_handler },
+		.name = "lookup_slow",
+	},
+	{
 		.probe = { .symbol_name = "path_openat", .pre_handler = coverage_pre_handler },
 		.name = "path_openat",
+		.required = true,
+	},
+	{
+		.probe = { .symbol_name = "open_last_lookups", .pre_handler = coverage_pre_handler },
+		.name = "open_last_lookups",
 	},
 	{
 		.probe = { .symbol_name = "fuse_atomic_open", .pre_handler = coverage_pre_handler },
@@ -46,6 +61,7 @@ static struct pathguard_coverage_entry coverage_entries[] = {
 	{
 		.probe = { .symbol_name = "iterate_dir", .pre_handler = coverage_pre_handler },
 		.name = "iterate_dir",
+		.required = true,
 	},
 	{
 		.probe = { .symbol_name = "fuse_readdir", .pre_handler = coverage_pre_handler },
@@ -56,8 +72,33 @@ static struct pathguard_coverage_entry coverage_entries[] = {
 		.name = "fuse_dentry_revalidate",
 	},
 	{
+		.probe = { .symbol_name = "fuse_lookup", .pre_handler = coverage_pre_handler },
+		.name = "fuse_lookup",
+	},
+	{
+		.probe = { .symbol_name = "fuse_filldir", .pre_handler = coverage_pre_handler },
+		.name = "fuse_filldir",
+	},
+	{
 		.probe = { .symbol_name = "do_filp_open", .pre_handler = coverage_pre_handler },
 		.name = "do_filp_open",
+		.required = true,
+	},
+	{
+		.probe = { .symbol_name = "filename_lookup", .pre_handler = coverage_pre_handler },
+		.name = "filename_lookup",
+	},
+	{
+		.probe = { .symbol_name = "link_path_walk", .pre_handler = coverage_pre_handler },
+		.name = "link_path_walk",
+	},
+	{
+		.probe = { .symbol_name = "vfs_getattr", .pre_handler = coverage_pre_handler },
+		.name = "vfs_getattr",
+	},
+	{
+		.probe = { .symbol_name = "vfs_statx", .pre_handler = coverage_pre_handler },
+		.name = "vfs_statx",
 	},
 };
 
@@ -81,6 +122,8 @@ static long coverage_ioctl(struct file *file, unsigned int command,
 		snapshot.counters[index].hits = atomic64_read(&coverage_entries[index].hits);
 		snapshot.counters[index].nmissed = READ_ONCE(coverage_entries[index].probe.nmissed);
 		snapshot.counters[index].registered = coverage_entries[index].probe.addr != NULL;
+		snapshot.counters[index].register_error = coverage_entries[index].register_error;
+		snapshot.counters[index].required = coverage_entries[index].required;
 		strscpy(snapshot.counters[index].name, coverage_entries[index].name,
 			sizeof(snapshot.counters[index].name));
 	}
@@ -109,6 +152,7 @@ static void unregister_entries(unsigned int count)
 		--count;
 		if (coverage_entries[count].probe.addr != NULL)
 			unregister_kprobe(&coverage_entries[count].probe);
+		coverage_entries[count].probe.addr = NULL;
 	}
 }
 
@@ -121,27 +165,38 @@ static int __init pathguard_coverage_init(void)
 		return -ENODEV;
 	strscpy(coverage_status.kernel_release, init_utsname()->release,
 		sizeof(coverage_status.kernel_release));
+	coverage_status.required_count = 0;
 	for (index = 0; index < ARRAY_SIZE(coverage_entries); ++index) {
+		if (coverage_entries[index].required)
+			++coverage_status.required_count;
 		ret = register_kprobe(&coverage_entries[index].probe);
 		if (ret) {
-			coverage_status.last_error = ret;
-			unregister_entries(index);
-			pr_err("pathguard_vfs_coverage_probe: register %s failed: %d\n",
-			       coverage_entries[index].name, ret);
-			return ret;
+			coverage_entries[index].register_error = ret;
+			pr_warn("pathguard_vfs_coverage_probe: register %s unavailable: %d\n",
+			        coverage_entries[index].name, ret);
+			continue;
 		}
 		++coverage_status.registered_count;
+		if (coverage_entries[index].required)
+			++coverage_status.required_registered_count;
 	}
-	coverage_status.state = 1;
-	coverage_status.last_error = 0;
+	if (coverage_status.required_registered_count == coverage_status.required_count)
+		coverage_status.state = PATHGUARD_VFS_COVERAGE_STATE_READY;
+	else if (coverage_status.required_registered_count != 0)
+		coverage_status.state = PATHGUARD_VFS_COVERAGE_STATE_PARTIAL;
+	else
+		coverage_status.state = PATHGUARD_VFS_COVERAGE_STATE_UNSUPPORTED;
+	coverage_status.last_error = coverage_status.state == PATHGUARD_VFS_COVERAGE_STATE_READY ? 0 : -ENOSYS;
 	ret = misc_register(&coverage_device);
 	if (ret) {
 		unregister_entries(ARRAY_SIZE(coverage_entries));
 		coverage_status.registered_count = 0;
 		return ret;
 	}
-	pr_info("pathguard_vfs_coverage_probe: registered=%u release=%s\n",
-		coverage_status.registered_count, coverage_status.kernel_release);
+	pr_info("pathguard_vfs_coverage_probe: registered=%u/%u required=%u/%u state=%u release=%s\n",
+		coverage_status.registered_count, coverage_status.probe_count,
+		coverage_status.required_registered_count, coverage_status.required_count,
+		coverage_status.state, coverage_status.kernel_release);
 	return 0;
 }
 

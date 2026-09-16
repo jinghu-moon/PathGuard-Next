@@ -92,6 +92,13 @@ static long preflight_ioctl(struct file *file, unsigned int command,
 		preflight_status.parent_mode = inode->i_mode;
 		preflight_status.parent_dev_major = MAJOR(inode->i_sb->s_dev);
 		preflight_status.parent_dev_minor = MINOR(inode->i_sb->s_dev);
+		preflight_status.mount_address = (u64)(unsigned long)path.mnt;
+		preflight_status.superblock_address = (u64)(unsigned long)inode->i_sb;
+		preflight_status.inode_address = (u64)(unsigned long)inode;
+		preflight_status.dentry_address = (u64)(unsigned long)path.dentry;
+		preflight_status.i_op_address = (u64)(unsigned long)inode->i_op;
+		preflight_status.f_op_address = (u64)(unsigned long)inode->i_fop;
+		preflight_status.d_op_address = (u64)(unsigned long)path.dentry->d_op;
 		strscpy(preflight_status.filesystem, inode->i_sb->s_type->name,
 			sizeof(preflight_status.filesystem));
 		strscpy(preflight_status.parent, request.parent,

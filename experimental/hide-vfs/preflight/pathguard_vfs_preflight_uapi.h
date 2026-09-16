@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define PATHGUARD_VFS_PREFLIGHT_ABI_VERSION 1U
+#define PATHGUARD_VFS_PREFLIGHT_ABI_VERSION 2U
 #define PATHGUARD_VFS_PREFLIGHT_PATH_MAX 384U
 #define PATHGUARD_VFS_PREFLIGHT_FS_NAME_MAX 32U
 
@@ -41,6 +41,14 @@ struct pathguard_vfs_preflight_status {
 	__u32 parent_mode;
 	__u32 parent_dev_major;
 	__u32 parent_dev_minor;
+	/* Diagnostic identities are restricted to the root-readable probe. */
+	__u64 mount_address;
+	__u64 superblock_address;
+	__u64 inode_address;
+	__u64 dentry_address;
+	__u64 i_op_address;
+	__u64 f_op_address;
+	__u64 d_op_address;
 	char filesystem[PATHGUARD_VFS_PREFLIGHT_FS_NAME_MAX];
 	char parent[PATHGUARD_VFS_PREFLIGHT_PATH_MAX];
 	char kernel_release[128];

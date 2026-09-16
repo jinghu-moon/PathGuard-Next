@@ -51,6 +51,58 @@ int main() {
     const std::string restore = FunctionBody(
         source, "static int hide1_restore_dentry_shadows",
         "static void hide1_free_dentry_shadows");
+    const std::string atomic_open = FunctionBody(
+        source, "static int hide1_atomic_open(struct inode *dir",
+        "struct hide1_dir_proxy");
+    const std::string dentry_presence = FunctionBody(
+        source, "static bool hide1_dentry_shadow_present",
+        "static int hide1_install_dentry_shadow");
+    const std::string iterate_shared = FunctionBody(
+        source, "static int hide1_iterate_shared(struct file *file",
+        "static int hide1_d_revalidate");
+    const std::string dir_actor = FunctionBody(
+        source, "static bool hide1_dir_actor(struct dir_context *ctx",
+        "static int hide1_iterate_shared");
+    const std::string d_revalidate = FunctionBody(
+        source, "static int hide1_d_revalidate(struct dentry *dentry",
+        "static bool hide1_mutation_blocked");
+    const std::string install_mode = FunctionBody(
+        source, "static int hide1_shadow_install_locked",
+        "static int hide1_shadow_uninstall_locked");
+    const std::string commit = FunctionBody(
+        source, "static void hide1_commit_binding",
+        "static long hide1_ioctl");
+
+    assert(source.find("static int hide1_shadow_mode = 1;") !=
+           std::string::npos);
+    assert(source.find("hide1_shadow_mode == 4") != std::string::npos);
+    assert(source.find("static bool hide1_mode_is_readonly(void)") !=
+           std::string::npos);
+    assert(source.find("hide1_required_operation_mask") != std::string::npos);
+    assert(atomic_open.find("hide1_install_dentry_shadow") ==
+           std::string::npos);
+    assert(atomic_open.find("d_drop(") == std::string::npos);
+    assert(dentry_presence.find("spin_lock(&dentry->d_lock)") !=
+           std::string::npos);
+    assert(dentry_presence.find("hide1_dop_lookup_rcu") ==
+           std::string::npos);
+    assert(iterate_shared.find("file_inode(file) != binding->parent_inode") !=
+           std::string::npos);
+    assert(iterate_shared.find("proxy.dir_inode = file_inode(file)") !=
+           std::string::npos);
+    assert(dir_actor.find("proxy->ctx.pos = offset") !=
+           std::string::npos);
+    assert(dir_actor.find("proxy->orig->pos = proxy->ctx.pos") !=
+           std::string::npos);
+    assert(dir_actor.find("proxy->ctx.pos = proxy->orig->pos") !=
+           std::string::npos);
+    assert(d_revalidate.find("hide1_d_revalidate_hidden") !=
+           std::string::npos);
+    assert(d_revalidate.find("set_bit(HIDE1_DOP_STALE") == std::string::npos);
+    assert(d_revalidate.find("schedule_work(&hide1_dop_stale_work)") ==
+           std::string::npos);
+    assert(install_mode.find("if (!hide1_mode_is_readonly())") !=
+           std::string::npos);
 
     assert(uninstall.find("!binding->dentry_shadows.next") == std::string::npos);
     RequireOrder(uninstall, {
@@ -89,6 +141,20 @@ int main() {
     assert(source.find("HIDE1_LIFECYCLE_RESTORE") != std::string::npos);
     assert(source.find("struct hide1_iop_meta") != std::string::npos);
     assert(source.find("struct hide1_fop_meta") != std::string::npos);
+    assert(source.find("struct task_struct *target_task") != std::string::npos);
+    assert(source.find("same_thread_group(current, binding->target_task)") !=
+           std::string::npos);
+    assert(source.find("put_task_struct(binding->target_task)") !=
+           std::string::npos);
+    assert(commit.find("hide1_binding = *binding") == std::string::npos);
+    RequireOrder(commit, {
+        "hide1_release_binding(&hide1_binding)",
+        "hide1_binding.target_task = binding->target_task",
+        "hide1_binding.target_nsproxy = binding->target_nsproxy",
+        "INIT_LIST_HEAD(&hide1_binding.dentry_shadows)",
+        "spin_lock_init(&hide1_binding.dentry_lock)",
+        "memset(binding, 0, sizeof(*binding))",
+    });
     assert(source.find("DEFINE_HASHTABLE(hide1_iop_table") != std::string::npos);
     assert(source.find("DEFINE_HASHTABLE(hide1_fop_table") != std::string::npos);
     assert(source.find("DEFINE_HASHTABLE(hide1_dop_table") != std::string::npos);
@@ -96,12 +162,28 @@ int main() {
     assert(source.find("atomic_t hide1_fop_active") != std::string::npos);
     assert(source.find("atomic_t hide1_dop_active") != std::string::npos);
     assert(source.find("atomic_t open_count") != std::string::npos);
+    assert(source.find("hide1_lookup_calls") != std::string::npos);
+    assert(source.find("hide1_dentry_install_success") != std::string::npos);
+    assert(source.find("status.lookup_calls") != std::string::npos);
     assert(source.find("hide1_dop_stale_workfn") != std::string::npos);
+    const std::string stale_worker = FunctionBody(
+        source, "static void hide1_dop_stale_workfn",
+        "static bool hide1_is_target_observer");
+    RequireOrder(stale_worker, {
+        "synchronize_srcu(&hide1_srcu);",
+        "synchronize_rcu();",
+        "wait_event(hide1_dop_wait, atomic_read(&hide1_dop_active) == 0);",
+        "hide1_free_dentry_shadows(&retired);",
+    });
     assert(source.find("HIDE1_LIFECYCLE_STOP_NEW") != std::string::npos);
     assert(source.find("HIDE1_LIFECYCLE_DRAINING") != std::string::npos);
     assert(source.find("hide1_status.state == PATHGUARD_HIDE1_STATE_ACTIVE ||") !=
            std::string::npos);
     assert(source.find("return -EBUSY") != std::string::npos);
+    assert(source.find("if (hide1_status.state == PATHGUARD_HIDE1_STATE_ACTIVE) {") !=
+           std::string::npos);
+    assert(source.find("if (hide1_status.state == PATHGUARD_HIDE1_STATE_INACTIVE) {") !=
+           std::string::npos);
     assert(source.find("fm->ingress.open = hide1_fop_open") !=
            std::string::npos);
     assert(source.find("fm->live.release = hide1_fop_release") !=
@@ -110,6 +192,16 @@ int main() {
            std::string::npos);
     assert(uninstall.find("Preflight all ingress pointers") != std::string::npos);
     assert(uninstall.find("return -EAGAIN") != std::string::npos);
+    const std::string install = FunctionBody(
+        source, "static int hide1_shadow_install_locked",
+        "static int hide1_shadow_uninstall_locked");
+    RequireOrder(install, {
+        "rollback:",
+        "hash_del_rcu(&shadow->iop_meta->node)",
+        "synchronize_rcu();",
+        "hide1_drain_callbacks();",
+        "kfree(im)",
+    });
     const std::string reset = FunctionBody(
         source, "static int hide1_reset_locked",
         "static int hide1_prepare_binding");
@@ -124,5 +216,6 @@ int main() {
         "experimental/hide-vfs/package/bin/hide1ctl");
     assert(wrapper.find("exec >> \"$LOG\" 2>&1") == std::string::npos);
     assert(wrapper.find("run_control()") != std::string::npos);
+    assert(wrapper.find("MODE=\"${2:-1}\"") != std::string::npos);
     return 0;
 }
