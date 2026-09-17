@@ -3356,3 +3356,29 @@ target mount namespace 读取和结束时复核；该修复已通过现有三项
 `state=0/lifecycle=1`，无活动 callback、fd 或 mutation 计数；未执行 ENABLE、INSTALL 或
 任何 mutation。设备解锁后才能继续 disposable fixture、INSTALL/ENABLE 及真机 mutation
 回归，产品状态仍为 `Hide 1.0 = unsupported`。
+
+### 轮次 79：mutation-v3 正确 parent 绑定与 cache-order 通过（2026-09-17）
+
+设备解锁后从 `/data/local/tmp/pathguard-hide1-v3.ko` 加载同一 DDK 产物。首次实验误将
+`parent` 绑定为 fixture 的 `hidden` 目录并再次使用 basename `hidden`，目标实际变成
+`hidden/hidden`，HideLab 报 `LEAK`。该结果判定为实验编排错误而非后端结论，立即执行
+`DISABLE -> CLEAR -> rmmod`，模块消失且设备未重启。
+
+随后按正确拓扑重新绑定：
+
+```text
+parent=/storage/emulated/0/Pictures/PathGuardHideLab/20260917-181500
+basename=hidden
+uid=10552 pid=22948 mnt_ns=4026536088 generation=8102
+```
+
+`ENABLE` 成功，boot ID 未变化。HideLab cache-order 证据目录为
+`build/device-evidence/hide1-mutation-v3-cache-order-correct/20260917-205450/`，cold
+open、cold opendir、stat-then-open、readdir-then-open、positive-warm-then-open 五种
+顺序全部通过；Target 返回 `ENOENT`，Control 保持可见，两个 Root Oracle 与 fixture 均未
+变化，summary 为 `PASS`。status 计数为 `lookup=34/33`、`atomic_open=27/27`、
+`readdir=75/24`、`revalidate=379/84`、`dentry_install=35/35/0`，active/open/mutation
+计数均为 0。
+
+本轮只证明正确 parent 绑定下的只读 cache-order；并发、mutation、生命周期和设备准入
+仍未完成，产品状态继续为 `Hide 1.0 = unsupported`。
