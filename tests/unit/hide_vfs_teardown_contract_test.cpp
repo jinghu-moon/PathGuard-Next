@@ -203,6 +203,13 @@ int main() {
     assert(source.find("struct task_struct *target_task") != std::string::npos);
     assert(source.find("same_thread_group(current, binding->target_task)") !=
            std::string::npos);
+    assert(source.find("get_nsproxy(nsproxy)") != std::string::npos);
+    assert(source.find("put_nsproxy(binding->target_nsproxy)") !=
+           std::string::npos);
+    assert(source.find("current->nsproxy->mnt_ns != binding->target_mnt_ns") !=
+           std::string::npos);
+    assert(source.find("binding->target_mnt_ns = nsproxy->mnt_ns") !=
+           std::string::npos);
     assert(source.find("static bool hide1_target_exited_locked") !=
            std::string::npos);
     assert(target_exited.find("PF_EXITING") != std::string::npos);
