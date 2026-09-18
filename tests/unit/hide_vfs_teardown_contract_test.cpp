@@ -54,6 +54,9 @@ int main() {
     const std::string atomic_open = FunctionBody(
         source, "static int hide1_atomic_open(struct inode *dir",
         "struct hide1_dir_proxy");
+    const std::string lookup = FunctionBody(
+        source, "static struct dentry *hide1_lookup(struct inode *dir",
+        "static int hide1_atomic_open(struct inode *dir");
     const std::string dentry_presence = FunctionBody(
         source, "static bool hide1_dentry_shadow_present",
         "static int hide1_install_dentry_shadow");
@@ -86,6 +89,14 @@ int main() {
     assert(atomic_open.find("hide1_mutation_blocked_calls") !=
            std::string::npos);
     assert(atomic_open.find("d_drop(") == std::string::npos);
+    RequireOrder(lookup, {
+        "orig->lookup(dir, dentry, flags)",
+        "struct dentry *resolved = result ? result : dentry",
+        "hide1_install_dentry_shadow(binding, resolved",
+        "d_drop(resolved)",
+    });
+    assert(lookup.find("hide1_is_target_observer(binding)") ==
+           std::string::npos);
     assert(dentry_presence.find("spin_lock(&dentry->d_lock)") !=
            std::string::npos);
     assert(dentry_presence.find("hide1_dop_lookup_rcu") ==
@@ -104,13 +115,24 @@ int main() {
            std::string::npos);
     assert(d_revalidate.find("hide1_mark_dentry_stale(meta)") !=
            std::string::npos);
+    assert(d_revalidate.find("d_unhashed(dentry)") == std::string::npos);
+    assert(d_revalidate.find("synthetic_negative") !=
+           std::string::npos);
+    assert(d_revalidate.find("cache_generation") !=
+           std::string::npos);
+    assert(d_revalidate.find("d_is_negative(dentry)") !=
+           std::string::npos);
+    assert(d_revalidate.find("ret = 1") != std::string::npos);
+    assert(d_revalidate.find("ret = 0") != std::string::npos);
+    assert(d_revalidate.find("A synthetic target-only negative") !=
+           std::string::npos);
     const std::string stale_marker = FunctionBody(
         source, "static void hide1_mark_dentry_stale",
         "static void hide1_free_fop_meta");
     RequireOrder(stale_marker, {
         "PATHGUARD_HIDE1_LIFECYCLE_RUNNING",
         "test_and_set_bit(HIDE1_DOP_STALE",
-        "schedule_work(&hide1_dop_stale_work)",
+        "schedule_delayed_work(&hide1_dop_stale_work",
     });
     assert(install_mode.find("if (!hide1_mode_is_readonly())") !=
            std::string::npos);
@@ -142,7 +164,7 @@ int main() {
 
     RequireOrder(restore, {
         "spin_lock(&meta->dentry->d_lock)",
-        "WRITE_ONCE(meta->dentry->d_flags, meta->orig_flags)",
+        "meta->dentry->d_flags &= ~DCACHE_OP_REVALIDATE",
         "smp_wmb()",
         "WRITE_ONCE(meta->dentry->d_op, meta->orig_dop)",
         "spin_unlock(&meta->dentry->d_lock)",
@@ -204,6 +226,8 @@ int main() {
         source, "static void hide1_dop_stale_workfn",
         "static bool hide1_is_target_observer");
     RequireOrder(stale_worker, {
+        "d_unhashed(meta->dentry)",
+        "d_count(meta->dentry) == 1",
         "synchronize_srcu(&hide1_srcu);",
         "synchronize_rcu();",
         "wait_event(hide1_dop_wait, atomic_read(&hide1_dop_active) == 0);",

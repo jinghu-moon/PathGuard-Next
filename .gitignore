@@ -36,3 +36,12 @@
 /download/
 /libs/
 /obj/
+
+# Local Hide 1.0 loader experiments and extracted build tools
+/experimental/hide-vfs/hide1_control.aligned
+/experimental/hide-vfs/hide1_control.dynamic
+/experimental/hide-vfs/hide1_control.new
+/experimental/hide-vfs/hide1_control.test16
+/experimental/hide-vfs/hide1_control.testnopie
+/*.deb
+/root/

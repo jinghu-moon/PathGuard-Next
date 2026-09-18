@@ -52,5 +52,46 @@ int main() {
     for (auto& worker : workers)
         worker.join();
     assert(!failed.load(std::memory_order_relaxed));
+
+    std::atomic<int> shared_cache{PG_HIDE1_SYNTHETIC_NEGATIVE};
+    workers.clear();
+    for (int i = 0; i < 20; ++i) {
+        workers.emplace_back([&, target_worker = (i % 2 == 0)] {
+            const pg_hide1_observer& observer = target_worker ? target : other;
+            for (int n = 0; n < 10000; ++n) {
+                const auto cache = static_cast<pg_hide1_cache_kind>(
+                    shared_cache.load(std::memory_order_acquire));
+                const auto decision = pg_hide1_evaluate_cache(
+                    &rule, &observer, rule.parent, "hidden", 6, cache,
+                    rule.generation);
+                if (target_worker) {
+                    if (cache == PG_HIDE1_REAL_POSITIVE) {
+                        if (decision.outcome != PG_HIDE1_INVALIDATE_CACHE ||
+                            decision.call_original)
+                            failed.store(true, std::memory_order_relaxed);
+                        shared_cache.store(PG_HIDE1_SYNTHETIC_NEGATIVE,
+                                           std::memory_order_release);
+                    } else if (decision.outcome != PG_HIDE1_KEEP_CACHE ||
+                               decision.call_original) {
+                        failed.store(true, std::memory_order_relaxed);
+                    }
+                } else {
+                    if (cache == PG_HIDE1_SYNTHETIC_NEGATIVE) {
+                        if (decision.outcome != PG_HIDE1_INVALIDATE_CACHE ||
+                            decision.call_original)
+                            failed.store(true, std::memory_order_relaxed);
+                        shared_cache.store(PG_HIDE1_REAL_POSITIVE,
+                                           std::memory_order_release);
+                    } else if (decision.outcome != PG_HIDE1_KEEP_CACHE ||
+                               !decision.call_original) {
+                        failed.store(true, std::memory_order_relaxed);
+                    }
+                }
+            }
+        });
+    }
+    for (auto& worker : workers)
+        worker.join();
+    assert(!failed.load(std::memory_order_relaxed));
     return 0;
 }

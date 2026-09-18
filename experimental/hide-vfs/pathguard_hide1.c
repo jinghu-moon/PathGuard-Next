@@ -8,6 +8,7 @@
  */
 #include <linux/fs.h>
 #include <linux/hashtable.h>
+#include <linux/jiffies.h>
 #include <linux/miscdevice.h>
 #include <linux/mnt_namespace.h>
 #include <linux/module.h>
@@ -81,6 +82,8 @@ struct hide1_dentry_shadow {
     struct dentry_operations shadow_dop;
     struct hide1_binding *binding;
     unsigned int orig_flags;
+    u64 cache_generation;
+    bool synthetic_negative;
     atomic_t active;
     wait_queue_head_t wait;
     unsigned long state;
@@ -125,7 +128,7 @@ static atomic_t hide1_dop_active = ATOMIC_INIT(0);
 static DECLARE_WAIT_QUEUE_HEAD(hide1_iop_wait);
 static DECLARE_WAIT_QUEUE_HEAD(hide1_fop_wait);
 static DECLARE_WAIT_QUEUE_HEAD(hide1_dop_wait);
-static struct work_struct hide1_dop_stale_work;
+static struct delayed_work hide1_dop_stale_work;
 #define HIDE1_DOP_STALE 0
 static u32 hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_FREE;
 static struct pathguard_hide1_status hide1_status = {
@@ -251,7 +254,7 @@ static void hide1_mark_dentry_stale(struct hide1_dentry_shadow *meta)
         PATHGUARD_HIDE1_LIFECYCLE_RUNNING)
         return;
     if (!test_and_set_bit(HIDE1_DOP_STALE, &meta->state))
-        schedule_work(&hide1_dop_stale_work);
+        schedule_delayed_work(&hide1_dop_stale_work, 1);
 }
 
 static void hide1_free_fop_meta(struct hide1_fop_meta *meta)
@@ -268,34 +271,60 @@ static void hide1_dop_stale_workfn(struct work_struct *work)
     struct hide1_dentry_shadow *meta, *tmp;
     LIST_HEAD(retired);
     unsigned long flags;
+    bool retry = false;
 
     (void)work;
     mutex_lock(&hide1_lock);
     spin_lock_irqsave(&hide1_binding.dentry_lock, flags);
     list_for_each_entry_safe(meta, tmp, &hide1_binding.dentry_shadows, node) {
+        bool can_retire;
+        const struct dentry_operations *dop;
+
+        /* While ACTIVE, a stale dentry must remain shadowed.  Restoring its
+         * original d_op after d_drop creates a race in which a concurrent
+         * path walk reuses the positive dentry before lookup() can publish a
+         * new observer-aware shadow.  DISABLE/RESTORE owns the only path that
+         * may retire these objects. */
+        if (READ_ONCE(hide1_status.state) == PATHGUARD_HIDE1_STATE_ACTIVE) {
+            clear_bit(HIDE1_DOP_STALE, &meta->state);
+            continue;
+        }
+
         if (!test_bit(HIDE1_DOP_STALE, &meta->state))
             continue;
-        list_move_tail(&meta->node, &retired);
+        spin_lock(&meta->dentry->d_lock);
+        dop = READ_ONCE(meta->dentry->d_op);
+        can_retire = d_unhashed(meta->dentry) &&
+                     d_count(meta->dentry) == 1 &&
+                     (dop == &meta->shadow_dop || dop == meta->orig_dop);
+        if (can_retire && dop == &meta->shadow_dop) {
+            if (meta->orig_flags & DCACHE_OP_REVALIDATE)
+                meta->dentry->d_flags |= DCACHE_OP_REVALIDATE;
+            else
+                meta->dentry->d_flags &= ~DCACHE_OP_REVALIDATE;
+            smp_wmb();
+            WRITE_ONCE(meta->dentry->d_op, meta->orig_dop);
+        }
+        spin_unlock(&meta->dentry->d_lock);
+        if (can_retire)
+            list_move_tail(&meta->node, &retired);
+        else
+            retry = true;
     }
     spin_unlock_irqrestore(&hide1_binding.dentry_lock, flags);
     list_for_each_entry_safe(meta, tmp, &retired, node) {
-        bool drop = false;
-
-        spin_lock(&meta->dentry->d_lock);
-        if (READ_ONCE(meta->dentry->d_op) == &meta->shadow_dop) {
-            WRITE_ONCE(meta->dentry->d_flags, meta->orig_flags);
-            smp_wmb();
-            WRITE_ONCE(meta->dentry->d_op, meta->orig_dop);
-            drop = true;
-        }
-        spin_unlock(&meta->dentry->d_lock);
         spin_lock(&hide1_meta_lock);
         hash_del_rcu(&meta->hash_node);
         spin_unlock(&hide1_meta_lock);
-        if (drop)
-            d_drop(meta->dentry);
     }
     mutex_unlock(&hide1_lock);
+    if (list_empty(&retired)) {
+        if (retry && READ_ONCE(hide1_lifecycle) ==
+                     PATHGUARD_HIDE1_LIFECYCLE_RUNNING)
+            schedule_delayed_work(&hide1_dop_stale_work,
+                                  msecs_to_jiffies(50));
+        return;
+    }
     synchronize_srcu(&hide1_srcu);
     synchronize_rcu();
     /* d_revalidate drops the short RCU read-side section before it finishes
@@ -305,6 +334,10 @@ static void hide1_dop_stale_workfn(struct work_struct *work)
     list_for_each_entry(meta, &retired, node)
         wait_event(meta->wait, atomic_read(&meta->active) == 0);
     hide1_free_dentry_shadows(&retired);
+    if (retry && READ_ONCE(hide1_lifecycle) ==
+                 PATHGUARD_HIDE1_LIFECYCLE_RUNNING)
+        schedule_delayed_work(&hide1_dop_stale_work,
+                              msecs_to_jiffies(50));
 }
 
 static bool hide1_is_target_observer(const struct hide1_binding *binding)
@@ -378,9 +411,35 @@ static bool hide1_should_hide(const struct hide1_binding *binding,
            hide1_name_matches(binding, dentry);
 }
 
-static bool hide1_dentry_shadow_present(struct dentry *dentry)
+static bool hide1_update_dentry_shadow_locked(
+    struct hide1_binding *binding, struct dentry *dentry,
+    bool synthetic_negative)
 {
+    struct hide1_dentry_shadow *meta;
     const struct dentry_operations *dop;
+    bool present = false;
+
+    dop = READ_ONCE(dentry->d_op);
+    if (!dop || dop->d_revalidate != hide1_d_revalidate)
+        return false;
+    rcu_read_lock();
+    meta = hide1_dop_lookup_rcu(dentry);
+    if (meta && meta->binding == binding) {
+        if (synthetic_negative) {
+            WRITE_ONCE(meta->cache_generation,
+                       binding->rule.expected_generation);
+            WRITE_ONCE(meta->synthetic_negative, true);
+        }
+        present = true;
+    }
+    rcu_read_unlock();
+    return present;
+}
+
+static bool hide1_dentry_shadow_present(struct hide1_binding *binding,
+                                        struct dentry *dentry,
+                                        bool synthetic_negative)
+{
     bool present;
 
     if (!dentry)
@@ -389,16 +448,17 @@ static bool hide1_dentry_shadow_present(struct dentry *dentry)
     /* Do not return a metadata pointer after leaving RCU.  The stale worker
      * is allowed to retire and free that object as soon as its grace period
      * completes.  The dentry lock is the ownership check needed here; the
-     * second check below closes the install race. */
+    * second check below closes the install race. */
     spin_lock(&dentry->d_lock);
-    dop = READ_ONCE(dentry->d_op);
-    present = dop && dop->d_revalidate == hide1_d_revalidate;
+    present = hide1_update_dentry_shadow_locked(
+        binding, dentry, synthetic_negative);
     spin_unlock(&dentry->d_lock);
     return present;
 }
 
 static int hide1_install_dentry_shadow(struct hide1_binding *binding,
-                                       struct dentry *dentry)
+                                       struct dentry *dentry,
+                                       bool synthetic_negative)
 {
     struct hide1_dentry_shadow *meta;
     const struct dentry_operations *orig;
@@ -409,7 +469,7 @@ static int hide1_install_dentry_shadow(struct hide1_binding *binding,
         atomic64_inc(&hide1_dentry_install_failures);
         return -EINVAL;
     }
-    if (hide1_dentry_shadow_present(dentry))
+    if (hide1_dentry_shadow_present(binding, dentry, synthetic_negative))
         return 0;
     if (READ_ONCE(binding->retiring)) {
         atomic64_inc(&hide1_dentry_install_failures);
@@ -419,8 +479,11 @@ static int hide1_install_dentry_shadow(struct hide1_binding *binding,
     spin_lock(&dentry->d_lock);
     orig = READ_ONCE(dentry->d_op);
     if (orig && orig->d_revalidate == hide1_d_revalidate) {
+        bool present = hide1_update_dentry_shadow_locked(
+            binding, dentry, synthetic_negative);
+
         spin_unlock(&dentry->d_lock);
-        return 0;
+        return present ? 0 : -EAGAIN;
     }
     spin_unlock(&dentry->d_lock);
     meta = kzalloc(sizeof(*meta), GFP_ATOMIC);
@@ -431,6 +494,8 @@ static int hide1_install_dentry_shadow(struct hide1_binding *binding,
     meta->dentry = dget(dentry);
     meta->orig_dop = orig;
     meta->binding = binding;
+    meta->cache_generation = binding->rule.expected_generation;
+    meta->synthetic_negative = synthetic_negative;
     if (orig)
         meta->shadow_dop = *orig;
     meta->shadow_dop.d_revalidate = hide1_d_revalidate;
@@ -451,7 +516,9 @@ static int hide1_install_dentry_shadow(struct hide1_binding *binding,
         const struct dentry_operations *observed_dop = READ_ONCE(dentry->d_op);
 
         /* Another racing lookup may have installed the same shadow. */
-        if (observed_dop && observed_dop->d_revalidate == hide1_d_revalidate) {
+        if (observed_dop && observed_dop->d_revalidate == hide1_d_revalidate &&
+            hide1_update_dentry_shadow_locked(binding, dentry,
+                                               synthetic_negative)) {
             spin_unlock(&dentry->d_lock);
             spin_unlock_irqrestore(&binding->dentry_lock, flags);
             dput(meta->dentry);
@@ -502,7 +569,7 @@ static int hide1_install_named_dentry_shadow(struct hide1_binding *binding)
         return -EXDEV;
     }
     hide1_record_hidden_inode(binding, d_backing_inode(child.dentry));
-    ret = hide1_install_dentry_shadow(binding, child.dentry);
+    ret = hide1_install_dentry_shadow(binding, child.dentry, false);
     path_put(&child);
     return ret;
 }
@@ -526,7 +593,10 @@ static int hide1_restore_dentry_shadows(struct hide1_binding *binding,
 
         spin_lock(&meta->dentry->d_lock);
         if (READ_ONCE(meta->dentry->d_op) == &meta->shadow_dop) {
-            WRITE_ONCE(meta->dentry->d_flags, meta->orig_flags);
+            if (meta->orig_flags & DCACHE_OP_REVALIDATE)
+                meta->dentry->d_flags |= DCACHE_OP_REVALIDATE;
+            else
+                meta->dentry->d_flags &= ~DCACHE_OP_REVALIDATE;
             smp_wmb();
             WRITE_ONCE(meta->dentry->d_op, meta->orig_dop);
             /* Remove a negative/positive cache entry that was governed by
@@ -701,7 +771,7 @@ static struct dentry *hide1_lookup(struct inode *dir, struct dentry *dentry,
     if (hide1_should_hide(binding, dir, dentry)) {
         atomic64_inc(&hide1_lookup_hidden);
         if (hide1_mode_has_dop() &&
-            hide1_install_dentry_shadow(binding, dentry)) {
+            hide1_install_dentry_shadow(binding, dentry, true)) {
             ret = ERR_PTR(-EAGAIN);
             goto out;
         }
@@ -709,12 +779,26 @@ static struct dentry *hide1_lookup(struct inode *dir, struct dentry *dentry,
         ret = NULL;
         goto out;
     }
-    if (hide1_mode_has_dop() && hide1_is_target_observer(binding) &&
-        dir == binding->parent_inode &&
-        hide1_name_matches(binding, dentry))
-        (void)hide1_install_dentry_shadow(binding, dentry);
     orig = meta->orig;
     result = orig && orig->lookup ? orig->lookup(dir, dentry, flags) : NULL;
+    if (!IS_ERR(result) && hide1_mode_has_dop() &&
+        dir == binding->parent_inode && hide1_name_matches(binding, dentry)) {
+        struct dentry *resolved = result ? result : dentry;
+        int install_ret = hide1_install_dentry_shadow(binding, resolved,
+                                                       false);
+
+        if (install_ret) {
+            /* Do not publish an ungoverned positive/negative cache entry.
+             * Parallel lookup waiters are released only after this wrapper
+             * returns and VFS calls d_lookup_done(). */
+            d_drop(resolved);
+            if (result && result != dentry)
+                dput(result);
+            ret = ERR_PTR(install_ret);
+            goto out;
+        }
+        hide1_record_hidden_inode(binding, d_backing_inode(resolved));
+    }
     ret = result;
 out:
     hide1_callback_exit(&hide1_iop_active, &meta->active,
@@ -774,7 +858,37 @@ struct hide1_dir_proxy {
     struct dir_context *orig;
     struct hide1_binding *binding;
     struct inode *dir_inode;
+    struct dentry *parent_dentry;
 };
+
+static void hide1_drop_filtered_child(struct hide1_dir_proxy *proxy,
+                                      const char *name, int namelen)
+{
+    struct qstr child_name;
+    struct dentry *child;
+    struct hide1_dentry_shadow *meta;
+
+    if (!proxy || !proxy->parent_dentry || !name || namelen <= 0)
+        return;
+
+    child_name.name = name;
+    child_name.len = namelen;
+    child_name.hash = full_name_hash(proxy->dir_inode, name, namelen);
+    child = d_lookup(proxy->parent_dentry, &child_name);
+    if (!child)
+        return;
+
+    /* A filtered FUSE record can still have a positive dentry cached from an
+     * earlier lookup.  Drop that cache entry before the next open/stat can
+     * reuse it; otherwise readdir-then-open leaks the governed object. */
+    d_drop(child);
+    rcu_read_lock();
+    meta = hide1_dop_lookup_rcu(child);
+    if (meta && meta->binding == proxy->binding)
+        hide1_mark_dentry_stale(meta);
+    rcu_read_unlock();
+    dput(child);
+}
 
 static bool hide1_dir_actor(struct dir_context *ctx, const char *name,
                             int namelen, loff_t offset, u64 ino,
@@ -787,6 +901,7 @@ static bool hide1_dir_actor(struct dir_context *ctx, const char *name,
         namelen == strlen(proxy->binding->rule.basename) &&
         !memcmp(name, proxy->binding->rule.basename, namelen)) {
         /* A filtered record still advances the native directory cookie. */
+        hide1_drop_filtered_child(proxy, name, namelen);
         atomic64_inc(&hide1_readdir_filtered);
         proxy->ctx.pos = offset;
         return true;
@@ -838,6 +953,7 @@ static int hide1_iterate_shared(struct file *file, struct dir_context *ctx)
     proxy.orig = ctx;
     proxy.binding = binding;
     proxy.dir_inode = file_inode(file);
+    proxy.parent_dentry = file->f_path.dentry;
     ret = orig->iterate_shared(file, &proxy.ctx);
     ctx->pos = proxy.ctx.pos;
     hide1_callback_exit(&hide1_fop_active, &meta->active,
@@ -850,6 +966,7 @@ static int hide1_d_revalidate(struct dentry *dentry, unsigned int flags)
 {
     struct hide1_dentry_shadow *meta;
     struct hide1_binding *binding;
+    bool synthetic_negative;
     int idx;
     int ret;
 
@@ -861,20 +978,41 @@ static int hide1_d_revalidate(struct dentry *dentry, unsigned int flags)
         srcu_read_unlock(&hide1_srcu, idx);
         return 1;
     }
-    if (READ_ONCE(hide1_status.generation) != binding->rule.expected_generation ||
-        d_unhashed(dentry))
-        hide1_mark_dentry_stale(meta);
+    synthetic_negative = READ_ONCE(meta->synthetic_negative);
+    if (synthetic_negative) {
+        if (hide1_should_hide(binding,
+                              d_backing_inode(dentry->d_parent), dentry) &&
+            READ_ONCE(meta->cache_generation) ==
+                binding->rule.expected_generation) {
+            atomic64_inc(&hide1_d_revalidate_hidden);
+            ret = 1;
+        } else if (flags & LOOKUP_RCU) {
+            ret = -ECHILD;
+        } else {
+            /* A synthetic target-only negative must never hide the real
+             * object from another observer or generation. */
+            hide1_mark_dentry_stale(meta);
+            ret = 0;
+        }
+        goto out;
+    }
     if (hide1_should_hide(binding, d_backing_inode(dentry->d_parent), dentry)) {
         atomic64_inc(&hide1_d_revalidate_hidden);
-        hide1_callback_exit(&hide1_dop_active, &meta->active,
-                            &hide1_dop_wait, &meta->wait);
-        srcu_read_unlock(&hide1_srcu, idx);
-        if (flags & LOOKUP_RCU)
-            return -ECHILD;
-        return 0;
+        if (d_is_negative(dentry)) {
+            ret = 1;
+        } else if (flags & LOOKUP_RCU) {
+            ret = -ECHILD;
+        } else {
+            /* The real positive dentry is invalid for the target.  Retire it
+             * only after VFS unhashed it and all path-walk references drain. */
+            hide1_mark_dentry_stale(meta);
+            ret = 0;
+        }
+        goto out;
     }
     ret = meta->orig_dop && meta->orig_dop->d_revalidate ?
           meta->orig_dop->d_revalidate(dentry, flags) : 1;
+out:
     hide1_callback_exit(&hide1_dop_active, &meta->active,
                         &hide1_dop_wait, &meta->wait);
     srcu_read_unlock(&hide1_srcu, idx);
@@ -1219,7 +1357,8 @@ static int hide1_shadow_install_locked(struct hide1_binding *binding)
     }
 
     ret = hide1_mode_has_dop() ?
-          hide1_install_dentry_shadow(binding, binding->parent_path.dentry) : 0;
+          hide1_install_dentry_shadow(binding, binding->parent_path.dentry,
+                                      false) : 0;
     if (ret)
         goto rollback;
     name_len = strnlen(binding->rule.basename, sizeof(binding->rule.basename));
@@ -1229,7 +1368,7 @@ static int hide1_shadow_install_locked(struct hide1_binding *binding)
     cached = hide1_mode_has_dop() ?
              d_lookup(binding->parent_path.dentry, &name) : NULL;
     if (cached) {
-        ret = hide1_install_dentry_shadow(binding, cached);
+        ret = hide1_install_dentry_shadow(binding, cached, false);
         dput(cached);
         if (ret)
             goto rollback;
@@ -1623,7 +1762,7 @@ static long hide1_ioctl(struct file *file, unsigned int command,
         /* Let a worker that already owns the mutex finish before waiting for
          * its work item; cancelling while holding hide1_lock can deadlock. */
         mutex_unlock(&hide1_lock);
-        cancel_work_sync(&hide1_dop_stale_work);
+        cancel_delayed_work_sync(&hide1_dop_stale_work);
         mutex_lock(&hide1_lock);
     }
     switch (command) {
@@ -1795,7 +1934,7 @@ static int __init hide1_init(void)
     hash_init(hide1_iop_table);
     hash_init(hide1_fop_table);
     hash_init(hide1_dop_table);
-    INIT_WORK(&hide1_dop_stale_work, hide1_dop_stale_workfn);
+    INIT_DELAYED_WORK(&hide1_dop_stale_work, hide1_dop_stale_workfn);
     hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_READY;
     strscpy(hide1_status.kernel_release, init_utsname()->release,
             sizeof(hide1_status.kernel_release));
@@ -1806,7 +1945,7 @@ static int __init hide1_init(void)
 static void __exit hide1_exit(void)
 {
     misc_deregister(&hide1_device);
-    cancel_work_sync(&hide1_dop_stale_work);
+    cancel_delayed_work_sync(&hide1_dop_stale_work);
     mutex_lock(&hide1_lock);
     (void)hide1_reset_locked();
     mutex_unlock(&hide1_lock);

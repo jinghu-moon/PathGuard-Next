@@ -26,9 +26,10 @@
    `STOP_NEW -> RESTORE -> DRAIN -> FREE`，再接入会改变真实文件系统的 callback。
 3. NoMount、Kasumi、PathMask、SUSFS 和 SukiSU 都只能提供局部参考，不能作为完整
    PathGuard hide 数据面直接引入。
-4. 只读 baseline、cache-order、20 线程并发和 DISABLE/CLEAR/rmmod 恢复已经在当前
-   设备的单路径实验范围内通过，但 mutation、真实 namespace 销毁、OTA admission 和
-   产品集成仍未完成。
+4. 只读 baseline、cache-order、20 线程并发、1000 轮 reliability 和
+   DISABLE/CLEAR/rmmod 恢复已经在当前设备的单路径实验范围内通过；期间修复了
+   readdir 后正 dentry 泄漏和 ACTIVE stale dentry 生命周期竞态。但 mutation、真实
+   namespace 销毁、OTA admission 和产品集成仍未完成。
 5. 在所有阶段通过前，产品状态必须保持：
 
 ```text
@@ -47,18 +48,19 @@ Hide 1.0 = unsupported
 | loader | SukiSU Ultra LKM loader |
 | 数据面 | 目标共享存储 FUSE 父目录 |
 | 当前 scope | 单 UID、单 mount namespace、单父目录、单 basename |
-| 当前 basename | `Nagram` |
+| 当前 basename | `hidden`（一次性 HideLab fixture） |
 | 当前 mode | `shadow_mode=4`，只读 FUSE-aware |
 | 产品状态 | `unsupported` |
 
 ### 2.2 已通过的实验
 
-v3 只读后端已通过以下实验：
+v8 只读后端已通过以下实验：
 
 - Java File/NIO、libc `readdir`、多 buffer `getdents64`；
 - `stat`、`lstat`、`access`、`open`、`openat`；
-- cold/warm cache 顺序；
-- 20 线程只读并发；
+- cold/warm cache 顺序（含 readdir-then-open 与 positive-warm-then-open）；
+- 20 线程 × 100 次 stat/open/readdir 并发；
+- 1000 轮顺序 reliability；
 - DISABLE、CLEAR、rmmod 和恢复 baseline；
 - Target 隐藏、Control 可见、Root Oracle 未变化；
 - boot ID 未变化，无已观测的 Oops、BUG、panic、Call trace。

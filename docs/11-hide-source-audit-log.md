@@ -3382,3 +3382,125 @@ open、cold opendir、stat-then-open、readdir-then-open、positive-warm-then-op
 
 本轮只证明正确 parent 绑定下的只读 cache-order；并发、mutation、生命周期和设备准入
 仍未完成，产品状态继续为 `Hide 1.0 = unsupported`。
+
+### 轮次 80：并发泄漏根因与 synthetic-negative cache identity 修复（2026-09-18）
+
+在 generation `8102` 的正确 parent 绑定后执行 20 线程并发回归，证据目录为
+`build/device-evidence/hide1-mutation-v3-concurrency-correct/20260917-210315/`。Target
+主路径的结果为 `stat=1336/2000`、`open=1336/2000`、`readdir=0/2000`，summary 明确为
+`LEAK`；Control 与 Root Oracle 正常，设备无 crash/hang。按 fail-closed 门禁停止 reliability
+和 mutation，并执行 `DISABLE -> CLEAR -> rmmod`。因此轮次 75 的旧 v3 并发通过不能替代
+本次 disposable fixture 和正确绑定下的失败事实。
+
+对照 Android 16/6.12 `fs/namei.c`、`fs/dcache.c`、FUSE `fs/fuse/dir.c` 与 NoMount 后确认
+根因不是简单的 lookup 漏装，而是 kernel backend 违反了自身 cache model：
+
+- `hide1_lookup()` 创建的 synthetic negative 与 ENABLE 时捕获的真实 positive dentry 没有
+  metadata 身份区分；
+- `hide1_d_revalidate()` 对两者都返回 `0`，导致 synthetic negative 每次访问都被
+  `d_invalidate()`，并行路径反复重建 dentry；
+- 原 stale worker 又把 `d_unhashed()` 当成立即回收条件，在其他 path walk 仍持有引用时恢复
+  原始 FUSE `d_op`，使旧 positive dentry 可间歇通过，形成 stat/open 泄漏；
+- 恢复时写回完整历史 `d_flags` 还可能覆盖 positive/negative 类型位，属于独立的缓存一致性
+  风险。
+
+修复后的 metadata 显式保存 `synthetic_negative` 与 `cache_generation`。同一 generation 的
+Target 对 synthetic negative 返回有效缓存（`1`）；真实 positive 对 Target 才返回失效，
+非目标观察者或不同 generation 必须使 synthetic negative 失效。stale work 改为 delayed
+work，只有 dentry 已 unhashed 且引用计数仅剩模块自身 pin 时才恢复并释放 metadata；恢复只
+修改 `DCACHE_OP_REVALIDATE` 位，不覆盖其余动态 `d_flags`。这与
+`pg_hide1_evaluate_cache()` 的既有契约一致，也保留 Control 不被 synthetic negative
+OVERBLOCK 的语义。Control 触发真实 FUSE lookup 后，wrapper 会在 `d_lookup_done()` 唤醒并行
+waiter 前对实际返回 dentry 重新安装 shadow；安装失败则丢弃该缓存并返回错误，防止 Target
+随后从共享 dcache fast path 读取未治理的 positive dentry。
+
+离线验证结果：
+
+```text
+pathguard_hide_vfs_model_test              PASS
+pathguard_hide_vfs_concurrency_test        PASS
+pathguard_hide_vfs_teardown_contract_test PASS
+Android 16/6.12 Kbuild                     CC -> MODPOST -> LD
+undefined symbols                          68/68 resolved in vmlinux
+__versions                                 size=0 (restricted-loader contract)
+```
+
+并发模型测试额外执行 20 线程 Target/Control 交替状态转换，覆盖 synthetic negative、real
+positive 的共享缓存替换；Target 遇到 real positive 必须失效，Control 遇到 synthetic negative
+也必须失效，任何一侧都不得错误保留对方的 observer-specific 缓存。
+
+新实验包为 `download/pathguard-hide1-lab-myron-fuse-ro-v6-shared-cache.zip`，SHA-256
+`d611375fef2781af51a3254c69eec32c93e77fd80d7f181bf5864bd121b57b8c`；模块 SHA-256
+`d74a11a561681180218ff220f1648181879a59cace7ce625f14a1be8764590db`。构建时关闭了
+仅用于模块调试类型信息的 BTF 生成，因为本机没有 `pahole`；这不改变模块代码、重定位、空
+`__versions` 或 SukiSU restricted-loader 路径。记录时设备未连接 ADB，因此 v6 尚未上传、
+安装或真机验证；阶段仍为失败后待复验，产品状态继续保持 `Hide 1.0 = unsupported`。
+## 轮次 81：v6 shared-cache 真机 cache-order 复验与泄漏定位（2026-09-18）
+
+v6 包已在 Redmi K90 Pro Max / `myron` 上以 `shadow_mode=4` 加载。绑定参数为
+UID `10552`、PID `22585`、mount namespace `4026536038`、generation `9001`，父目录为
+`/storage/emulated/0/Pictures/PathGuardHideLab/20260918-120000`，basename 为 `hidden`。
+`ENABLE` 成功且 boot ID 未变化。
+
+首次 cache-order 结果为 `LEAK`：cold open、cold opendir、stat-then-open 返回
+`ENOENT`，但 `readdir-then-open` 和 `positive-warm-then-open` 返回成功。根因是
+`iterate_shared` 过滤 FUSE 目录记录后仍保留同一父目录下的正 dentry，后续 open 复用
+该缓存而绕过隐藏查找。
+
+本轮同时执行了 `DISABLE -> CLEAR -> rmmod`，设备在线、模块节点消失，未发生重启。
+
+## 轮次 82：过滤目录项同步 dentry drop（v7）与 cache-order 通过（2026-09-18）
+
+离线修复在 `hide1_dir_actor()` 过滤目标 basename 时，按父 dentry+basename 查找并
+`d_drop` 已缓存子 dentry，同时将本模块 shadow 标记为 stale。宿主
+`pathguard_hide_vfs_model_test`、`pathguard_hide_vfs_concurrency_test`、
+`pathguard_hide_vfs_teardown_contract_test` 全部通过；Android 16/6.12 Kbuild 完成
+`CC -> MODPOST -> LD -> BTF`。
+
+实验包：`download/pathguard-hide1-lab-myron-fuse-ro-v7-cache-drop.zip`，设备端与本地
+SHA-256 为
+`31ae0b0e39f1e028299a3afa50365d897c68ea10767355f1f56a68fc21bcfa2`。
+v7 在新 fixture、generation `9002`、PID `19487`、namespace `4026536023` 上
+`ENABLE` 成功。HideLab cache-order 证据：
+
+```text
+build/device-evidence/hide1-v7-cache-order/20260918-201258/
+```
+
+Target 五种顺序均为 `-1/ENOENT`，Control 保持可见，Root Oracle 未变化，结论为
+`PASS`。
+
+## 轮次 83：ACTIVE stale dentry 生命周期竞态修复（v8）与并发通过（2026-09-18）
+
+v7 cache-order 通过后，20 线程并发仍出现 external.0 `stat/open=1692/2000` 的泄漏。
+根因是 stale workqueue 在 `ACTIVE` 期间恢复原始 `d_op` 并释放 metadata，和并发路径
+重新使用正 dentry 形成窗口。修复后，ACTIVE 期间 stale 只清除 stale 标记并保留 shadow；
+仅由 `DISABLE/RESTORE` 统一恢复和回收。
+
+实验包：`download/pathguard-hide1-lab-myron-fuse-ro-v8-concurrency-cache.zip`，模块
+SHA-256 为 `8a574155d75b8102c2924775f209ec75a6c1e54149b16dee326d96076c9acdfb`，ZIP
+设备端 SHA-256 为 `99ba0ae0e39f1e028299a3afa50365d897c68ea10767355f1f56a68fc21bcfa2`。
+设备重启后以 generation `9003`、PID `19620`、namespace `4026536097` 完成加载、
+绑定和 `ENABLE`，boot ID 保持不变。
+
+并发证据：
+
+```text
+build/device-evidence/hide1-v8-concurrency/20260918-202124/
+```
+
+Target external.0 的 `concurrency.stat/open/readdir` 均为 `0`，Control 通过，Root
+Oracle 未变化，结论为 `PASS`。随后 reliability 1000 轮顺序回归通过：
+
+```text
+build/device-evidence/hide1-v8-reliability-rerun/20260918-202742/
+```
+
+执行 `DISABLE` 后 baseline 恢复为 `BASELINE_VISIBLE_NOT_HIDE_PASS`；再执行
+`CLEAR -> rmmod`，状态回到 `FREE`、active/open_count 为 0、`/dev/pathguard_hide1`
+消失，设备保持在线。
+
+本轮结论：只读 FUSE-aware 单设备/单 UID/单 namespace/单 parent/basename 的
+cache-order、20 线程并发、1000 轮 reliability 和 DISABLE/CLEAR/rmmod 恢复均有真机
+证据；mutation、跨 alias 完整一致性、namespace 销毁、OTA 重新准入和 daemon 集成仍未
+完成，产品状态继续为 `Hide 1.0 = unsupported`。
