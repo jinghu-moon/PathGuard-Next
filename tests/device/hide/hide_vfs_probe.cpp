@@ -742,22 +742,16 @@ void ObserveExternalMutations(const std::string& hidden_path) {
     if (created_fd >= 0) close(created_fd);
     Emit("external.mutation.openat_create", "mutation", hidden_path + "/hidelab-created",
          created_fd < 0 ? -1 : 0, created_error,
-         ExistsAt(parent_fd, created_path.c_str()));
+         created_fd >= 0);
 
-    off_t before_size = -1;
-    const bool canary_before = FileSizeAt(
-        parent_fd, canary_path.c_str(), &before_size);
     errno = 0;
     const int truncate_fd = openat(
         parent_fd, canary_path.c_str(), O_WRONLY | O_TRUNC | O_CLOEXEC);
     const int truncate_error = truncate_fd < 0 ? errno : 0;
     if (truncate_fd >= 0) close(truncate_fd);
-    off_t after_size = -1;
-    const bool canary_after = FileSizeAt(
-        parent_fd, canary_path.c_str(), &after_size);
     Emit("external.mutation.openat_truncate", "mutation", hidden_path + "/canary.txt",
          truncate_fd < 0 ? -1 : 0, truncate_error,
-         canary_before && canary_after && before_size != after_size);
+         truncate_fd >= 0);
 
     errno = 0;
     const int mkdir_result = mkdirat(
@@ -765,14 +759,14 @@ void ObserveExternalMutations(const std::string& hidden_path) {
     const int mkdir_error = mkdir_result == 0 ? 0 : errno;
     Emit("external.mutation.mkdirat", "mutation", hidden_path + "/hidelab-created-dir",
          mkdir_result, mkdir_error,
-         ExistsAt(parent_fd, created_directory_path.c_str()));
+         mkdir_result == 0);
 
     errno = 0;
     const int unlink_result = unlinkat(parent_fd, nested_path.c_str(), 0);
     const int unlink_error = unlink_result == 0 ? 0 : errno;
     Emit("external.mutation.unlinkat", "mutation", hidden_path + "/nested/nested.txt",
          unlink_result, unlink_error,
-         !ExistsAt(parent_fd, nested_path.c_str()));
+         unlink_result == 0);
 
     errno = 0;
     const int rename_source_result = renameat(
@@ -781,8 +775,7 @@ void ObserveExternalMutations(const std::string& hidden_path) {
     const int rename_source_error = rename_source_result == 0 ? 0 : errno;
     Emit("external.mutation.rename_source", "mutation", hidden_path + "/canary.txt",
          rename_source_result, rename_source_error,
-         !ExistsAt(parent_fd, canary_path.c_str())
-             && ExistsAt(parent_fd, "hidelab-moved-canary.txt"));
+         rename_source_result == 0);
 
     errno = 0;
     const int rename_destination_result = renameat(
@@ -790,15 +783,14 @@ void ObserveExternalMutations(const std::string& hidden_path) {
     const int rename_destination_error = rename_destination_result == 0 ? 0 : errno;
     Emit("external.mutation.rename_destination", "mutation", hidden_path + "/canary.txt",
          rename_destination_result, rename_destination_error,
-         !ExistsAt(parent_fd, "visible.txt")
-             && ExistsAt(parent_fd, canary_path.c_str()));
+         rename_destination_result == 0);
 
     errno = 0;
     const int link_result = linkat(parent_fd, "visible-link.txt", parent_fd,
                                    linked_path.c_str(), 0);
     const int link_error = link_result == 0 ? 0 : errno;
     Emit("external.mutation.linkat", "mutation", hidden_path + "/hidelab-linked-visible.txt",
-         link_result, link_error, ExistsAt(parent_fd, linked_path.c_str()));
+         link_result, link_error, link_result == 0);
 
     errno = 0;
     const int symlink_result = symlinkat(
@@ -806,7 +798,65 @@ void ObserveExternalMutations(const std::string& hidden_path) {
     const int symlink_error = symlink_result == 0 ? 0 : errno;
     Emit("external.mutation.symlinkat", "mutation", hidden_path + "/hidelab-symlink",
          symlink_result, symlink_error,
-         ExistsAt(parent_fd, symlink_path.c_str()));
+         symlink_result == 0);
+
+    // Exercise the governed parent/basename itself.  These operations must
+    // be rejected before the filesystem mutation callback is reached; the
+    // root oracle remains authoritative for the resulting fixture state.
+    errno = 0;
+    const int basename_create_fd = openat(
+        parent_fd, name.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+        0600);
+    const int basename_create_error =
+        basename_create_fd < 0 ? errno : 0;
+    if (basename_create_fd >= 0) close(basename_create_fd);
+    Emit("external.mutation.basename_openat_create", "mutation", hidden_path,
+         basename_create_fd < 0 ? -1 : 0, basename_create_error,
+         basename_create_fd >= 0);
+
+    errno = 0;
+    const int basename_mkdir_result = mkdirat(parent_fd, name.c_str(), 0700);
+    const int basename_mkdir_error =
+        basename_mkdir_result < 0 ? errno : 0;
+    Emit("external.mutation.basename_mkdirat", "mutation", hidden_path,
+         basename_mkdir_result, basename_mkdir_error,
+         basename_mkdir_result == 0);
+
+    errno = 0;
+    const int basename_unlink_result = unlinkat(
+        parent_fd, name.c_str(), AT_REMOVEDIR);
+    const int basename_unlink_error =
+        basename_unlink_result < 0 ? errno : 0;
+    Emit("external.mutation.basename_rmdir", "mutation", hidden_path,
+         basename_unlink_result, basename_unlink_error,
+         basename_unlink_result == 0);
+
+    errno = 0;
+    const int basename_rename_result = renameat(
+        parent_fd, name.c_str(), parent_fd, "hidelab-hidden-moved");
+    const int basename_rename_error =
+        basename_rename_result < 0 ? errno : 0;
+    Emit("external.mutation.basename_rename", "mutation", hidden_path,
+         basename_rename_result, basename_rename_error,
+         basename_rename_result == 0);
+
+    errno = 0;
+    const int basename_link_result = linkat(
+        parent_fd, name.c_str(), parent_fd, "hidelab-hidden-link", 0);
+    const int basename_link_error =
+        basename_link_result < 0 ? errno : 0;
+    Emit("external.mutation.basename_link", "mutation", hidden_path,
+         basename_link_result, basename_link_error,
+         basename_link_result == 0);
+
+    errno = 0;
+    const int basename_symlink_result = symlinkat(
+        "visible.txt", parent_fd, name.c_str());
+    const int basename_symlink_error =
+        basename_symlink_result < 0 ? errno : 0;
+    Emit("external.mutation.basename_symlink", "mutation", hidden_path,
+         basename_symlink_result, basename_symlink_error,
+         basename_symlink_result == 0);
     close(parent_fd);
 }
 

@@ -69,7 +69,10 @@ v8 只读后端已通过以下实验：
 
 ### 2.3 当前缺口
 
-- mutation callback 尚未完成设备级验证；
+- mutation callback 已完成 mode 0 的单设备 disposable fixture 验证；create/mkdir/
+  truncate/unlink/rmdir/rename/link 等均在真实修改前拒绝且 Root Oracle 不变，但
+  governed basename 的 symlink 仍返回平台 `EACCES` 而非严格 `ENOENT`，因此 mutation
+  全矩阵尚未通过；
 - `link` 的隐藏源 inode 语义必须补强，不能只检查目标 dentry；
 - `atomic_open` 的 `O_CREAT`、`O_EXCL`、`O_TRUNC` 分支尚未形成完整矩阵；
 - lifecycle 状态机虽然已有雏形，仍需通过并发、已有 FD、Target 退出和卸载测试；

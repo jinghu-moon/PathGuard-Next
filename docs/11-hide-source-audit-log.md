@@ -3504,3 +3504,39 @@ build/device-evidence/hide1-v8-reliability-rerun/20260918-202742/
 cache-order、20 线程并发、1000 轮 reliability 和 DISABLE/CLEAR/rmmod 恢复均有真机
 证据；mutation、跨 alias 完整一致性、namespace 销毁、OTA 重新准入和 daemon 集成仍未
 完成，产品状态继续为 `Hide 1.0 = unsupported`。
+
+## 轮次 84：mode 0 mutation parent-level 闸门与 Control 对照（2026-09-18）
+
+为避免旧探针把“目标不可见”误报为副作用，`tests/device/hide/hide_vfs_probe.cpp`
+将 external mutation 的 `side_effect` 定义改为“系统调用实际返回成功”；真实文件状态
+仍由 root oracle 判定。同时补充了直接针对 governed parent/basename 的
+`openat(O_CREAT|O_EXCL)`、`mkdirat`、`rmdir`、`renameat`、`linkat` 和 `symlinkat` 用例。
+
+使用 v8 模块 `shadow_mode=0`、generation `9005`、UID `10552`、PID `26948`、namespace
+`4026536047` 完成一次 disposable fixture 攻击。Target 结果如下：
+
+- hidden 目录内 create/truncate/mkdir/unlink/rename/link/symlink 全部 `-1/ENOENT`，
+  `side_effect=false`；
+- parent/basename 的 create/mkdir/rmdir/rename/link 全部 `-1/ENOENT`；
+- parent/basename `symlinkat` 返回 `-1/EACCES`，未产生副作用。这是 Android shared-storage
+  FUSE 的平台拒绝，不是 PathGuard 统一返回的 `ENOENT`，因此按当前严格 Hide 语义记为
+  **未通过项**，不能宣称 mutation 全矩阵通过。
+
+Target 观察期间 Root Oracle 保持不变。随后以 Control UID 执行同一攻击：隐藏目录内的
+create/truncate/mkdir/unlink/rename 成功并产生预期修改，证明目标绑定没有把 Control
+错误 overblock；Control 的 link/symlink 仍受设备 FUSE 的 `EACCES` 平台限制。状态计数
+显示 `mutation=5/3/2/0`（Control 原始 callback 与 Target 前置阻断均可观察）。测试结束
+执行 `DISABLE -> CLEAR -> rmmod` 并删除 disposable fixture，设备在线、无重启。
+
+证据文件：
+
+```text
+build/device-evidence/hide1-v8-mutation-v3-target.jsonl
+build/device-evidence/hide1-v8-mutation-v3-control.jsonl
+build/device-evidence/hide1-v8-mutation-v3-before.txt
+build/device-evidence/hide1-v8-mutation-v3-after.txt
+```
+
+结论：mutation 前置封闭已在 mode 0 的单设备 fixture 上覆盖并证明多数操作无副作用，
+但 symlink 的严格 `ENOENT` 语义仍受 FUSE 平台 `EACCES` 阻塞；namespace 销毁、OTA
+准入和正式 daemon 集成尚未开始，产品状态继续为 `Hide 1.0 = unsupported`。
