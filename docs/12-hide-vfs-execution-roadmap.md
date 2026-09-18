@@ -730,6 +730,15 @@ closed；`atomic_open` 对普通 open 与 `O_CREAT/O_EXCL/O_TRUNC` 分支统一�
 之前拒绝隐藏 basename。宿主模型和源码契约测试已覆盖这些矩阵，但 disposable fixture
 和真机 mutation 尚未执行。
 
+### mode=0 真机 mutation 结果（2026-09-18）
+
+v9 完整 shadow mode 已完成一次 Target/Control disposable-fixture 对照。Target 多数
+操作在 lookup 阶段即返回 `ENOENT` 且未修改 fixture，但 `unlinkat` 仍被探针标记为
+`side_effect=true`；状态计数 `mutation=3/1/2/0` 也表明许多请求没有进入预期的逐
+callback 统计。因此该轮只能判定为“部分封闭”，不能作为 mutation 全矩阵通过。
+下一步必须定位 unlink 的真实修改窗口、补齐九类 operation 的命中证据，并继续处理
+symlink 严格 `ENOENT` 语义。
+
 ### 最终准入
 
 - [ ] HideLab 全量 active 回归；

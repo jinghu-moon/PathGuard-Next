@@ -3670,3 +3670,31 @@ OTA 重新准入和 daemon 正式集成仍未完成。结束时执行 `DISABLE -
 并删除 fixture，模块/设备节点消失，boot ID 未变化。产品状态仍为
 `Hide 1.0 = unsupported`，但 FUSE-aware 只读 backend 已具备继续扩展 mutation
 和 namespace 门禁的设备证据。
+
+## 2026-09-18：v9 mode=0 mutation 封闭实验
+
+使用同一 v9 模块以 `shadow_mode=0` 绑定 disposable fixture，Target 与 Control
+分别执行 mutation probe。Target 的 external 路径结果为：
+
+- create、truncate、mkdir、rename source/destination、link、symlink 均在真实对象
+  修改前返回 `ENOENT`；
+- fixture 的 hidden/canary 内容保持可恢复状态；
+- 但 `external.mutation.unlinkat` 的探针记录为 `side_effect=true`，不能将该轮
+  视为无副作用全通过；
+- 内核累计计数为 `mutation=3/1/2/0`（calls/blocked/original/unsupported），
+  表明不少请求在 lookup synthetic negative 阶段结束，尚未证明九个 mutation
+  operation callback 均被逐一命中。
+
+Control UID 的同组操作可以执行；其 `symlinkat` 返回设备 FUSE 的 `EACCES`，再次
+证明平台错误码不能直接替代 Hide 1.0 要求的严格 `ENOENT`。
+
+证据文件：
+
+```text
+build/device-evidence/hide1-v9-mutation-target.jsonl
+build/device-evidence/hide1-v9-mutation-control.jsonl
+```
+
+本轮结束执行 `DISABLE -> CLEAR -> rmmod` 并删除 fixture，设备未重启。结论为
+mutation 部分封闭、仍不准入；必须补充逐 callback 命中证据、unlink side-effect
+根因分析以及 symlink 语义收敛。
