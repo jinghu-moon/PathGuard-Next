@@ -221,7 +221,10 @@ function Assert-HideDirectVfs([string]$Role) {
             throw "LEAK: HideLab $Role did not omit hidden basename for $test"
         }
     }
-    $mutationRows = @($rows | Where-Object { $_.test -like 'external.mutation.*' })
+    $mutationRows = @($rows | Where-Object {
+        $_.test -like 'external.mutation.*' -or
+        $_.test -like 'external.fd_mutation.*'
+    })
     foreach ($row in $mutationRows) {
         if ($row.return_value -ne -1 -or $row.errno -ne 2 -or $row.side_effect) {
             $kind = if ($row.return_value -eq -1 -and $row.errno -ne 2) { 'SEMANTIC_DRIFT' } else { 'LEAK' }

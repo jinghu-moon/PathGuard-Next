@@ -26,6 +26,9 @@ using pathguard::hide_probe::ProbeStatus;
 using pathguard::hide_probe::RenderObservationJson;
 
 thread_local std::string* g_captured_output = nullptr;
+/* Deliberately process-lifetime: the pre-open phase runs before ENABLE and
+ * the attack phase reuses this directory FD after the VFS shadow is live. */
+int g_held_hidden_fd = -1;
 
 struct LinuxDirent64 {
     uint64_t inode;
@@ -860,6 +863,59 @@ void ObserveExternalMutations(const std::string& hidden_path) {
     close(parent_fd);
 }
 
+void ObserveExternalHiddenFdMutations(const std::string& hidden_path) {
+    const bool held = g_held_hidden_fd >= 0;
+    const int hidden_fd = held ? g_held_hidden_fd : open(
+        hidden_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (hidden_fd < 0) {
+        Emit("external.fd_mutation.open_hidden", "mutation", hidden_path,
+             -1, errno, false, ProbeStatus::kSetupError);
+        return;
+    }
+
+    const std::string created = "hidelab-fd-created";
+    const int create_fd = openat(hidden_fd, created.c_str(),
+                                 O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+                                 0600);
+    const int create_errno = create_fd < 0 ? errno : 0;
+    if (create_fd >= 0) close(create_fd);
+    Emit("external.fd_mutation.openat_create", "mutation",
+         hidden_path + "/" + created, create_fd < 0 ? -1 : 0,
+         create_errno, create_fd >= 0);
+    unlinkat(hidden_fd, created.c_str(), 0);
+
+    const int truncate_fd = openat(hidden_fd, "canary.txt",
+                                   O_WRONLY | O_TRUNC | O_CLOEXEC);
+    const int truncate_errno = truncate_fd < 0 ? errno : 0;
+    if (truncate_fd >= 0) close(truncate_fd);
+    Emit("external.fd_mutation.openat_truncate", "mutation",
+         hidden_path + "/canary.txt", truncate_fd < 0 ? -1 : 0,
+         truncate_errno, truncate_fd >= 0);
+
+    const int mkdir_result = mkdirat(hidden_fd, "hidelab-fd-dir", 0700);
+    const int mkdir_errno = mkdir_result < 0 ? errno : 0;
+    Emit("external.fd_mutation.mkdirat", "mutation",
+         hidden_path + "/hidelab-fd-dir", mkdir_result, mkdir_errno,
+         mkdir_result == 0);
+    if (mkdir_result == 0) unlinkat(hidden_fd, "hidelab-fd-dir", AT_REMOVEDIR);
+
+    const int unlink_result = unlinkat(hidden_fd, "nested/nested.txt", 0);
+    const int unlink_errno = unlink_result < 0 ? errno : 0;
+    Emit("external.fd_mutation.unlinkat", "mutation",
+         hidden_path + "/nested/nested.txt", unlink_result, unlink_errno,
+         unlink_result == 0);
+
+    const int symlink_result = symlinkat("canary.txt", hidden_fd,
+                                         "hidelab-fd-symlink");
+    const int symlink_errno = symlink_result < 0 ? errno : 0;
+    Emit("external.fd_mutation.symlinkat", "mutation",
+         hidden_path + "/hidelab-fd-symlink", symlink_result,
+         symlink_errno, symlink_result == 0);
+    unlinkat(hidden_fd, "hidelab-fd-symlink", 0);
+
+    if (!held) close(hidden_fd);
+}
+
 std::string ReadSmallFile(const char* path) {
     const int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return {};
@@ -929,7 +985,8 @@ int pathguard::hide_probe::RunHideVfsProbe(
         return Fail("sandbox_path", sandbox, EINVAL);
     }
     if (scenario != "baseline" && scenario != "cache-order"
-        && scenario != "concurrency" && scenario != "reliability") {
+        && scenario != "concurrency" && scenario != "reliability"
+        && scenario != "preopen-hidden-fd") {
         return Fail("scenario", scenario, EINVAL);
     }
 
@@ -984,6 +1041,16 @@ int pathguard::hide_probe::RunHideVfsProbe(
     const std::string mountstats_before = ReadSmallFile("/proc/self/mountstats");
 
     const std::string hidden_path = sandbox + "/hidden";
+    if (scenario == "preopen-hidden-fd" && !observed_paths.empty()) {
+        if (g_held_hidden_fd >= 0) close(g_held_hidden_fd);
+        g_held_hidden_fd = open(observed_paths.front().c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        Emit("external.fd_mutation.preopen", "mutation",
+             observed_paths.front(), g_held_hidden_fd >= 0 ? 0 : -1,
+             g_held_hidden_fd >= 0 ? 0 : errno, false,
+             g_held_hidden_fd >= 0 ? ProbeStatus::kObserved
+                                   : ProbeStatus::kSetupError);
+    }
     ObservePath("sandbox.hidden", hidden_path);
     ObservePath("sandbox.descendant", hidden_path + "/canary");
     ObservePath("sandbox.symlink_alias", sandbox + "/alias");
@@ -1004,6 +1071,7 @@ int pathguard::hide_probe::RunHideVfsProbe(
     }
     if (attack_mutations && !observed_paths.empty()) {
         ObserveExternalMutations(observed_paths.front());
+        ObserveExternalHiddenFdMutations(observed_paths.front());
     }
 
     const std::string mountinfo_after = ReadSmallFile("/proc/self/mountinfo");

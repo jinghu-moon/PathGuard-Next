@@ -53,10 +53,12 @@ struct hide1_binding;
 
 struct hide1_iop_meta {
     struct hlist_node node;
+    struct list_head binding_node;
     struct inode *inode;
     struct hide1_binding *binding;
     const struct inode_operations *orig;
     struct inode_operations shadow;
+    bool hidden_object;
     atomic_t active;
     wait_queue_head_t wait;
 };
@@ -114,7 +116,9 @@ struct hide1_binding {
     struct hide1_shadow shadow;
     const struct dentry_operations *parent_dop;
     struct list_head dentry_shadows;
+    struct list_head hidden_iop_metas;
     spinlock_t dentry_lock;
+    spinlock_t hidden_iop_lock;
     spinlock_t identity_lock;
     bool retiring;
 };
@@ -316,6 +320,12 @@ static int hide1_d_revalidate(struct dentry *, unsigned int);
 static void hide1_free_dentry_shadows(struct list_head *retired);
 static void hide1_record_hidden_inode(struct hide1_binding *binding,
                                       struct inode *inode);
+static int hide1_install_iop_shadow_locked(
+    struct hide1_binding *binding, struct inode *inode,
+    const struct inode_operations *expected, bool parent_ingress,
+    bool hidden_object, struct hide1_iop_meta **slot);
+static void hide1_install_descendant_iop_shadow(struct hide1_binding *binding,
+                                                struct inode *inode);
 static bool hide1_mutation_blocked(struct hide1_binding *binding,
                                    struct inode *parent,
                                    struct dentry *dentry);
@@ -647,12 +657,12 @@ static int hide1_install_dentry_shadow(struct hide1_binding *binding,
 static int hide1_install_iop_shadow_locked(
     struct hide1_binding *binding, struct inode *inode,
     const struct inode_operations *expected, bool parent_ingress,
-    struct hide1_iop_meta **slot)
+    bool hidden_object, struct hide1_iop_meta **slot)
 {
     struct hide1_iop_meta *meta;
     const struct inode_operations *observed;
 
-    if (!binding || !inode || !expected || !slot || *slot)
+    if (!binding || !inode || !expected || (slot && *slot))
         return -EINVAL;
     if (READ_ONCE(inode->i_op) != expected)
         return -EAGAIN;
@@ -664,6 +674,7 @@ static int hide1_install_iop_shadow_locked(
     meta->binding = binding;
     meta->orig = expected;
     meta->shadow = *expected;
+    meta->hidden_object = hidden_object;
     if (parent_ingress) {
         meta->shadow.lookup = hide1_lookup;
         meta->shadow.atomic_open = hide1_atomic_open;
@@ -685,6 +696,7 @@ static int hide1_install_iop_shadow_locked(
     }
     atomic_set(&meta->active, 0);
     init_waitqueue_head(&meta->wait);
+    INIT_LIST_HEAD(&meta->binding_node);
 
     spin_lock(&hide1_meta_lock);
     hash_add_rcu(hide1_iop_table, &meta->node, (unsigned long)inode);
@@ -699,7 +711,15 @@ static int hide1_install_iop_shadow_locked(
         kfree(meta);
         return -EAGAIN;
     }
-    *slot = meta;
+    if (slot)
+        *slot = meta;
+    if (hidden_object) {
+        unsigned long flags;
+
+        spin_lock_irqsave(&binding->hidden_iop_lock, flags);
+        list_add_tail(&meta->binding_node, &binding->hidden_iop_metas);
+        spin_unlock_irqrestore(&binding->hidden_iop_lock, flags);
+    }
     return 0;
 }
 
@@ -736,7 +756,7 @@ static int hide1_install_named_object_shadows(struct hide1_binding *binding)
     if (hide1_mode_has_iop() && !hide1_mode_is_readonly() &&
         S_ISDIR(child_inode->i_mode)) {
         ret = hide1_install_iop_shadow_locked(
-            binding, child_inode, READ_ONCE(child_inode->i_op), false,
+            binding, child_inode, READ_ONCE(child_inode->i_op), false, true,
             &binding->shadow.hidden_iop_meta);
         if (ret) {
             path_put(&child);
@@ -748,6 +768,58 @@ static int hide1_install_named_object_shadows(struct hide1_binding *binding)
           hide1_install_dentry_shadow(binding, child.dentry, false) : 0;
     path_put(&child);
     return ret;
+}
+
+static void hide1_install_descendant_iop_shadow(struct hide1_binding *binding,
+                                                struct inode *inode)
+{
+    struct hide1_iop_meta *existing;
+
+    if (!binding || !inode || !S_ISDIR(inode->i_mode) ||
+        hide1_mode_is_readonly())
+        return;
+    rcu_read_lock();
+    existing = hide1_iop_lookup_rcu(inode);
+    rcu_read_unlock();
+    if (existing && existing->binding == binding)
+        return;
+    (void)hide1_install_iop_shadow_locked(
+        binding, inode, READ_ONCE(inode->i_op), false, true, NULL);
+}
+
+static void hide1_restore_hidden_iop_metas_locked(
+    struct hide1_binding *binding, struct list_head *retired)
+{
+    struct hide1_iop_meta *meta, *tmp;
+    unsigned long flags;
+
+    if (!binding || !retired)
+        return;
+    spin_lock_irqsave(&binding->hidden_iop_lock, flags);
+    list_for_each_entry_safe(meta, tmp, &binding->hidden_iop_metas,
+                             binding_node) {
+        if (READ_ONCE(meta->inode->i_op) == &meta->shadow)
+            smp_store_release(&meta->inode->i_op, meta->orig);
+        list_move_tail(&meta->binding_node, retired);
+        spin_lock(&hide1_meta_lock);
+        hash_del_rcu(&meta->node);
+        spin_unlock(&hide1_meta_lock);
+    }
+    spin_unlock_irqrestore(&binding->hidden_iop_lock, flags);
+    binding->shadow.hidden_iop_meta = NULL;
+    binding->shadow.hidden_iop_installed = false;
+}
+
+static void hide1_free_hidden_iop_metas(struct list_head *retired)
+{
+    struct hide1_iop_meta *meta, *tmp;
+
+    if (!retired)
+        return;
+    list_for_each_entry_safe(meta, tmp, retired, binding_node) {
+        list_del_init(&meta->binding_node);
+        kfree(meta);
+    }
 }
 
 static int hide1_restore_dentry_shadows(struct hide1_binding *binding,
@@ -818,11 +890,12 @@ static void hide1_drain_retired_dentries(struct list_head *retired)
 }
 
 static void hide1_drain_callbacks(struct hide1_iop_meta *im,
-                                  struct hide1_iop_meta *hidden_im,
+                                  struct list_head *retired_iops,
                                   struct hide1_fop_meta *fm,
                                   struct list_head *retired)
 {
     struct hide1_dentry_shadow *dm;
+    struct hide1_iop_meta *hidden_im;
 
     /* The first Tasks-RCU pass is issued by the RESTORE stage before indices
      * are removed.  Here we close the active-callback and reclamation sides. */
@@ -831,8 +904,9 @@ static void hide1_drain_callbacks(struct hide1_iop_meta *im,
     wait_event(hide1_dop_wait, atomic_read(&hide1_dop_active) == 0);
     if (im)
         wait_event(im->wait, atomic_read(&im->active) == 0);
-    if (hidden_im)
-        wait_event(hidden_im->wait, atomic_read(&hidden_im->active) == 0);
+    if (retired_iops)
+        list_for_each_entry(hidden_im, retired_iops, binding_node)
+            wait_event(hidden_im->wait, atomic_read(&hidden_im->active) == 0);
     if (fm)
         wait_event(fm->wait, atomic_read(&fm->active) == 0);
     if (retired)
@@ -960,6 +1034,13 @@ static struct dentry *hide1_lookup(struct inode *dir, struct dentry *dentry,
     }
     orig = meta->orig;
     result = orig && orig->lookup ? orig->lookup(dir, dentry, flags) : NULL;
+    if (!IS_ERR(result) &&
+        (meta->hidden_object ||
+         (binding->hidden_inode && dir == binding->hidden_inode))) {
+        struct inode *child_inode = result ? d_backing_inode(result) :
+                                            d_backing_inode(dentry);
+        hide1_install_descendant_iop_shadow(binding, child_inode);
+    }
     if (!IS_ERR(result) && hide1_mode_has_dop() &&
         dir == binding->parent_inode && hide1_name_matches(binding, dentry)) {
         struct dentry *resolved = result ? result : dentry;
@@ -1212,13 +1293,26 @@ static bool hide1_mutation_blocked(struct hide1_binding *binding,
                                    struct dentry *dentry)
 {
     struct hide1_iop_meta *hidden_meta;
+    struct hide1_iop_meta *meta;
+    unsigned long flags;
+    bool hidden_parent = false;
 
     if (hide1_should_hide(binding, parent, dentry))
         return true;
     if (!hide1_is_target_observer(binding) || !parent)
         return false;
     hidden_meta = READ_ONCE(binding->shadow.hidden_iop_meta);
-    return hidden_meta && parent == hidden_meta->inode;
+    if (hidden_meta && parent == hidden_meta->inode)
+        return true;
+    spin_lock_irqsave(&binding->hidden_iop_lock, flags);
+    list_for_each_entry(meta, &binding->hidden_iop_metas, binding_node) {
+        if (meta->inode == parent) {
+            hidden_parent = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&binding->hidden_iop_lock, flags);
+    return hidden_parent;
 }
 
 static bool hide1_hidden_source(struct hide1_binding *binding,
@@ -1498,9 +1592,9 @@ static int hide1_shadow_install_locked(struct hide1_binding *binding)
     struct hide1_shadow *shadow = &binding->shadow;
     struct inode *inode = binding->parent_inode;
     struct hide1_iop_meta *im = NULL;
-    struct hide1_iop_meta *him = NULL;
     struct hide1_fop_meta *fm = NULL;
     LIST_HEAD(retired);
+    LIST_HEAD(retired_iops);
     int ret;
 
     if (shadow->iop_installed || shadow->hidden_iop_installed ||
@@ -1523,7 +1617,8 @@ static int hide1_shadow_install_locked(struct hide1_binding *binding)
 
     if (hide1_mode_has_iop()) {
         ret = hide1_install_iop_shadow_locked(
-            binding, inode, shadow->orig_iop, true, &shadow->iop_meta);
+            binding, inode, shadow->orig_iop, true, false,
+            &shadow->iop_meta);
         if (ret)
             goto rollback;
         im = shadow->iop_meta;
@@ -1579,17 +1674,11 @@ static int hide1_shadow_install_locked(struct hide1_binding *binding)
 
 rollback:
     WRITE_ONCE(binding->retiring, true);
+    hide1_restore_hidden_iop_metas_locked(binding, &retired_iops);
     if (shadow->fop_installed && shadow->fop_meta &&
         READ_ONCE(inode->i_fop) == &shadow->fop_meta->ingress) {
         smp_store_release(&inode->i_fop, shadow->orig_fop);
         shadow->fop_installed = false;
-    }
-    if (shadow->hidden_iop_installed && shadow->hidden_iop_meta &&
-        READ_ONCE(shadow->hidden_iop_meta->inode->i_op) ==
-            &shadow->hidden_iop_meta->shadow) {
-        smp_store_release(&shadow->hidden_iop_meta->inode->i_op,
-                          shadow->hidden_iop_meta->orig);
-        shadow->hidden_iop_installed = false;
     }
     if (shadow->iop_installed && shadow->iop_meta &&
         READ_ONCE(inode->i_op) == &shadow->iop_meta->shadow) {
@@ -1603,11 +1692,6 @@ rollback:
         im = shadow->iop_meta;
         shadow->iop_meta = NULL;
     }
-    if (shadow->hidden_iop_meta) {
-        hash_del_rcu(&shadow->hidden_iop_meta->node);
-        him = shadow->hidden_iop_meta;
-        shadow->hidden_iop_meta = NULL;
-    }
     if (shadow->fop_meta) {
         hash_del_rcu(&shadow->fop_meta->node);
         fm = shadow->fop_meta;
@@ -1618,11 +1702,11 @@ rollback:
     /* A wrapper drops the short RCU read-side section immediately after
      * taking an active reference.  RCU alone therefore does not prove that
      * the wrapper stopped dereferencing metadata. */
-    hide1_drain_callbacks(im, him, fm, &retired);
+    hide1_drain_callbacks(im, &retired_iops, fm, &retired);
     hide1_drain_retired_dentries(&retired);
     hide1_free_dentry_shadows(&retired);
     kfree(im);
-    kfree(him);
+    hide1_free_hidden_iop_metas(&retired_iops);
     hide1_free_fop_meta(fm);
     if (shadow->module_pin) {
         shadow->module_pin = false;
@@ -1636,9 +1720,9 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
     struct hide1_shadow *shadow = &binding->shadow;
     struct inode *inode = binding->parent_inode;
     struct hide1_iop_meta *im;
-    struct hide1_iop_meta *him;
     struct hide1_fop_meta *fm;
     LIST_HEAD(retired);
+    LIST_HEAD(retired_iops);
     int ret = 0;
     int dentry_ret;
 
@@ -1666,11 +1750,20 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
         (!inode || !shadow->iop_meta ||
          READ_ONCE(inode->i_op) != &shadow->iop_meta->shadow))
         return -EAGAIN;
-    if (shadow->hidden_iop_installed &&
-        (!shadow->hidden_iop_meta || !shadow->hidden_iop_meta->inode ||
-         READ_ONCE(shadow->hidden_iop_meta->inode->i_op) !=
-             &shadow->hidden_iop_meta->shadow))
-        return -EAGAIN;
+    {
+        struct hide1_iop_meta *hidden_meta;
+        unsigned long flags;
+        spin_lock_irqsave(&binding->hidden_iop_lock, flags);
+        list_for_each_entry(hidden_meta, &binding->hidden_iop_metas,
+                            binding_node) {
+            if (!hidden_meta->inode ||
+                READ_ONCE(hidden_meta->inode->i_op) != &hidden_meta->shadow) {
+                spin_unlock_irqrestore(&binding->hidden_iop_lock, flags);
+                return -EAGAIN;
+            }
+        }
+        spin_unlock_irqrestore(&binding->hidden_iop_lock, flags);
+    }
 
     if (!shadow->iop_installed && !shadow->hidden_iop_installed &&
         !shadow->fop_installed &&
@@ -1684,17 +1777,14 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
 
     if (shadow->fop_installed)
         smp_store_release(&inode->i_fop, shadow->orig_fop);
-    if (shadow->hidden_iop_installed)
-        smp_store_release(&shadow->hidden_iop_meta->inode->i_op,
-                          shadow->hidden_iop_meta->orig);
     if (shadow->iop_installed)
         smp_store_release(&inode->i_op, shadow->orig_iop);
     shadow->fop_installed = false;
-    shadow->hidden_iop_installed = false;
     shadow->iop_installed = false;
 
     /* RESTORE: all ingress pointers now reference the original filesystem. */
     hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_RESTORE;
+    hide1_restore_hidden_iop_metas_locked(binding, &retired_iops);
 
     /* Restore operation pointers first.  This prevents new calls from
      * entering the shadow; SRCU drains wrappers that already entered it and
@@ -1711,15 +1801,10 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
     mutex_lock(&hide1_lock);
     spin_lock(&hide1_meta_lock);
     im = shadow->iop_meta;
-    him = shadow->hidden_iop_meta;
     fm = shadow->fop_meta;
     if (im) {
         hash_del_rcu(&im->node);
         shadow->iop_meta = NULL;
-    }
-    if (him) {
-        hash_del_rcu(&him->node);
-        shadow->hidden_iop_meta = NULL;
     }
     if (fm) {
         hash_del_rcu(&fm->node);
@@ -1728,12 +1813,12 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
     spin_unlock(&hide1_meta_lock);
 
     mutex_unlock(&hide1_lock);
-    hide1_drain_callbacks(im, him, fm, &retired);
+    hide1_drain_callbacks(im, &retired_iops, fm, &retired);
     mutex_lock(&hide1_lock);
     hide1_drain_retired_dentries(&retired);
     hide1_free_dentry_shadows(&retired);
     kfree(im);
-    kfree(him);
+    hide1_free_hidden_iop_metas(&retired_iops);
     hide1_free_fop_meta(fm);
     if (shadow->module_pin) {
         shadow->module_pin = false;
@@ -1925,7 +2010,9 @@ static int hide1_prepare_binding(const struct pathguard_hide1_rule *rule,
     binding->shadow.module_pin = false;
     binding->parent_dop = parent.dentry->d_op;
     INIT_LIST_HEAD(&binding->dentry_shadows);
+    INIT_LIST_HEAD(&binding->hidden_iop_metas);
     spin_lock_init(&binding->dentry_lock);
+    spin_lock_init(&binding->hidden_iop_lock);
     spin_lock_init(&binding->identity_lock);
     binding->retiring = false;
     return 0;
@@ -1954,7 +2041,9 @@ static void hide1_commit_binding(struct hide1_binding *binding)
     hide1_binding.shadow = binding->shadow;
     hide1_binding.parent_dop = binding->parent_dop;
     INIT_LIST_HEAD(&hide1_binding.dentry_shadows);
+    INIT_LIST_HEAD(&hide1_binding.hidden_iop_metas);
     spin_lock_init(&hide1_binding.dentry_lock);
+    spin_lock_init(&hide1_binding.hidden_iop_lock);
     spin_lock_init(&hide1_binding.identity_lock);
     hide1_binding.retiring = false;
 
@@ -2178,7 +2267,9 @@ static int __init hide1_init(void)
     if (strcmp(init_utsname()->release, PATHGUARD_HIDE1_EXPECTED_RELEASE) != 0)
         return -ENODEV;
     INIT_LIST_HEAD(&hide1_binding.dentry_shadows);
+    INIT_LIST_HEAD(&hide1_binding.hidden_iop_metas);
     spin_lock_init(&hide1_binding.dentry_lock);
+    spin_lock_init(&hide1_binding.hidden_iop_lock);
     spin_lock_init(&hide1_binding.identity_lock);
     hash_init(hide1_iop_table);
     hash_init(hide1_fop_table);

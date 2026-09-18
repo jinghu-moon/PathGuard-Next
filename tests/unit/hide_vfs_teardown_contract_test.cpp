@@ -159,7 +159,7 @@ int main() {
         "hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_RESTORE",
         "hide1_restore_dentry_shadows(binding, &retired)",
         "hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_DRAINING",
-        "hide1_drain_callbacks(im, him, fm, &retired)",
+        "hide1_drain_callbacks(im, &retired_iops, fm, &retired)",
         "hide1_drain_retired_dentries(&retired)",
         "hide1_free_dentry_shadows(&retired)",
         "return ret",
@@ -188,6 +188,10 @@ int main() {
     assert(source.find("struct hide1_fop_meta") != std::string::npos);
     assert(source.find("struct inode *hidden_inode") != std::string::npos);
     assert(source.find("struct hide1_iop_meta *hidden_iop_meta") !=
+           std::string::npos);
+    assert(source.find("struct list_head hidden_iop_metas") !=
+           std::string::npos);
+    assert(source.find("hide1_install_descendant_iop_shadow") !=
            std::string::npos);
     const std::string mutation_blocked = FunctionBody(
         source, "static bool hide1_mutation_blocked",
@@ -312,9 +316,9 @@ int main() {
         "rollback:",
         "hash_del_rcu(&shadow->iop_meta->node)",
         "synchronize_rcu();",
-        "hide1_drain_callbacks(im, him, fm, &retired);",
+        "hide1_drain_callbacks(im, &retired_iops, fm, &retired);",
         "kfree(im)",
-        "kfree(him)",
+        "hide1_free_hidden_iop_metas(&retired_iops)",
     });
     RequireOrder(install, {
         "hide1_install_iop_shadow_locked(",
@@ -328,12 +332,9 @@ int main() {
         "hide1_install_dentry_shadow(binding, child.dentry",
     });
     RequireOrder(uninstall, {
-        "shadow->hidden_iop_installed",
-        "READ_ONCE(shadow->hidden_iop_meta->inode->i_op)",
-        "smp_store_release(&shadow->hidden_iop_meta->inode->i_op",
-        "hash_del_rcu(&him->node)",
-        "hide1_drain_callbacks(im, him, fm, &retired)",
-        "kfree(him)",
+        "hide1_restore_hidden_iop_metas_locked(binding, &retired_iops)",
+        "hide1_drain_callbacks(im, &retired_iops, fm, &retired)",
+        "hide1_free_hidden_iop_metas(&retired_iops)",
     });
     const std::string reset = FunctionBody(
         source, "static int hide1_reset_locked",
