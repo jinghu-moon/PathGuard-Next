@@ -108,6 +108,7 @@ struct hide1_binding {
     struct path parent_path;
     struct inode *parent_inode;
     struct inode *hidden_inode;
+    struct dentry *hidden_dentry;
     struct super_block *parent_sb;
     struct task_struct *target_task;
     struct nsproxy *target_nsproxy;
@@ -326,6 +327,8 @@ static int hide1_install_iop_shadow_locked(
     bool hidden_object, struct hide1_iop_meta **slot);
 static void hide1_install_descendant_iop_shadow(struct hide1_binding *binding,
                                                 struct inode *inode);
+static void hide1_install_cached_descendant_shadows(struct hide1_binding *binding,
+                                                    struct dentry *parent);
 static bool hide1_mutation_blocked(struct hide1_binding *binding,
                                    struct inode *parent,
                                    struct dentry *dentry);
@@ -753,6 +756,8 @@ static int hide1_install_named_object_shadows(struct hide1_binding *binding)
         return -ESTALE;
     }
     hide1_record_hidden_inode(binding, child_inode);
+    if (!binding->hidden_dentry)
+        binding->hidden_dentry = dget(child.dentry);
     if (hide1_mode_has_iop() && !hide1_mode_is_readonly() &&
         S_ISDIR(child_inode->i_mode)) {
         ret = hide1_install_iop_shadow_locked(
@@ -766,6 +771,8 @@ static int hide1_install_named_object_shadows(struct hide1_binding *binding)
     }
     ret = hide1_mode_has_dop() ?
           hide1_install_dentry_shadow(binding, child.dentry, false) : 0;
+    if (!ret && !hide1_mode_is_readonly())
+        hide1_install_cached_descendant_shadows(binding, child.dentry);
     path_put(&child);
     return ret;
 }
@@ -785,6 +792,45 @@ static void hide1_install_descendant_iop_shadow(struct hide1_binding *binding,
         return;
     (void)hide1_install_iop_shadow_locked(
         binding, inode, READ_ONCE(inode->i_op), false, true, NULL);
+}
+
+static void hide1_install_cached_descendant_shadows(struct hide1_binding *binding,
+                                                    struct dentry *parent)
+{
+    struct dentry *child;
+    struct dentry *children[64];
+    unsigned int count = 0;
+    unsigned int index;
+
+    if (!binding || !parent || READ_ONCE(binding->retiring))
+        return;
+
+    /* Snapshot references while holding only the parent d_lock.  Installing
+     * operation tables may allocate and take unrelated locks, so it must not
+     * run under the dcache lock.  The fixed bound is fail-closed for the lab
+     * prototype: an overflow leaves admission unsupported rather than
+     * claiming full subtree coverage. */
+    spin_lock(&parent->d_lock);
+    hlist_for_each_entry(child, &parent->d_children, d_sib) {
+        if (count == ARRAY_SIZE(children))
+            break;
+        children[count++] = dget_dlock(child);
+    }
+    spin_unlock(&parent->d_lock);
+
+    for (index = 0; index < count; ++index) {
+        struct inode *inode = d_backing_inode(children[index]);
+
+        if (inode && S_ISDIR(inode->i_mode)) {
+            hide1_install_descendant_iop_shadow(binding, inode);
+            if (hide1_mode_has_dop())
+                (void)hide1_install_dentry_shadow(binding,
+                                                  children[index], false);
+            hide1_install_cached_descendant_shadows(binding,
+                                                    children[index]);
+        }
+        dput(children[index]);
+    }
 }
 
 static void hide1_restore_hidden_iop_metas_locked(
@@ -1868,6 +1914,10 @@ static void hide1_release_binding(struct hide1_binding *binding)
         spin_unlock(&binding->identity_lock);
         iput(hidden);
     }
+    if (binding->hidden_dentry) {
+        dput(binding->hidden_dentry);
+        binding->hidden_dentry = NULL;
+    }
     binding->parent_sb = NULL;
     if (binding->target_task) {
         put_task_struct(binding->target_task);
@@ -2002,6 +2052,7 @@ static int hide1_prepare_binding(const struct pathguard_hide1_rule *rule,
     binding->target_nsproxy = nsproxy;
     binding->target_mnt_ns = nsproxy->mnt_ns;
     binding->hidden_inode = NULL;
+    binding->hidden_dentry = NULL;
     binding->operation_mask = operation_mask;
     binding->shadow.orig_iop = inode->i_op;
     binding->shadow.orig_fop = inode->i_fop;
@@ -2037,6 +2088,7 @@ static void hide1_commit_binding(struct hide1_binding *binding)
     hide1_binding.target_nsproxy = binding->target_nsproxy;
     hide1_binding.target_mnt_ns = binding->target_mnt_ns;
     hide1_binding.hidden_inode = binding->hidden_inode;
+    hide1_binding.hidden_dentry = binding->hidden_dentry;
     hide1_binding.operation_mask = binding->operation_mask;
     hide1_binding.shadow = binding->shadow;
     hide1_binding.parent_dop = binding->parent_dop;

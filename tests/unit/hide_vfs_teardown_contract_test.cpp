@@ -193,6 +193,10 @@ int main() {
            std::string::npos);
     assert(source.find("hide1_install_descendant_iop_shadow") !=
            std::string::npos);
+    assert(source.find("hide1_install_cached_descendant_shadows") !=
+           std::string::npos);
+    assert(source.find("hlist_for_each_entry(child, &parent->d_children") !=
+           std::string::npos);
     const std::string mutation_blocked = FunctionBody(
         source, "static bool hide1_mutation_blocked",
         "static bool hide1_hidden_source");
