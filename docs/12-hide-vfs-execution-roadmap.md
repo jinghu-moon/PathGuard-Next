@@ -529,6 +529,30 @@ mutation 没有真实副作用。不能因为 Target 通过而忽略 Control 的
 - daemon 把规则转换为 versioned Hide UAPI；
 - generation 由 control plane 分配和撤销；
 - `DISABLE`、`CLEAR`、Target 退出和异常路径统一 fail-closed；
+
+### 2026-09-18：Target 退出状态契约修复
+
+v8 真机实验发现，旧 Target 退出后，回调侧已经通过 `PF_EXITING` 阻止新
+进程继承隐藏视图，但状态仍可能保留 `ACTIVE`，造成控制面陈旧状态。该行为
+不能作为 Hide 1.0 生命周期通过。
+
+本阶段采用不增加 `sched_process_exit` 内核 hook 的收缩方案：
+
+1. 在持有模块全局锁的 `STATUS`/`DISABLE` 路径检查被 pin 的
+   `target_task->flags & PF_EXITING`；
+2. 检测到退出后发布 `retiring=true`、`lifecycle=STOP_NEW`、
+   `state=INACTIVE`、`last_error=-ESRCH`；
+3. `DISABLE` 不再只依赖 `state=ACTIVE`，只要 i_op/f_op ingress 或 dentry
+   shadow 仍存在，就继续执行完整的 `RESTORE -> DRAIN -> FREE`；
+4. 不自动在任意进程退出回调中执行恢复，避免在 VFS 回调上下文扩大锁和卸载
+   风险；userspace watcher 仍需在正式准入前显式执行 `DISABLE -> CLEAR`。
+
+离线契约测试覆盖：`PF_EXITING` 检测、状态发布顺序、退出后 DISABLE 的
+shadow 存在性判断及 STATUS 触发的 fail-closed 观察。设备侧原始证据仍保留在
+`build/device-evidence/hide1-v8-target-exit/20260918-210016/`：旧 Target
+退出后新同 UID 进程得到 `BASELINE_VISIBLE_NOT_HIDE_PASS`，设备未重启；在
+本阶段修复模块构建并完成真机回归前，产品状态继续为
+`Hide 1.0 = unsupported`。
 - 默认状态为 `inactive`；
 - capability、admission、runtime state 三者分离；
 - lab module 与 production module 分离；

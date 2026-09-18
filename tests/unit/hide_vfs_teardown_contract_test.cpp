@@ -75,6 +75,12 @@ int main() {
     const std::string commit = FunctionBody(
         source, "static void hide1_commit_binding",
         "static long hide1_ioctl");
+    const std::string revoke = FunctionBody(
+        source, "static void hide1_revoke_dead_target_locked",
+        "static bool hide1_name_matches");
+    const std::string target_exited = FunctionBody(
+        source, "static bool hide1_target_exited_locked",
+        "static void hide1_revoke_dead_target_locked");
 
     assert(source.find("static int hide1_shadow_mode = 1;") !=
            std::string::npos);
@@ -196,6 +202,30 @@ int main() {
     });
     assert(source.find("struct task_struct *target_task") != std::string::npos);
     assert(source.find("same_thread_group(current, binding->target_task)") !=
+           std::string::npos);
+    assert(source.find("static bool hide1_target_exited_locked") !=
+           std::string::npos);
+    assert(target_exited.find("PF_EXITING") != std::string::npos);
+    RequireOrder(revoke, {
+        "hide1_binding.retiring = true",
+        "hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_STOP_NEW",
+        "WRITE_ONCE(hide1_status.state, PATHGUARD_HIDE1_STATE_INACTIVE)",
+        "hide1_status.last_error = -ESRCH",
+    });
+    const std::string disable = FunctionBody(
+        source, "case PATHGUARD_HIDE1_IOC_DISABLE:",
+        "case PATHGUARD_HIDE1_IOC_CLEAR:");
+    RequireOrder(disable, {
+        "hide1_revoke_dead_target_locked();",
+        "hide1_binding.shadow.iop_installed",
+        "hide1_binding.shadow.fop_installed",
+        "!list_empty(&hide1_binding.dentry_shadows)",
+        "hide1_shadow_uninstall_locked(&hide1_binding)",
+    });
+    const std::string status = FunctionBody(
+        source, "case PATHGUARD_HIDE1_IOC_STATUS:",
+        "default:");
+    assert(status.find("hide1_revoke_dead_target_locked();") !=
            std::string::npos);
     assert(source.find("put_task_struct(binding->target_task)") !=
            std::string::npos);

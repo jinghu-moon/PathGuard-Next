@@ -3540,3 +3540,29 @@ build/device-evidence/hide1-v8-mutation-v3-after.txt
 结论：mutation 前置封闭已在 mode 0 的单设备 fixture 上覆盖并证明多数操作无副作用，
 但 symlink 的严格 `ENOENT` 语义仍受 FUSE 平台 `EACCES` 阻塞；namespace 销毁、OTA
 准入和正式 daemon 集成尚未开始，产品状态继续为 `Hide 1.0 = unsupported`。
+
+## 2026-09-18：Target 退出生命周期实验与修复
+
+v8 真机实验使用 generation `9101` 绑定旧 Target PID `528`、mount namespace
+`4026536020`。Target 被 force-stop 后设备 boot ID 未变化，旧 Target 不再提供
+隐藏视图；同 UID 新进程结果为 `BASELINE_VISIBLE_NOT_HIDE_PASS`，说明不会错误
+继承旧 binding。但模块状态仍显示 `ACTIVE`，暴露出控制面状态陈旧问题。
+
+本阶段完成离线修复：
+
+- 在 `STATUS`/`DISABLE` 的全局锁路径检测 pinned task 的 `PF_EXITING`；
+- 发布 `retiring=true`、`STOP_NEW`、`INACTIVE` 和 `last_error=-ESRCH`；
+- `DISABLE` 即使状态已发布为 `INACTIVE`，只要仍有 ingress/dentry shadow，
+  仍执行事务性 `RESTORE -> DRAIN -> FREE`；
+- 未增加 `sched_process_exit` hook，避免在任意退出回调中扩大 LKM 锁/卸载风险。
+
+离线验证：
+
+```text
+ctest --test-dir build -C Release -R pathguard_hide_vfs_(teardown_contract|model|concurrency)_test
+100% tests passed (3/3)
+```
+
+设备清理已完成：`/proc/modules` 无 `pathguard_hide1`、`/dev/pathguard_hide1`
+消失、disposable fixture 删除、boot ID 未变化。修复后的 LKM 尚未完成新一轮
+真机回归，因此生命周期和产品准入仍保持 `Hide 1.0 = unsupported`。

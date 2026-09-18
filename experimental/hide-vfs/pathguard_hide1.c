@@ -356,6 +356,31 @@ static bool hide1_is_target_observer(const struct hide1_binding *binding)
     return __kuid_val(current_fsuid()) == binding->rule.target_uid;
 }
 
+/* A target task is pinned for the lifetime of the binding, so its task_struct
+ * remains safe to inspect after exit.  Do not install a process-exit hook in
+ * this experimental LKM: PF_EXITING is sufficient to revoke the policy at
+ * every ingress and lets userspace perform the normal restore/drain path. */
+static bool hide1_target_exited_locked(const struct hide1_binding *binding)
+{
+    return binding && binding->target_task &&
+           (READ_ONCE(binding->target_task->flags) & PF_EXITING);
+}
+
+static void hide1_revoke_dead_target_locked(void)
+{
+    if (hide1_status.state != PATHGUARD_HIDE1_STATE_ACTIVE ||
+        !hide1_target_exited_locked(&hide1_binding))
+        return;
+
+    /* Publish fail-closed state before userspace observes STATUS.  The
+     * shadow vectors remain installed until DISABLE/CLEAR completes the
+     * transactional RESTORE -> DRAIN sequence. */
+    hide1_binding.retiring = true;
+    hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_STOP_NEW;
+    WRITE_ONCE(hide1_status.state, PATHGUARD_HIDE1_STATE_INACTIVE);
+    hide1_status.last_error = -ESRCH;
+}
+
 static bool hide1_name_matches(const struct hide1_binding *binding,
                                const struct dentry *dentry)
 {
@@ -1851,7 +1876,11 @@ static long hide1_ioctl(struct file *file, unsigned int command,
         return 0;
 
     case PATHGUARD_HIDE1_IOC_DISABLE:
-        if (hide1_status.state == PATHGUARD_HIDE1_STATE_ACTIVE) {
+        hide1_revoke_dead_target_locked();
+        if (hide1_status.state == PATHGUARD_HIDE1_STATE_ACTIVE ||
+            hide1_binding.shadow.iop_installed ||
+            hide1_binding.shadow.fop_installed ||
+            !list_empty(&hide1_binding.dentry_shadows)) {
             ret = hide1_shadow_uninstall_locked(&hide1_binding);
             /* Preflight failures leave every vector installed and the state
              * ACTIVE.  Only finalize READY after uninstall crossed
@@ -1875,6 +1904,7 @@ static long hide1_ioctl(struct file *file, unsigned int command,
         return ret;
 
     case PATHGUARD_HIDE1_IOC_STATUS:
+        hide1_revoke_dead_target_locked();
         status = hide1_status;
         status.lifecycle = hide1_lifecycle;
         status.lookup_calls = atomic64_read(&hide1_lookup_calls);
