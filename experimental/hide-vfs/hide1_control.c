@@ -56,6 +56,12 @@ static int print_status(int fd)
 {
     struct pathguard_hide1_status status;
 
+#define MUTATION_FORMAT(name) \
+    " " name "=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+#define MUTATION_VALUES(field) \
+    (uint64_t)status.field.calls, (uint64_t)status.field.blocked, \
+    (uint64_t)status.field.original, (uint64_t)status.field.unsupported
+
     if (ioctl(fd, PATHGUARD_HIDE1_IOC_STATUS, &status) < 0) {
         perror("status");
         return 1;
@@ -74,6 +80,15 @@ static int print_status(int fd)
            " active=%" PRIu64 "/%" PRIu64 "/%" PRIu64
            " open_count=%" PRIu64
            " mutation=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           MUTATION_FORMAT("atomic_open")
+           MUTATION_FORMAT("create")
+           MUTATION_FORMAT("mkdir")
+           MUTATION_FORMAT("mknod")
+           MUTATION_FORMAT("symlink")
+           MUTATION_FORMAT("unlink")
+           MUTATION_FORMAT("rmdir")
+           MUTATION_FORMAT("link")
+           MUTATION_FORMAT("rename")
            " release=%s\n",
            status.abi_version, status.size, status.state, status.lifecycle,
            status.last_error,
@@ -99,7 +114,18 @@ static int print_status(int fd)
            (uint64_t)status.mutation_blocked,
            (uint64_t)status.mutation_original,
            (uint64_t)status.mutation_unsupported,
+           MUTATION_VALUES(mutation_atomic_open),
+           MUTATION_VALUES(mutation_create),
+           MUTATION_VALUES(mutation_mkdir),
+           MUTATION_VALUES(mutation_mknod),
+           MUTATION_VALUES(mutation_symlink),
+           MUTATION_VALUES(mutation_unlink),
+           MUTATION_VALUES(mutation_rmdir),
+           MUTATION_VALUES(mutation_link),
+           MUTATION_VALUES(mutation_rename),
            status.kernel_release);
+#undef MUTATION_VALUES
+#undef MUTATION_FORMAT
     return 0;
 }
 

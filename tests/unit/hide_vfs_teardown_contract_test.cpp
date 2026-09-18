@@ -72,6 +72,12 @@ int main() {
     const std::string install_mode = FunctionBody(
         source, "static int hide1_shadow_install_locked",
         "static int hide1_shadow_uninstall_locked");
+    const std::string named_shadows = FunctionBody(
+        source, "static int hide1_install_named_object_shadows",
+        "static int hide1_restore_dentry_shadows");
+    const std::string iop_install = FunctionBody(
+        source, "static int hide1_install_iop_shadow_locked",
+        "static int hide1_install_named_object_shadows");
     const std::string commit = FunctionBody(
         source, "static void hide1_commit_binding",
         "static long hide1_ioctl");
@@ -92,7 +98,7 @@ int main() {
            std::string::npos);
     assert(atomic_open.find("O_CREAT | O_EXCL | O_TRUNC") !=
            std::string::npos);
-    assert(atomic_open.find("hide1_mutation_blocked_calls") !=
+    assert(atomic_open.find("hide1_mutation_finish") !=
            std::string::npos);
     assert(atomic_open.find("d_drop(") == std::string::npos);
     RequireOrder(lookup, {
@@ -140,7 +146,7 @@ int main() {
         "test_and_set_bit(HIDE1_DOP_STALE",
         "schedule_delayed_work(&hide1_dop_stale_work",
     });
-    assert(install_mode.find("if (!hide1_mode_is_readonly())") !=
+    assert(iop_install.find("if (!hide1_mode_is_readonly())") !=
            std::string::npos);
 
     assert(uninstall.find("!binding->dentry_shadows.next") == std::string::npos);
@@ -153,7 +159,7 @@ int main() {
         "hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_RESTORE",
         "hide1_restore_dentry_shadows(binding, &retired)",
         "hide1_lifecycle = PATHGUARD_HIDE1_LIFECYCLE_DRAINING",
-        "hide1_drain_callbacks(im, fm, &retired)",
+        "hide1_drain_callbacks(im, him, fm, &retired)",
         "hide1_drain_retired_dentries(&retired)",
         "hide1_free_dentry_shadows(&retired)",
         "return ret",
@@ -181,6 +187,17 @@ int main() {
     assert(source.find("struct hide1_iop_meta") != std::string::npos);
     assert(source.find("struct hide1_fop_meta") != std::string::npos);
     assert(source.find("struct inode *hidden_inode") != std::string::npos);
+    assert(source.find("struct hide1_iop_meta *hidden_iop_meta") !=
+           std::string::npos);
+    const std::string mutation_blocked = FunctionBody(
+        source, "static bool hide1_mutation_blocked",
+        "static bool hide1_hidden_source");
+    RequireOrder(mutation_blocked, {
+        "hide1_should_hide(binding, parent, dentry)",
+        "hide1_is_target_observer(binding)",
+        "binding->shadow.hidden_iop_meta",
+        "parent == hidden_meta->inode",
+    });
     const std::string link = FunctionBody(
         source, "static int hide1_link(struct dentry *old_dentry",
         "static int hide1_rename(struct mnt_idmap *idmap");
@@ -225,6 +242,7 @@ int main() {
     RequireOrder(disable, {
         "hide1_revoke_dead_target_locked();",
         "hide1_binding.shadow.iop_installed",
+        "hide1_binding.shadow.hidden_iop_installed",
         "hide1_binding.shadow.fop_installed",
         "!list_empty(&hide1_binding.dentry_shadows)",
         "hide1_shadow_uninstall_locked(&hide1_binding)",
@@ -294,8 +312,28 @@ int main() {
         "rollback:",
         "hash_del_rcu(&shadow->iop_meta->node)",
         "synchronize_rcu();",
-        "hide1_drain_callbacks(im, fm, &retired);",
+        "hide1_drain_callbacks(im, him, fm, &retired);",
         "kfree(im)",
+        "kfree(him)",
+    });
+    RequireOrder(install, {
+        "hide1_install_iop_shadow_locked(",
+        "shadow->iop_installed = true",
+        "hide1_install_named_object_shadows(binding)",
+    });
+    RequireOrder(named_shadows, {
+        "hide1_record_hidden_inode(binding, child_inode)",
+        "hide1_install_iop_shadow_locked(",
+        "binding->shadow.hidden_iop_installed = true",
+        "hide1_install_dentry_shadow(binding, child.dentry",
+    });
+    RequireOrder(uninstall, {
+        "shadow->hidden_iop_installed",
+        "READ_ONCE(shadow->hidden_iop_meta->inode->i_op)",
+        "smp_store_release(&shadow->hidden_iop_meta->inode->i_op",
+        "hash_del_rcu(&him->node)",
+        "hide1_drain_callbacks(im, him, fm, &retired)",
+        "kfree(him)",
     });
     const std::string reset = FunctionBody(
         source, "static int hide1_reset_locked",

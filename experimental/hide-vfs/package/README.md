@@ -42,6 +42,11 @@ mount namespace. The wrapper accepts the target PID and uses `nsenter`:
 .../hide1ctl enable <target-pid> <generation>
 ```
 
+Mode 0 additionally installs an independent i_op shadow on the governed
+hidden directory inode. This is intended to close mutations performed through
+an already-open hidden-directory FD; it does not yet prove strict symlink
+errno semantics when FUSE/namei rejects the request before `i_op->symlink`.
+
 The current shadow implementation has rebooted the device during two previous
 `ENABLE` attempts. Treat `enable` as a crash experiment, keep recovery access,
 and do not classify a successful module load as Hide 1.0 approval. Always run

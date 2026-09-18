@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define PATHGUARD_HIDE1_ABI_VERSION 2U
+#define PATHGUARD_HIDE1_ABI_VERSION 3U
 #define PATHGUARD_HIDE1_PATH_MAX 384U
 #define PATHGUARD_HIDE1_NAME_MAX 255U
 
@@ -44,6 +44,13 @@ struct pathguard_hide1_rule {
     char basename[PATHGUARD_HIDE1_NAME_MAX + 1U];
 };
 
+struct pathguard_hide1_mutation_counters {
+    __u64 calls;
+    __u64 blocked;
+    __u64 original;
+    __u64 unsupported;
+};
+
 struct pathguard_hide1_status {
     __u32 abi_version;
     __u32 size;
@@ -75,6 +82,15 @@ struct pathguard_hide1_status {
     __u64 mutation_blocked;
     __u64 mutation_original;
     __u64 mutation_unsupported;
+    struct pathguard_hide1_mutation_counters mutation_atomic_open;
+    struct pathguard_hide1_mutation_counters mutation_create;
+    struct pathguard_hide1_mutation_counters mutation_mkdir;
+    struct pathguard_hide1_mutation_counters mutation_mknod;
+    struct pathguard_hide1_mutation_counters mutation_symlink;
+    struct pathguard_hide1_mutation_counters mutation_unlink;
+    struct pathguard_hide1_mutation_counters mutation_rmdir;
+    struct pathguard_hide1_mutation_counters mutation_link;
+    struct pathguard_hide1_mutation_counters mutation_rename;
     char kernel_release[128];
 };
 

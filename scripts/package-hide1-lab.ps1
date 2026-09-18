@@ -34,7 +34,7 @@ automatic_load=no
 automatic_enable=no
 default_shadow_mode=1
 readonly_fuse_shadow_mode=4
-diagnostic_counters=lookup,atomic_open,readdir,d_revalidate,dentry_install
+    diagnostic_counters=lookup,atomic_open,readdir,d_revalidate,dentry_install,mutation_by_operation
 source=experimental/hide-vfs/pathguard_hide1.c
 "@
 
