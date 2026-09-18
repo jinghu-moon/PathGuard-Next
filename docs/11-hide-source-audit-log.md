@@ -3566,3 +3566,66 @@ ctest --test-dir build -C Release -R pathguard_hide_vfs_(teardown_contract|model
 设备清理已完成：`/proc/modules` 无 `pathguard_hide1`、`/dev/pathguard_hide1`
 消失、disposable fixture 删除、boot ID 未变化。修复后的 LKM 尚未完成新一轮
 真机回归，因此生命周期和产品准入仍保持 `Hide 1.0 = unsupported`。
+
+## 2026-09-18：v9 Target 退出生命周期真机回归
+
+用户安装 `pathguard-hide1-lab-myron-iop-v9-exit-revoke.zip` 后，按既有
+`su -mm -c nsenter` 路径加载模块并完成 INSTALL：
+
+```text
+target_pid=19599
+target_uid=10552
+target_mnt_ns=4026535992
+generation=9201
+operation_mask=0x0fff
+```
+
+ENABLE 返回 0，状态为 `ACTIVE/RUNNING`，boot ID 保持
+`7d3d7201-c6ad-4ff1-bb98-0691622d4d82`，设备未重启。
+
+### Target 退出结果
+
+对旧 Target 执行 `am force-stop dev.pathguard.hideprobe.target` 后，立即查询
+状态得到：
+
+```text
+state=INACTIVE
+lifecycle=STOP_NEW
+last_error=-3 (ESRCH)
+target_pid=19599
+target_mnt_ns=4026535992
+```
+
+随后以同 UID 启动新 Target（新 PID `22970`、新 namespace `4026536040`），
+对原 fixture 执行 HideLab baseline，结果为：
+
+```text
+BASELINE_VISIBLE_NOT_HIDE_PASS
+fixture_unchanged=true
+target_oracle_changed=false
+control_oracle_changed=false
+```
+
+这证明旧 binding 不会错误授予新 task 隐藏权限，并且退出检测会把控制面从
+`ACTIVE` 收缩为 fail-closed 的 `INACTIVE/STOP_NEW`。
+
+### 数据面边界
+
+退出前对 v9 `shadow_mode=1` 执行的 baseline 观测为 `LEAK`：
+
+```text
+java.external.0.exists: visible
+external.0.lstat: visible
+external.0.open: visible
+```
+
+因此本轮只证明 Target 退出生命周期契约，不证明 Hide 1.0 隐藏能力；i_op-only
+模式仍不能作为只读 FUSE 后端。证据目录：
+
+```text
+build/device-evidence/hide1-v9-exit-baseline/20260918-214302/
+build/device-evidence/hide1-v9-exit-new-target/20260918-214803/
+```
+
+最后执行 `DISABLE -> CLEAR -> rmmod`，删除 fixture；模块、设备节点均消失，
+boot ID 未变化。产品状态继续为 `Hide 1.0 = unsupported`。

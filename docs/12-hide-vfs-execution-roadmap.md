@@ -553,6 +553,18 @@ shadow 存在性判断及 STATUS 触发的 fail-closed 观察。设备侧原始�
 退出后新同 UID 进程得到 `BASELINE_VISIBLE_NOT_HIDE_PASS`，设备未重启；在
 本阶段修复模块构建并完成真机回归前，产品状态继续为
 `Hide 1.0 = unsupported`。
+
+### v9 真机验收结果（2026-09-18）
+
+v9 在 myron 上完成了 Target 退出生命周期验证：ENABLE 成功且设备未重启；
+旧 Target force-stop 后状态自动发布为 `INACTIVE/STOP_NEW/-ESRCH`；新同 UID、
+新 mount namespace 的进程结果为 `BASELINE_VISIBLE_NOT_HIDE_PASS`，不会继承旧
+binding；`DISABLE -> CLEAR -> rmmod` 和 fixture 清理均通过，boot ID 未变化。
+
+同一轮的 `shadow_mode=1` 数据面 baseline 为 `LEAK`（Java exists、lstat、open
+仍可见），所以该结果只能关闭 Target-exit 生命周期风险，不能提升产品准入状态。
+下一阶段必须转向 FUSE-aware 的只读模式/完整 operation shadow，并重新执行
+HideLab cache、concurrency、reliability 与 mutation 门禁。
 - 默认状态为 `inactive`；
 - capability、admission、runtime state 三者分离；
 - lab module 与 production module 分离；
