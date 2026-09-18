@@ -748,6 +748,17 @@ symlink 严格 `ENOENT` 语义。
 - [ ] daemon Hide UAPI 集成；
 - [ ] 产品状态机只在完整 admission 后允许 `active`。
 
+### syscall/namei 适配前置门禁（2026-09-18 新增）
+
+- [ ] 离线确认 SukiSU syscall bridge 是否具有稳定、可供 LKM 使用的导出符号；
+- [ ] capability probe 仅验证符号解析、CFI、register/unregister、并发和 unload，
+      不注册真实隐藏 hook；
+- [ ] 若内部 `ksu_*` 符号未导出、设备 kallsyms 地址为零或无法证明卸载安全，
+      禁止普通 LKM 直接调用，必须转 KernelSU companion patch/KPM 评估；
+- [ ] 只有在上述门禁通过后，才可把 `newfstatat/faccessat(2)/openat(2)/symlinkat`
+      接入 namei adapter；任何 post-syscall 返回值改写或真实对象修改后的补偿都不
+      满足 Hide 1.0。
+
 ## 18. 完成定义
 
 本路线只有在以下条件同时满足时，才可以宣布当前设备范围的 Hide 1.0 candidate：

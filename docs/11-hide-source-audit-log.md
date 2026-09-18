@@ -3698,3 +3698,62 @@ build/device-evidence/hide1-v9-mutation-control.jsonl
 本轮结束执行 `DISABLE -> CLEAR -> rmmod` 并删除 fixture，设备未重启。结论为
 mutation 部分封闭、仍不准入；必须补充逐 callback 命中证据、unlink side-effect
 根因分析以及 symlink 语义收敛。
+
+## 2026-09-18：hidden-inode-v3 重启后复验与 syscall/namei 适配审查
+
+用户安装并重启 `pathguard-hide1-lab-myron-hidden-inode-v3.zip` 后，设备继续在线，
+boot ID 为 `3a82e28c-c556-45ae-b5f2-a37701305bad`，型号 `myron/25102RKBEC`，
+内核 release 为：
+
+```text
+6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+```
+
+该实验包默认不自动加载，因此重启后 `/proc/modules` 中没有
+`pathguard_hide1`，`/dev/pathguard_hide1` 也不存在；这不是设备异常，符合实验包的
+“手动 load、受控 enable”契约。状态命令在模块未加载时返回 `open: No such file`，
+随后确认模块目录仍存在且设备 boot ID 未变化。
+
+### v3 数据面结果
+
+v3 在前一轮受控实验中已经证明：hidden FD 下 create/truncate/mkdir/nested unlink
+在真实对象修改前返回 `ENOENT`，symlink 无副作用但返回平台 `EACCES`；
+`symlink` operation counter 为零，说明请求在 FUSE/namei 早期路径结束，未进入
+`i_op->symlink()`。因此继续修改 operation-table shadow 无法把该错误码收敛为
+严格 `ENOENT`。Java `File`/NIO 的 exists、isDirectory、list 和 directory stream
+仍可见，而同一 fixture 的 direct stat/open/readdir 已隐藏；这证明 Java 路径还存在
+未覆盖的 `newfstatat`、`faccessat(2)`、`openat(2)` 或 Provider 入口，不能把只读
+VFS callback 结果外推为完整隐藏。
+
+### SukiSU syscall hook 源码审查
+
+对照 `refer/hide-refer/SukiSU-Ultra-main/kernel/hook/`：
+
+1. arm64 实现由 sys_enter tracepoint 将目标 syscall 改写到共享 dispatcher，dispatcher
+   再按原始 syscall number 调用 handler；handler 透传时调用
+   `ksu_syscall_table[orig_nr](regs)`。
+2. 卸载顺序是先取消 tracepoint 并等待同步，再注销各 handler，最后恢复 syscall table；
+   这套顺序可作为 PathGuard 的生命周期参考，但不能直接复制到普通 LKM。
+3. `ksu_register_syscall_hook`、`ksu_unregister_syscall_hook`、
+   `ksu_has_syscall_hook`、`ksu_syscall_table` 和 `ksu_dispatcher_nr` 在源码中没有
+   `EXPORT_SYMBOL`。它们是 KernelSU 内部符号，不属于稳定 GKI KMI。
+4. SukiSU 自身通过 `kallsyms_on_each_match_symbol`/`kallsyms_on_each_symbol` 做
+   内核内运行时解析，并使用 `__nocfi`；现有 PathGuard restricted loader 只能把
+   非零 `/proc/kallsyms` 地址写入 LKM ELF。设备侧这些 `ksu_*` 符号均可见但地址为
+   `0`（kptr 隐藏），因此普通 LKM 不能安全地把它们作为 undefined symbol 重定位，
+   也不能把“符号名存在”误判为“可调用 API”。
+
+### syscall/namei 适配结论与门禁
+
+严格 symlink `ENOENT` 必须在 namei/syscall 入口或更早阶段完成；在
+`i_op->symlink` 之后改返回值已经太晚。Java 可见性则需要对同一规则 identity 覆盖
+`newfstatat`、`faccessat`、`faccessat2`、`openat`、`openat2` 等入口，并且必须保留
+相对 `dirfd`、alias、UID、mount namespace 和 generation 约束。
+
+在没有 KernelSU companion patch、稳定导出 bridge 或可验证 KPM 接口前，PathGuard
+不得构建或加载“直接调用 SukiSU 内部 syscall API”的 LKM。下一步只能先做离线
+capability probe：验证符号导出/解析、CFI、注册/注销和卸载契约；probe 不注册真实
+隐藏 hook，不触碰 `symlinkat`，不改变任何 syscall 行为。若 probe 不能证明安全接入，
+syscall/namei 适配应记录为“普通 LKM 不可用”，转为内核 companion/KPM 方案评估。
+
+本轮产品状态保持：`Hide 1.0 = unsupported`。
