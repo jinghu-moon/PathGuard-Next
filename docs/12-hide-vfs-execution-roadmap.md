@@ -565,6 +565,11 @@ binding；`DISABLE -> CLEAR -> rmmod` 和 fixture 清理均通过，boot ID 未�
 仍可见），所以该结果只能关闭 Target-exit 生命周期风险，不能提升产品准入状态。
 下一阶段必须转向 FUSE-aware 的只读模式/完整 operation shadow，并重新执行
 HideLab cache、concurrency、reliability 与 mutation 门禁。
+
+v9 随后以 `shadow_mode=4` 完成设备只读回归：baseline、cache-order、concurrency、
+reliability 四组均为 `PASS`，fixture 与 Root Oracle 未变化，active/open 计数最终
+归零。该结果支持继续推进 mutation 封闭和 namespace 生命周期门禁，但不改变
+Hide 1.0 的 unsupported 状态。
 - 默认状态为 `inactive`；
 - capability、admission、runtime state 三者分离；
 - lab module 与 production module 分离；

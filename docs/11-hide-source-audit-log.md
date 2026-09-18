@@ -3629,3 +3629,44 @@ build/device-evidence/hide1-v9-exit-new-target/20260918-214803/
 
 最后执行 `DISABLE -> CLEAR -> rmmod`，删除 fixture；模块、设备节点均消失，
 boot ID 未变化。产品状态继续为 `Hide 1.0 = unsupported`。
+
+## 2026-09-18：v9 FUSE-aware shadow_mode=4 真机回归
+
+在完成 v9 生命周期清理后，以同一模块通过 SukiSU `ksud insmod` 加载
+`shadow_mode=4`，重新绑定 target PID `22970`、UID `10552`、mount namespace
+`4026536040`、generation `9301`。四组只读 HideLab 均在同一 fixture 和同一
+binding 上执行：
+
+| 场景 | 结论 | fixture/Oracle |
+|---|---|---|
+| baseline | `PASS` | unchanged |
+| cache-order | `PASS` | unchanged |
+| concurrency | `PASS` | unchanged |
+| reliability | `PASS` | unchanged |
+
+关键累计状态计数（最终 STATUS）：
+
+```text
+lookup=5991/5991
+atomic_open=332/332
+readdir=27273/9087
+revalidate=97072/24095
+dentry_install=5993/5993/0
+active=0/0/0
+open_count=0
+```
+
+证据目录：
+
+```text
+build/device-evidence/hide1-v9-fuse-baseline/20260918-215944/
+build/device-evidence/hide1-v9-fuse-cache/20260918-215801/
+build/device-evidence/hide1-v9-fuse-concurrency/20260918-215832/
+build/device-evidence/hide1-v9-fuse-reliability/20260918-215904/
+```
+
+本轮仅覆盖只读路径；mutation 的 symlink 严格 `ENOENT`、namespace 销毁/切换、
+OTA 重新准入和 daemon 正式集成仍未完成。结束时执行 `DISABLE -> CLEAR -> rmmod`
+并删除 fixture，模块/设备节点消失，boot ID 未变化。产品状态仍为
+`Hide 1.0 = unsupported`，但 FUSE-aware 只读 backend 已具备继续扩展 mutation
+和 namespace 门禁的设备证据。
