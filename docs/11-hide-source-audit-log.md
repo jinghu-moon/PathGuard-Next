@@ -4266,6 +4266,71 @@ strict held-FD symlink 语义门禁至此通过。下一阶段恢复 `shadow_mod
 mutation 回归，覆盖 create、truncate、mkdir、unlink、rmdir、rename、link、mknod 和
 symlink；本结果本身仍不足以宣告 Hide 1.0 成功。
 
+## 轮次 97：generation 12002 完整 held-FD mutation 通过（2026-09-20）
+
+在 v8 bridge 单操作通过后，先完成阶段提交 `eb05c66`，再使用同一 target 进程建立新的
+一次性 fixture，并以 `shadow_mode=0` 加载 v8：
+
+```text
+target PID        = 19720
+target UID        = 10552
+mount namespace   = 4026536027
+held directory FD = 192
+fixture           = /storage/emulated/0/Pictures/PathGuardHideLab/20260920-233644
+generation        = 12002
+```
+
+经用户明确批准执行 `ENABLE 12002` 后，完整 shadow 安装状态为
+`dentry_install=5/5/0`，boot ID、PID 和 namespace 均未变化。target 通过同一个 ENABLE
+前持有的目录 FD 得到以下结果：
+
+```text
+open hidden       -> ENOENT / no side effect
+openat create     -> ENOENT / no side effect
+openat truncate   -> ENOENT / no side effect
+mkdirat           -> ENOENT / no side effect
+unlinkat          -> ENOENT / no side effect
+symlinkat         -> ENOENT / no side effect
+rmdir             -> ENOENT / no side effect
+rename            -> ENOENT / no side effect
+link              -> ENOENT / no side effect
+mknod             -> ENOENT / no side effect
+target oracle changed = false
+```
+
+control observer 保持未隐藏语义，并按攻击矛设计实际完成 create、truncate、mkdir、rmdir、
+rename 和 mknod 等允许操作，所以总体 `fixture_unchanged=false`、
+`control_oracle_changed=true` 是预期基线，不是 target 泄漏。runner 最终结论为 `PASS`。
+
+内核证据：
+
+```text
+revalidate=408/111
+dentry_install=5/5/0
+mutation=16/4/12/0
+inode_security_stage=1/0/1/0/0
+inode_security_bridge_enoent=1
+```
+
+mutation wrapper 的 blocked 数小于用户态验收项数量并非缺口：cached positive、negative
+或 hidden descendant 请求可在 `d_revalidate`/namei 更早返回 `ENOENT`，无需进入 inode
+callback；验收依据是逐项用户态 errno、side-effect 和 target oracle，而不是要求每个
+wrapper 计数都增长。
+
+测试后 `DISABLE -> CLEAR -> UNLOAD` 全部成功，boot ID
+`59998fab-5906-42b6-af4a-56ef89d49067` 未变化，设备在线，模块不再 live，pstore 为空。
+
+证据目录：
+
+```text
+build/device-evidence/hidelab-heldfd-v8-prepare/20260920-233644/
+build/device-evidence/hidelab-heldfd-v8/20260920-233905/
+```
+
+held-FD mutation 门禁至此关闭。下一阶段是使用同一 v8 后端重新执行 cache-order、并发、
+规则切换与 `DISABLE/CLEAR/unload` 生命周期矩阵；完成前产品状态保持
+`Hide 1.0 = unsupported`。
+
 ## 轮次 91：held-FD cached-child 修复真机结果与 symlinkat 诊断后端（2026-09-20）
 
 用户安装 `pathguard-hide1-lab-myron-ddk-v3-heldfd-cache.zip` 并重启后，严格保持
