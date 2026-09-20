@@ -75,6 +75,9 @@ int main() {
     const std::string named_shadows = FunctionBody(
         source, "static int hide1_install_named_object_shadows",
         "static int hide1_restore_dentry_shadows");
+    const std::string cached_descendants = FunctionBody(
+        source, "static int hide1_install_cached_descendant_shadows",
+        "static void hide1_restore_hidden_iop_metas_locked");
     const std::string iop_install = FunctionBody(
         source, "static int hide1_install_iop_shadow_locked",
         "static int hide1_install_named_object_shadows");
@@ -102,7 +105,10 @@ int main() {
            std::string::npos);
     assert(atomic_open.find("d_drop(") == std::string::npos);
     RequireOrder(lookup, {
+        "hide1_dentry_should_hide(binding, dir, dentry)",
+        "d_add(dentry, NULL)",
         "orig->lookup(dir, dentry, flags)",
+        "hide1_install_descendant_iop_shadow(",
         "struct dentry *resolved = result ? result : dentry",
         "hide1_install_dentry_shadow(binding, resolved",
         "d_drop(resolved)",
@@ -200,11 +206,17 @@ int main() {
     const std::string mutation_blocked = FunctionBody(
         source, "static bool hide1_mutation_blocked",
         "static bool hide1_hidden_source");
-    RequireOrder(mutation_blocked, {
-        "hide1_should_hide(binding, parent, dentry)",
-        "hide1_is_target_observer(binding)",
-        "binding->shadow.hidden_iop_meta",
-        "parent == hidden_meta->inode",
+    assert(mutation_blocked.find(
+               "hide1_dentry_should_hide(binding, parent, dentry)") !=
+           std::string::npos);
+    assert(source.find("hide1_same_inode_identity(meta->inode, parent)") !=
+           std::string::npos);
+    RequireOrder(cached_descendants, {
+        "overflow = true",
+        "hide1_install_dentry_shadow(",
+        "hide1_install_descendant_iop_shadow(binding, inode)",
+        "hide1_install_cached_descendant_shadows(",
+        "return overflow ? -E2BIG : 0",
     });
     const std::string link = FunctionBody(
         source, "static int hide1_link(struct dentry *old_dentry",
@@ -281,6 +293,103 @@ int main() {
     assert(source.find("hide1_mutation_calls") != std::string::npos);
     assert(source.find("hide1_mutation_blocked_calls") != std::string::npos);
     assert(source.find("status.mutation_unsupported") != std::string::npos);
+    assert(source.find("static int hide1_do_symlinkat_pre") !=
+           std::string::npos);
+    assert(source.find(".symbol_name = \"do_symlinkat\"") !=
+           std::string::npos);
+    assert(source.find("regs_get_kernel_argument(regs, 1)") !=
+           std::string::npos);
+    assert(source.find("lookup_fdget_rcu((unsigned int)newdfd)") !=
+           std::string::npos);
+    assert(source.find("instruction_pointer_set") == std::string::npos);
+    const std::string probe = FunctionBody(
+        source, "static int hide1_do_symlinkat_pre",
+        "static struct kprobe hide1_symlink_probe");
+    assert(probe.find("regs_set_return_value") == std::string::npos);
+    RequireOrder(probe, {
+        "atomic_inc(&hide1_symlink_probe_active)",
+        "hide1_is_target_observer(&hide1_binding)",
+        "regs_get_kernel_argument(regs, 1)",
+        "rcu_read_lock()",
+        "lookup_fdget_rcu((unsigned int)newdfd)",
+        "rcu_read_unlock()",
+        "hide1_is_hidden_inode(&hide1_binding, inode)",
+        "fput(file)",
+        "atomic_dec_and_test(&hide1_symlink_probe_active)",
+    });
+    assert(source.find("register_kprobe(&hide1_symlink_probe)") !=
+           std::string::npos);
+    assert(source.find("unregister_kprobe(&hide1_symlink_probe)") !=
+           std::string::npos);
+    assert(source.find("hide1_drain_symlink_probe();") !=
+           std::string::npos);
+    assert(source.find("static int hide1_vfs_symlink_pre") !=
+           std::string::npos);
+    assert(source.find(".symbol_name = \"vfs_symlink\"") !=
+           std::string::npos);
+    const std::string path_probe = FunctionBody(
+        source, "static int hide1_vfs_symlink_pre",
+        "static struct kprobe hide1_vfs_symlink_probe");
+    assert(path_probe.find("regs_set_return_value") == std::string::npos);
+    RequireOrder(path_probe, {
+        "atomic_inc(&hide1_vfs_symlink_probe_active)",
+        "hide1_is_target_observer(&hide1_binding)",
+        "regs_get_kernel_argument(regs, 1)",
+        "regs_get_kernel_argument(regs, 2)",
+        "READ_ONCE(child->d_parent)",
+        "hide1_is_hidden_inode(&hide1_binding, parent_inode)",
+        "hide1_same_inode_identity(d_inode(parent), parent_inode)",
+        "d_is_negative(child)",
+        "atomic_dec_and_test(&hide1_vfs_symlink_probe_active)",
+    });
+    assert(source.find("register_kprobe(&hide1_vfs_symlink_probe)") !=
+           std::string::npos);
+    assert(source.find("unregister_kprobe(&hide1_vfs_symlink_probe)") !=
+           std::string::npos);
+    assert(source.find("hide1_drain_vfs_symlink_probe();") !=
+           std::string::npos);
+    assert(source.find("static struct kretprobe hide1_may_create_stage_probe") !=
+           std::string::npos);
+    assert(source.find(".kp.symbol_name = \"may_create\"") !=
+           std::string::npos);
+    assert(source.find(
+               "static struct kretprobe hide1_inode_security_stage_probe") !=
+           std::string::npos);
+    assert(source.find(
+               ".kp.symbol_name = \"security_inode_symlink\"") !=
+           std::string::npos);
+    const std::string stage_return = FunctionBody(
+        source, "static void hide1_record_stage_return",
+        "static int hide1_may_create_stage_entry");
+    assert(stage_return.find("-EACCES") != std::string::npos);
+    assert(source.find("(int)regs_return_value(regs)") != std::string::npos);
+    assert(source.find("(long)regs_return_value(regs)") == std::string::npos);
+    const std::string inode_security_return = FunctionBody(
+        source, "static int hide1_inode_security_stage_return",
+        "static struct kretprobe hide1_inode_security_stage_probe");
+    RequireOrder(inode_security_return, {
+        "result = (int)regs_return_value(regs)",
+        "hide1_record_stage_return(result",
+        "if (result == -EACCES)",
+        "atomic64_inc(&hide1_inode_security_bridge_enoent)",
+        "regs_set_return_value(regs, (unsigned long)(long)-ENOENT)",
+        "atomic_dec_and_test(&hide1_symlink_stage_active)",
+    });
+    assert(source.find("status.inode_security_bridge_enoent") !=
+           std::string::npos);
+    const std::string stage_register = FunctionBody(
+        source, "static int hide1_register_diagnostic_probes",
+        "static int __init hide1_init");
+    RequireOrder(stage_register, {
+        "register_kprobe(&hide1_symlink_probe)",
+        "register_kprobe(&hide1_vfs_symlink_probe)",
+        "register_kretprobe(&hide1_may_create_stage_probe)",
+        "register_kretprobe(&hide1_inode_security_stage_probe)",
+        "rollback:",
+        "hide1_unregister_diagnostic_probes()",
+    });
+    assert(source.find("regs_return_value(regs)") != std::string::npos);
+    assert(source.find("regs_set_return_value") != std::string::npos);
     assert(source.find("hide1_lookup_calls") != std::string::npos);
     assert(source.find("hide1_dentry_install_success") != std::string::npos);
     assert(source.find("status.lookup_calls") != std::string::npos);

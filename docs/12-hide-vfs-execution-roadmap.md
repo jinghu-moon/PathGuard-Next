@@ -21,7 +21,9 @@
 当前最重要的工程结论是：
 
 1. 对 Redmi K90 Pro Max / `myron`、Android 16、kernel 6.12、共享存储 FUSE，现有
-   per-object operation-table shadow 是继续验证 Hide 1.0-LKM 的最合适实验路线。
+   per-object operation-table shadow 仍是 LKM 生命周期和缓存实验的有效路线；但要
+   满足严格的 namei、Java/NIO、FUSE 和 mutation 语义，固定设备的 KPM/namei 或源码级
+   kernel companion 才是优先数据面。
 2. mutation 不能先于生命周期基础设施实现。必须先证明
    `STOP_NEW -> RESTORE -> DRAIN -> FREE`，再接入会改变真实文件系统的 callback。
 3. NoMount、Kasumi、PathMask、SUSFS 和 SukiSU 都只能提供局部参考，不能作为完整
@@ -759,6 +761,83 @@ symlink 严格 `ENOENT` 语义。
       接入 namei adapter；任何 post-syscall 返回值改写或真实对象修改后的补偿都不
       满足 Hide 1.0。
 
+### KPM/namei 执行门禁（2026-09-19）
+
+- [x] 增加只读 `collect_kernel_backend_capability.ps1`，采集设备 release、KPM/KALLSYMS/
+      KPROBES 配置、SukiSU KPM 查询和 kallsyms 可见性；不执行 KPM load/unload 或行为 hook；
+- [ ] 设备采集报告 `eligible_for_kpm_probe`（当前 ADB 未连接，不能伪造结果）；
+- [ ] capability-only KPM/namei probe 证明符号解析、调用约定、CFI、注册/注销和卸载；
+- [ ] capability-only probe 通过前禁止加载改变 namei、readdir、stat 或 mutation 行为的模块。
+
+### 只读 KPM capability probe（2026-09-19）
+
+已新增固定内核实验用探针：
+
+```text
+experimental/hide-kpm/capability/
+```
+
+该探针复用 `refer/hide-refer/SukiSU_KernelPatch_patch` 的 KPM ABI，仅调用
+KernelPatch 导出的 `kallsyms_lookup_name()` 查询 18 个 namei/VFS/FUSE 候选符号的
+存在性，并通过 `ctl0 status` 返回计数和位图。探针不调用解析后的地址，不安装
+inline hook/syscall hook/kprobe/tracepoint，不修改 VFS 状态，也没有文件系统 mutation。
+卸载回调只清理自身快照。
+
+离线验收已完成：
+
+```text
+Windows NDK 28.2.13676358 编译       PASS
+AArch64 relocatable ELF              PASS
+.kpm.info/.kpm.init/.kpm.ctl0/.kpm.exit PASS
+唯一外部依赖                         kallsyms_lookup_name
+生成产物清理                         PASS
+缺失 NDK 参数门禁                    PASS
+```
+
+Windows 构建使用 NDK 的 `.cmd` clang 包装器；仓库内 Android 16 DDK clang 不能替代
+Android NDK target sysroot。该离线结果只证明 KPM 文件格式和本地构建链正确，尚未证明
+设备具备 `CONFIG_KPM`、可用的 SukiSU KPM 接口或安全的 namei hook 条件。
+
+下一步仍必须先连接唯一目标设备并执行：
+
+```powershell
+./tests/device/hide/collect_kernel_backend_capability.ps1
+```
+
+只有报告为 `eligible_for_kpm_probe` 才允许在用户明确授权后加载该只读探针，采集
+`load -> ctl0 status -> unload`、boot ID 和内核日志。任何符号解析失败、调用约定/CFI
+不确定、卸载异常或设备重启都将停止 KPM/namei 路线，产品状态继续为
+`Hide 1.0 = unsupported`。
+
+#### 设备门禁结果（2026-09-19 11:14 CST）
+
+设备已重新连接并完���两次只读采集；第二次修复采集器后的证据目录为：
+
+```text
+build/device-evidence/kernel-backend-capability/20260919-111448/
+```
+
+关键事实：
+
+```text
+device       = myron
+fingerprint  = Redmi/myron/myron:16/BP2A.250605.031.A3/OS3.0.23.0.WPMCNXM:user/release-keys
+kernel       = 6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+CONFIG_KPM   = 未出现 CONFIG_KPM=y（设备不提供 KPM 配置证据）
+KALLSYMS     = y
+KPROBES      = y
+CFI_CLANG    = y
+MODULES      = y
+ksud kpm version/num/list = ENOTTY
+decision     = unsupported
+```
+
+`ksud kpm --help` 仅表示 CLI 具有 KPM 子命令，不表示内核实现了 KPM ioctl；三条
+实际查询均返回 `Error: Inappropriate ioctl for device (os error 25)`。采集器明确记录
+`kpm_load_attempted=false`、`kpm_unload_attempted=false`、`module_insert_attempted=false`。
+因此本机不能进入只读 KPM load/status/unload 验证，不能把 KPM/namei 作为当前设备的
+可执行后端。
+
 ## 18. 完成定义
 
 本路线只有在以下条件同时满足时，才可以宣布当前设备范围的 Hide 1.0 candidate：
@@ -773,3 +852,249 @@ symlink 严格 `ENOENT` 语义。
 
 在此之前，任何“模块已加载”“ENABLE 成功”“目录枚举被过滤”或“只读 baseline PASS”
 都只能描述实验事实，不能把产品状态改为 `active`。
+
+## 20. 2026-09-20：held-FD mutation 门禁结果
+
+严格的两阶段实验已经执行。disabled 阶段持有的目录 FD 在 ENABLE 后仍能绕过当前
+shadow：`openat(fd, "canary.txt", O_TRUNC)` 成功并修改真实 canary。该结果满足
+`DESTRUCTIVE_FAIL`，因此路线图中的“mutation 封闭”门禁保持未通过。
+
+下一阶段不能通过增加路径 lookup 或放宽测试断言解决；必须在 namei/mutation 的真实
+对象入口覆盖 `dirfd` 已解析对象，或明确引入内核级统一策略入口。至少需要重新设计
+并验证：
+
+- pre-opened directory FD 的 create/truncate/unlink/rmdir/link/rename/symlink/mknod；
+- `symlinkat`、`linkat` 的统一 `ENOENT` 语义；
+- mutation 发生前的 target UID、mount namespace、parent inode 和 generation 校验；
+- failed install、disable、clear、unload 时已有 FD 的恢复和 drain；
+- root oracle 不变、target 隐藏、control 可见的全量回归。
+
+在这些证据完成前，设备 admission 不得从 `pending_hidelab` 进入 `admitted`，产品状态
+继续保持 `Hide 1.0 = unsupported`。
+
+## 21. 2026-09-20：held-FD v3 结果与 do_symlinkat 诊断门禁
+
+generation `7001` 的严格 held-FD 回归证明 cached-child 修复已经关闭原先的
+`openat(O_TRUNC)` 真实修改：全部已覆盖 mutation 均返回 `ENOENT`，root oracle
+保持不变。唯一剩余差异为 `symlinkat -> EACCES`；它没有副作用，但仍属于
+`SEMANTIC_DRIFT`，因此 mutation 门禁尚未通过。
+
+当前执行顺序更新为：
+
+1. 构建并加载 ABI v4 diagnostics 包，确认 `do_symlinkat` kprobe 可注册；
+2. 使用同一 PID/namespace/held FD 执行一次 `symlinkat`，要求
+   `calls/target/fd/hidden_fd` 对应增长；
+3. 验证 control observer 不计入 target/hidden_fd，DISABLE/CLEAR/UNLOAD 可完整恢复；
+4. 只有诊断证据正确，才设计固定 myron 的窄 `ENOENT` bridge；
+5. bridge 必须位于 `security_path_symlink` 前，同时保留 fsuid、thread group、mount
+   namespace、generation 和 hidden inode 五重约束；
+6. 重新执行完整 held-FD mutation、cache-order、并发和生命周期矩阵。
+
+ABI v4 diagnostics 明确禁止修改 instruction pointer 或 syscall 返回值。它只解决
+参数与身份观测问题，不是隐藏数据面；探针注册成功或 counter 命中均不能改变
+`Hide 1.0 = unsupported` 的产品状态。
+
+### generation 8002 诊断结果与下一门禁
+
+完整 `shadow_mode=0` 的 generation `8002` 已满足 ABI v4 诊断目标：
+
+```text
+operation_mask = 0x0fff
+dentry_install = 5/5/0
+symlink_probe  = 1/8/3/3/1
+```
+
+最后一项 `hidden_fd=1` 证明 target held-FD 调用已被正确归属到 governed hidden inode。
+target/control 均返回 `EACCES` 且无副作用，说明剩余问题不是 `dirfd` 识别失败，而是
+PathGuard 的 operation-table shadow 位于 Android/FUSE 的既有拒绝之后，无法把 target
+语义收敛为 `ENOENT`。
+
+下一阶段按以下顺序执行：
+
+1. 审查目标内核中 `do_symlinkat -> filename_create -> security_path_symlink ->
+   vfs_symlink` 的精确调用及清理路径；
+2. 增加 `security_path_symlink` 调用点的只观测 probe，记录 target、parent hidden
+   inode 和 child dentry 命中，严禁改返回值或 instruction pointer；
+3. 只有只观测证据全部正确，才实现固定 myron 的窄 `ENOENT` 返回 bridge；
+4. bridge 必须让 `do_symlinkat()` 继续执行 `done_path_create()` 和 `putname()`，不得
+   从函数入口直接跳转返回；
+5. 先重跑单操作 `symlink-held-fd`，再重跑完整 held-FD mutation、cache-order、并发、
+   DISABLE/CLEAR/UNLOAD 生命周期矩阵。
+
+generation 8002 结束后已执行 `DISABLE -> CLEAR -> UNLOAD`，设备未重启且模块不再
+live。strict `symlinkat -> ENOENT` 尚未实现，所以 mutation 门禁仍为未通过，产品状态
+仍为 `Hide 1.0 = unsupported`。
+
+### 设备配置修正：`security_path_symlink` 不可用
+
+打包下一诊断模块前的设备只读核对证明：
+
+```text
+# CONFIG_SECURITY_PATH is not set
+security_path_symlink  absent from /proc/kallsyms
+vfs_symlink            present in /proc/kallsyms
+security_inode_symlink present in /proc/kallsyms
+may_create             present in /proc/kallsyms
+```
+
+所以前述 `security_path_symlink` 诊断步骤在本设备不可执行；源码中的调用已被编译成
+返回 0 的 inline stub。这不是加载器或符号解析问题，不能通过改 vermagic 或放宽模块
+注册门禁解决。
+
+执行顺序修正为：
+
+1. ABI v5 同时注册只观测 `do_symlinkat` 与 `vfs_symlink` kprobe；
+2. 用单操作 `symlink-held-fd` 验证 `vfs_symlink` 的 target、hidden parent、child-parent
+   identity 和 negative child；
+3. 若命中，说明 `EACCES` 来自 `vfs_symlink()` 内的 `may_create`、缺少 filesystem
+   callback、inode LSM 或原始 `i_op->symlink`；再评估能保留 `done_path_create()` 的窄
+   返回 bridge；
+4. 若不命中，说明拒绝发生在 `filename_create()`，继续以只观测 probe 定位该路径，
+   不实施 syscall 入口 PC redirect；
+5. 只有 `symlinkat -> ENOENT` 且无副作用后，才恢复完整 held-FD mutation、cache-order、
+   并发及生命周期回归。
+
+ABI v5 产物为
+`pathguard-hide1-lab-myron-ddk-v5-vfs-symlink-diagnostics.zip`；它不自动加载或 ENABLE。
+
+### generation 9001 `vfs_symlink` 结果
+
+ABI v5 真机单操作诊断已通过调用链门禁：
+
+```text
+symlink_probe     = 1/8/3/3/1
+vfs_symlink_probe = 1/8/3/3/1/1/1
+mutation.symlink  = 0/0/0/0
+```
+
+这证明 `filename_create()` 成功并把正确的 hidden parent 与 negative child 传入
+`vfs_symlink()`；`EACCES` 发生在 PathGuard `i_op->symlink` wrapper 之前。下一步不再
+探测 `filename_create()`，而是依次区分 `may_create()`、callback presence check 和
+`security_inode_symlink()`：
+
+1. 使用 per-instance kretprobe data 标记 target + hidden parent；
+2. 只记录 `may_create` 与 `security_inode_symlink` 的 `0/EACCES/other` 返回分类；
+3. 在 `vfs_symlink` 入口记录 `dir->i_op->symlink == hide1_symlink`；
+4. 任一 kretprobe 注册失败时模块加载失败并完整回滚已注册 probe；
+5. 再次运行单操作 `symlink-held-fd` 后立即恢复；
+6. 只有确认真实失败分支且证明真实对象未修改，才评估将该次失败收敛为 target-only
+   `ENOENT` 的窄返回 bridge。
+
+generation 9001 已完成 `DISABLE -> CLEAR -> UNLOAD`，fixture 已删除，设备稳定。
+
+### generation 10001 stage 结果
+
+v6 已证明：
+
+```text
+vfs_symlink shadow_iop = 1
+may_create stage calls = 0
+inode-security calls   = 1
+PathGuard i_op calls   = 0
+```
+
+失败点是 `security_inode_symlink()`，`may_create()` 在该 ThinLTO 构建中没有经过独立
+符号。v6 返回分类把 arm64 的 32 位 `int` 返回当成 64 位 `long`，导致 `-EACCES` 被错误
+归入 `other`；该分类不能作为 bridge 验收证据。
+
+路线增加一个不可跳过的修正门禁：先用 `(int)regs_return_value(regs)` 构建 v7，只读
+复测并要求 `inode_security_stage=1/0/1/0/0`。只有该结果满足后，才评估在
+`security_inode_symlink()` 返回、`dir->i_op->symlink()` 调用之前，把匹配 target 的
+既有拒绝从 `-EACCES` 收敛成 `-ENOENT`。这不是 syscall 返回值补偿：真实 filesystem
+callback 尚未执行，`do_symlinkat()` 仍会正常执行 `done_path_create()` 与 `putname()`。
+
+generation `11001` 已取得预期 `inode_security_stage=1/0/1/0/0`，且 root oracle 无
+变化、恢复链完整通过。下一门禁改为验证 ABI v7/v8 窄 bridge：target 单操作必须返回
+`ENOENT/no-side-effect`，control 必须保持 `EACCES/no-side-effect`，同时要求
+`inode_security_bridge_enoent=1`。该门禁通过前，不恢复完整 mutation 回归，也不改变
+`Hide 1.0 = unsupported`。
+
+generation `12001` 已通过该门禁：target 为 `ENOENT/no-side-effect`，control 保持
+`EACCES/no-side-effect`，`inode_security_bridge_enoent=1`，root oracle 无变化，且
+`DISABLE -> CLEAR -> UNLOAD` 完整恢复。下一步按路线恢复 `shadow_mode=0` 的完整 held-FD
+mutation 回归；只有九类 mutation 全部为 `ENOENT` 且无真实修改，才可关闭 mutation
+封闭门禁。产品状态仍为 `Hide 1.0 = unsupported`。
+
+### held-FD 修复候选
+
+离线实现已覆盖 cached positive child：所有缓存文件/目录都安装 observer-aware
+`d_revalidate`，hidden directory 下的新 lookup 则在进入 FUSE 前返回 synthetic
+negative。缓存枚举溢出或任一 descendant shadow 安装失败会使 ENABLE 事务回滚。
+
+该候选只有在以下真机证据同时满足时才能关闭本门禁：
+
+- prepare/post 的 native PID、mount namespace 和 held FD 均保持一致；
+- existing-child `O_TRUNC` 与 create/mkdir/unlink/rmdir/rename/link/symlink/mknod
+  全部返回 `ENOENT`；
+- target oracle 不变，control observer 保持可见且可正常操作；
+- `d_revalidate_hidden` 或对应 mutation blocked counter 与测试路径一致增长；
+- `DISABLE -> CLEAR -> UNLOAD` 完整恢复且设备稳定。
+
+## 19. 2026-09-19：统一策略入口与 KPM/namei 执行门禁
+
+本轮结合 Linux pathname lookup 官方文档、SukiSU Ultra、KPatch-Next、SUSFS、NoMount
+和 Kasumi 源码，调整后续执行顺序：不再把新增 syscall 白名单作为主路线，而是把
+PathGuard 定义为“path-resolution policy + backend”。策略身份固定为：
+
+```text
+fsuid + mount namespace + parent superblock/device/inode + basename + generation
+```
+
+后端按能力分层：
+
+| 后端 | 责任 | 当前定位 |
+|---|---|---|
+| KPM/namei | 固定 myron 内核上的最终组件、open/create、stat、readdir 和 mutation 前置拒绝 | 首选实验数据面，必须先通过 capability gate |
+| VFS shadow | lookup、synthetic negative、readdir、d_revalidate、cache/lifecycle 辅助 | 保留为现有 LKM 实验和协同数据面 |
+| LSM | mutation/access 的辅助拒绝 | 不能单独提供 exact hide |
+| SukiSU bridge | 提供极窄的 PathGuard policy 注册/撤销面 | 只有 KPM 不可用且完成 companion 设计后评估 |
+| syscall hook | 诊断和缺口定位 | 不作为生产隐藏主路线 |
+
+Linux 官方文档明确区分 RCU-walk、REF-walk、最终组件、`LOOKUP_CREATE`、
+`LOOKUP_OPEN`、相对 `dirfd`、重命名并发和 dcache 语义；因此不存在可由普通 LKM 稳定
+注册的万能 VFS hook。SUSFS 的真实实现修改 `fs/namei.c`、`fs/readdir.c`、`fs/stat.c`
+和多个 mutation 路径，证明 exact hide 需要在真实对象 callback 之前以及目录项写入用户
+缓冲之前决策。NoMount 同样要求 `namei/readdir/stat/d_path` 内核集成。Kasumi 可复用
+per-object metadata、SRCU/Tasks-RCU、stale workqueue 和 STOP/RESTORE/DRAIN/FREE
+生命周期，但不能直接作为完整 mutation/FUSE backend。KPatch-Next 的 KPM 仅证明固定
+内核上的函数 inline hook 能力，不构成跨设备 ABI。
+
+本轮新增只读采集器：
+
+```text
+tests/device/hide/collect_kernel_backend_capability.ps1
+```
+
+它只查询设备 release、`CONFIG_KPM`/`CONFIG_KALLSYMS`/`CONFIG_KPROBES`、SukiSU KPM
+只读命令和 kallsyms 可见性，不执行 KPM load/unload、insmod 或行为 hook。只有以下条件
+同时成立才允许进入 KPM capability probe；KPM 查询还必须通过输出内容校验，不能只看
+CLI 进程退出码：
+
+```text
+CONFIG_KPM=y
+CONFIG_KALLSYMS=y
+ksud kpm version 非空且无失败文本
+ksud kpm num 为整数且无失败文本
+ksud kpm list 无失败文本
+```
+
+否则状态必须保持 `unsupported` 或 `indeterminate`。历史设备证据已有
+`ksud kpm -> ENOTTY`，所以当前不能预设 KPM 可用；ADB 未连接时也不能伪造采集结果。
+
+后续执行顺序冻结为：
+
+1. 设备只读 capability gate；
+2. KPM/namei 不改变行为的符号和调用约定 probe；
+3. 固定 myron 的只读 namei backend；
+4. mutation 前置封闭和 strict `symlinkat -> ENOENT`；
+5. cache、alias、namespace、生命周期和卸载回归；
+6. HideLab 全量回归及设备/OTA admission；
+7. 仅在完整证据通过后评估 SukiSU companion bridge 和产品集成。
+
+参考链接：
+
+- Linux pathname lookup：<https://www.kernel.org/doc/html/latest/filesystems/path-lookup.html>
+- KPatch-Next：<https://github.com/KernelSU-Next/KPatch-Next>
+- SukiSU Tracepoint Hook：<https://github.com/SukiSU-Ultra/SukiSU-Ultra/blob/main/docs/guide/tracepoint-hook.md>
+- SukiSU KPM 文档：<https://github.com/SukiSU-Ultra/SukiSU-Ultra/blob/main/docs/guide/installation.md>
+- SUSFS：<https://gitlab.com/simonpunk/susfs4ksu>

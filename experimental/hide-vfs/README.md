@@ -60,6 +60,17 @@ regression requirements remain mandatory.
 `hide1_control` supports `status`, `install`, `enable`, `disable`, and `clear`.
 The status line also exposes read-only mode-4 counters for lookup,
 atomic_open, readdir, dentry revalidation, and dentry shadow installation.
+ABI v5 registers diagnostic-only `do_symlinkat` and `vfs_symlink`
+kprobes. The former's
+`symlink_probe=registered/calls/target/fd/hidden_fd` counters verify whether a
+target call's `newdfd` resolves to the governed hidden directory inode. The
+second probe reports
+`vfs_symlink_probe=registered/calls/target/valid/hidden_parent/child_parent/negative_child/shadow_iop`.
+ABI v6 also reports observational kretprobe return classifications for
+`may_create` and `security_inode_symlink` as
+`calls/zero/eacces/other/nmissed`.
+after `filename_create()`. Neither probe reads pathname contents, redirects
+execution, changes registers, or changes a syscall result.
 `DISABLE` preserves an inactive binding; `CLEAR` releases it. Failed replacement
 installs are transactional and preserve the previous binding.
 

@@ -3757,3 +3757,758 @@ capability probe：验证符号导出/解析、CFI、注册/注销和卸载契�
 syscall/namei 适配应记录为“普通 LKM 不可用”，转为内核 companion/KPM 方案评估。
 
 本轮产品状态保持：`Hide 1.0 = unsupported`。
+
+## 轮次 86：统一 namei 策略路线和 KPM 只读能力门禁（2026-09-19）
+
+### 综合审计结论
+
+本轮对本地参考源码和公开资料进行交叉核对：
+
+- Linux pathname lookup 文档明确区分 RCU-walk、REF-walk、最终组件、`dirfd`、
+  `LOOKUP_CREATE/OPEN`、dcache 和 rename 并发；普通 LKM 不存在可稳定注册的统一
+  VFS/namei policy ABI。
+- SUSFS 的实际补丁同时修改 `fs/namei.c`、`fs/readdir.c`、`fs/stat.c` 和多个
+  mutation 路径，说明 exact hide 必须在真实 filesystem callback 前及目录项写入用户
+  缓冲前决策；它不是单个 operation-table wrapper 可以替代的接口。
+- NoMount 的 `INTEGRATION.md` 要求集成 `namei/readdir/stat/d_path` 内核补丁，
+  其路径重定向/虚拟注入语义不能直接作为 PathGuard exact hide。
+- Kasumi 的 per-object metadata、SRCU/Tasks-RCU、dentry stale workqueue 和
+  `STOP_NEW -> RESTORE -> DRAIN -> FREE` 值得保留；但 lookup/dirhijack 覆盖不足以
+  处理全部 mutation、FUSE `atomic_open` 和严格 symlink errno。
+- KPatch-Next/SukiSU KPM 提供固定内核的函数 inline hook 能力，需要 `CONFIG_KPM=y`
+  和相应 kallsyms 支持；这只能作为 myron 固定内核实验 backend，不能当成通用 Android ABI。
+
+因此冻结为：
+
+```text
+PathGuard = path-resolution policy + backend
+KPM/namei = 固定 myron 的优先实验数据面
+VFS shadow = LKM 生命周期/cache 辅助与对照后端
+syscall hook = 诊断/fallback，不是生产主数据面
+```
+
+策略身份统一使用 `fsuid + mount namespace + parent superblock/device/inode + basename +
+generation`，避免以路径文本或 syscall 名称作为跨 alias 的唯一身份。
+
+### 新增只读能力门禁
+
+新增：
+
+```text
+tests/device/hide/collect_kernel_backend_capability.ps1
+```
+
+该脚本只读采集：
+
+- `ro.boot.product.device`、fingerprint、`uname -r`；
+- `/proc/config.gz` 中的 `CONFIG_KPM`、`CONFIG_KALLSYMS`、`CONFIG_KPROBES` 等配置；
+- `ksud kpm version/num/list` 查询结果；
+- `/proc/kallsyms` 中相关符号的可见性；
+- 当前 SukiSU/KernelSU/PathGuard 模块列表。
+
+只有 `CONFIG_KPM=y`、`CONFIG_KALLSYMS=y`，且 `version` 非空、`num` 为整数、`list` 无
+失败文本时，才输出 `eligible_for_kpm_probe`。这是必要的防误报：SukiSU CLI 可能把内核
+负错误码（例如 `ENOTTY`）打印出来但进程仍退出 0。脚本明确记录 `kpm_load_attempted=false`、
+`kpm_unload_attempted=false` 和 `module_insert_attempted=false`。本轮 ADB 设备数为 0，
+采集器按设计拒绝执行，未生成设备证据；历史记录中的 `ksud kpm -> ENOTTY` 仍然是
+当前设备 KPM 可用性的重要反证，不能预设 KPM 已启用。
+
+离线验证：
+
+```text
+PowerShell parser                     PASS
+pathguard_hide_vfs_model_test         PASS
+pathguard_hide_vfs_teardown_contract  PASS
+pathguard_hide_vfs_concurrency_test   PASS
+```
+
+本轮没有执行 `insmod`、KPM load/unload、syscall hook、namei 行为修改或 mutation；产品
+状态继续为 `Hide 1.0 = unsupported`。
+
+## 轮次 87：只读 KPM capability probe 离线实现（2026-09-19）
+
+依据 KPatch-Next/SukiSU KPM 源码，新增：
+
+```text
+experimental/hide-kpm/capability/pathguard_kpm_capability_probe.c
+experimental/hide-kpm/capability/Makefile
+experimental/hide-kpm/capability/README.md
+```
+
+探针只使用 KPM 生命周期宏和 `kallsyms_lookup_name()`，对以下类别的候选符号做存在性
+分类：namei/lookup、open、readdir、VFS mutation、stat 以及 FUSE。它把结果保存为
+计数和位图，`ctl0 status` 只读返回快照。源码没有保存可调用的内核地址，没有调用
+候选函数，没有注册任何 hook，也没有读写 dentry/inode/file operation。
+
+离线构建使用本机 Android NDK 28.2.13676358，验证结果为：
+
+```text
+ELF64 / AArch64 / ET_REL                    PASS
+.kpm.info、.kpm.init、.kpm.ctl0、.kpm.exit PASS
+undefined symbol 仅 kallsyms_lookup_name   PASS
+缺失 NDK 参数拒绝构建                     PASS
+构建后 .o/.kpm 清理                       PASS
+```
+
+Windows 适配过程中修复了两个构建根因：使用 NDK 提供的 `.cmd` clang 包装器，并移除
+会把 ARM64 汇编错误转交给 MinGW `as.exe` 的 `-fno-integrated-as`。这属于构建链修复，
+不改变设备行为。
+
+本轮 ADB 设备数仍为 0，因此未执行 `collect_kernel_backend_capability.ps1`，没有执行
+KPM load/status/unload、inline hook、syscall/namei 行为修改或 mutation。离线 KPM ELF
+正确不能推导设备 KPM 可用；产品状态继续为：
+
+```text
+Hide 1.0 = unsupported
+```
+
+## 轮次 92：generation 8002 `do_symlinkat` 诊断闭环（2026-09-20）
+
+用户明确批准 `ENABLE 8002` 后，使用
+`pathguard-hide1-lab-myron-ddk-v4-symlink-diagnostics.zip` 在完整
+`shadow_mode=0` 下执行单操作 `symlink-held-fd`。本轮严格复用 prepare 阶段保留的
+target 进程、mount namespace 和目录 FD：
+
+```text
+target PID        = 22943
+target UID        = 10552
+mount namespace   = 4026536033
+held directory FD = 202
+generation        = 8002
+parent inode      = 808794
+hidden inode      = 808801
+```
+
+ENABLE 成功进入 active，完整 shadow 安装状态为：
+
+```text
+state          = 2
+lifecycle      = 2
+operation_mask = 0x0fff
+dentry_install = 5/5/0
+```
+
+target 与 control 的 `symlinkat` 均被 Android shared-storage/FUSE 既有策略拒绝为
+`EACCES`，两者都没有副作用，canary SHA-256 及 root oracle 均未变化。诊断计数最终为：
+
+```text
+symlink_probe=1/8/3/3/1
+              | | | | `- target newdfd 命中 governed hidden inode
+              | | | `--- target newdfd 成功取得稳定 file 引用
+              | | `----- 命中 target observer
+              | `------- do_symlinkat 总调用数
+              `--------- kprobe 已注册
+```
+
+`hidden_fd=1` 证明 target 的 held-FD `symlinkat` 确实经过设备内核
+`do_symlinkat()`，arm64 第二参数 `newdfd` 的读取约定正确，而且 fsuid、thread group、
+mount namespace、generation 和 hidden inode 过滤没有把本次目标调用误判为 control。
+这关闭了“调用约定/dirfd 身份不确定”的诊断门禁，但没有改变 syscall 返回值，因此
+尚未实现 strict `symlinkat -> ENOENT`。
+
+证据目录：
+
+```text
+build/device-evidence/hidelab-symlink-diagnostics-v4-prepare/20260920-220616/
+build/device-evidence/hidelab-symlink-diagnostics-v4/20260920-220926/
+```
+
+测试后已完成 `DISABLE -> CLEAR -> UNLOAD`，两个 disposable fixture 已删除，模块不再
+live，boot ID 未变化；dmesg 未发现本轮 PathGuard crash、Oops、panic 或 UAF。下一步
+只允许先做 `security_path_symlink` 调用点的只观测诊断，验证其 parent path 与 child
+dentry 身份；验证通过后才能设计窄 `ENOENT` bridge。直接跳过 `do_symlinkat()` 会绕过
+`done_path_create()` 和 `putname()`，存在锁及 `struct filename` 引用泄漏风险，禁止作为
+实现方案。产品状态继续保持：
+
+```text
+Hide 1.0 = unsupported
+```
+
+## 轮次 93：设备配置否决 path-LSM，改用 `vfs_symlink` 诊断（2026-09-20）
+
+generation 8002 后原计划在 `security_path_symlink()` 增加只观测 kprobe。实现 ABI v5
+初稿并通过 DDK 编译后，打包前对运行设备进行只读 capability 核对，发现：
+
+```text
+CONFIG_SECURITY=y
+CONFIG_SECURITYFS=y
+# CONFIG_SECURITY_PATH is not set
+
+/proc/kallsyms:
+do_symlinkat             present
+security_path_symlink    absent
+vfs_symlink              present
+security_inode_symlink   present
+may_create               present
+```
+
+根因不是符号隐藏，而是目标内核关闭了 `CONFIG_SECURITY_PATH`：对应头文件把
+`security_path_symlink()` 编译为直接返回 0 的 inline stub，设备运行时不存在可探测的
+函数。继续打包该初稿会使第二个 kprobe 注册失败，并按 fail-closed 规则导致模块拒绝
+加载。因此未发布该实现，也没有为兼容一个不存在的入口增加 fallback。
+
+诊断入口改为目标设备真实存在的 `vfs_symlink(idmap, dir, dentry, oldname)`。ABI v5
+仅新增以下只读计数：
+
+```text
+vfs_symlink_probe=
+registered/calls/target/valid/hidden_parent/child_parent/negative_child
+```
+
+probe 只读取内核持有的 `dir inode`、`child dentry` 及其 parent identity；不读取
+`oldname`，不修改寄存器、instruction pointer 或返回值。它与 `do_symlinkat` probe
+分别维护 active 计数和 wait queue，模块初始化时任一 probe 注册失败都会完整注销前一
+probe；卸载时先注销两个 probe，再分别 drain handler。
+
+本轮离线验证：
+
+```text
+pathguard_hide_probe_contract_test           PASS
+pathguard_hide_vfs_model_test                PASS
+pathguard_hide_vfs_teardown_contract_test    PASS
+pathguard_hide_vfs_concurrency_test           PASS
+hide1_control ARM64 -Wall -Wextra -Werror    PASS
+DDK CC/MODPOST/LD/BTF                         PASS
+git diff --check                              PASS
+```
+
+产物已传送到 `/sdcard/Download/`，本地与设备端 ZIP SHA-256 一致：
+
+```text
+package = pathguard-hide1-lab-myron-ddk-v5-vfs-symlink-diagnostics.zip
+KO SHA-256 = d4bd574397b999ea9293fca0af66bacf6735da814214f389c816962127923e60
+control SHA-256 = 22958f6760f8dc655ff0528604b626d0b4b4c73fae9154600c938f8e7408764b
+ZIP SHA-256 = dd4f699fa3e1b24f697e3fce93bd01becc6417dc7b40982dd739b3970c75ddb3
+automatic_load = no
+automatic_enable = no
+```
+
+设备尚未安装 v5，也未加载模块或执行新 generation。下一轮只允许复用
+`symlink-held-fd` 单操作场景：若 `vfs_symlink` target/hidden_parent/child_parent/
+negative_child 全部命中，则可以把严格 `ENOENT` 拒绝放在 `vfs_symlink` 的 pre-handler
+返回路径研究中；若 target 计数不命中，则 `EACCES` 发生在 `filename_create()` 内部，
+必须继续向该路径收敛。任何计数结果都不等于 Hide 1.0 通过。
+
+## 轮次 94：generation 9001 `vfs_symlink` 真机诊断（2026-09-20）
+
+安装 v5 并重启后，设备侧模块与控制工具哈希和构建产物一致。模块只加载时两个 probe
+均注册成功：
+
+```text
+abi_version       = 5
+symlink_probe     = 1/0/0/0/0
+vfs_symlink_probe = 1/0/0/0/0/0/0
+```
+
+disabled 阶段创建一次性 fixture，并保持 target native process 与 held directory FD：
+
+```text
+target PID        = 19295
+target UID        = 10552
+mount namespace   = 4026536015
+held directory FD = 215
+fixture           = /storage/emulated/0/Pictures/PathGuardHideLab/20260920-223756
+generation        = 9001
+```
+
+经用户明确批准后执行 `ENABLE 9001`。本包默认 `shadow_mode=1`，所以
+`dentry_install=0/0/0` 是 i_op-only 诊断配置的预期值。单操作 `symlink-held-fd`
+完成后状态为：
+
+```text
+symlink_probe     = 1/8/3/3/1
+vfs_symlink_probe = 1/8/3/3/1/1/1
+mutation.symlink  = 0/0/0/0
+```
+
+`vfs_symlink` 最后四项全部为 1，证明 target 调用进入了 `vfs_symlink()`，其 parent
+是 governed hidden inode，child dentry 正确属于该 parent 且仍为 negative。target 与
+control 均返回 `EACCES`、无副作用，root oracle 和 canary 哈希未变化。由于
+`mutation.symlink` 没有进入 PathGuard `i_op->symlink` wrapper，拒绝点已经严格收敛到：
+
+```text
+vfs_symlink
+  -> may_create
+  -> i_op->symlink presence check
+  -> security_inode_symlink
+  -> dir->i_op->symlink   (未到达)
+```
+
+证据目录：
+
+```text
+build/device-evidence/hidelab-vfs-symlink-v5-prepare/20260920-223756/
+build/device-evidence/hidelab-vfs-symlink-v5/20260920-224142/
+```
+
+本轮结束后已执行 `DISABLE -> CLEAR -> UNLOAD`，删除 disposable fixture；模块不再
+live，boot ID 未变化，dmesg 未发现 PathGuard Oops、panic、UAF 或 deadlock。下一阶段
+使用只观测 kretprobe 分别记录 `may_create()` 与 `security_inode_symlink()` 返回值，并
+记录进入 `vfs_symlink()` 时 PathGuard shadow callback 是否已发布。返回分支确认前不
+实施 errno 改写，产品状态继续为 `Hide 1.0 = unsupported`。
+
+### ABI v6 分支诊断产物
+
+基于上述结果实现 ABI v6，只读增加：
+
+- `vfs_symlink_probe` 的 `shadow_iop` 计数，确认进入函数时
+  `dir->i_op->symlink == hide1_symlink`；
+- `may_create` kretprobe：`calls/zero/eacces/other/nmissed`；
+- `security_inode_symlink` kretprobe：`calls/zero/eacces/other/nmissed`；
+- per-instance `matched` data，只跟踪 target + hidden parent + negative child；
+- 独立 active counter/wait queue，CLEAR 在释放 binding 前 drain；
+- 集中式 probe 注册与逆序注销，任一注册失败时完整回滚。
+
+源码和契约测试明确禁止 `regs_set_return_value()`；本版本只用
+`regs_return_value()` 分类真实返回值。离线验证与 v5 相同的四项测试、ARM64 控制工具
+`-Werror` 编译、DDK `CC/MODPOST/LD/BTF` 和 `git diff --check` 全部通过。
+
+```text
+package = pathguard-hide1-lab-myron-ddk-v6-symlink-stage-diagnostics.zip
+KO SHA-256 = a0beaa48f3690c75fc72f05cf5ca9fb8ea443a39c22a85e0987648340b74d4a5
+control SHA-256 = b9b003bf036cf7385d3670eee56144009b5d2e0fc35b64de18c2142780e5f79a
+ZIP SHA-256 = affca2f7fc3e6721fa3c86f243f04f7521e4baa75aa4a567343566acbf804f5f
+automatic_load = no
+automatic_enable = no
+```
+
+ZIP 已传送到设备 `/sdcard/Download/` 且设备端哈希一致，尚未安装。下一轮必须先确认
+四个 probe 全部注册，再使用新 generation 重建 disposable fixture；不得复用已删除的
+generation 9001 fixture。
+
+## 轮次 95：generation 10001 stage 诊断与 arm64 返回值分类修复（2026-09-20）
+
+v6 安装后四个 probe 全部注册，`symlink_stage_mask=0x3`。disabled 阶段建立新 fixture
+并固定：
+
+```text
+target PID        = 21350
+target UID        = 10552
+mount namespace   = 4026536101
+held directory FD = 199
+fixture           = /storage/emulated/0/Pictures/PathGuardHideLab/20260920-225539
+generation        = 10001
+```
+
+经用户明确批准执行 `ENABLE 10001` 后，单操作结果为：
+
+```text
+symlink_probe        = 1/8/3/3/1
+vfs_symlink_probe    = 1/8/3/3/1/1/1/1
+may_create_stage     = 0/0/0/0/0
+inode_security_stage = 1/0/0/1/0
+mutation.symlink     = 0/0/0/0
+```
+
+`shadow_iop=1` 证明进入 `vfs_symlink()` 时 PathGuard callback 已发布；`may_create` 没有
+独立调用，说明其设备调用点被 ThinLTO 内联；`security_inode_symlink` 明确被调用一次，
+且此后没有进入 PathGuard callback。因此真实拒绝分支已定位到 inode LSM。
+
+v6 将 kretprobe 的 `regs_return_value()` 直接转换成 `long`。arm64 上返回类型为 `int` 的
+函数通常写 `w0`，观察到的 `x0` 为零扩展值；例如 `-EACCES` 表示为
+`0x00000000fffffff3`，直接转换成 64 位 signed long 不等于 `-13`。调用方按 32 位 int
+解释，所以用户态仍正确收到 errno 13。v6 的 `other=1` 是诊断分类错误，不能解释为
+未知 LSM errno。
+
+根因修复为：
+
+```c
+(int)regs_return_value(regs)
+```
+
+本轮测试后已完成 `DISABLE -> CLEAR -> UNLOAD`，fixture 删除，模块不再 live，boot ID
+未变化，root oracle 未变化。必须用修复后的 v7 重新采集一次，预期
+`inode_security_stage=1/0/1/0/0`，通过后才允许设计 target-only LSM 返回桥。
+
+## 轮次 96：v7 arm64 `int` 返回分类修复产物（2026-09-20）
+
+v7 仅修复 `security_inode_symlink()` kretprobe 的返回值类型解释：统一由
+`hide1_record_stage_return(int result, ...)` 接收，并在 arm64 返回寄存器处显式使用
+`(int)regs_return_value(regs)`。本版本仍是只读诊断，不调用
+`regs_set_return_value()`，不改变 LSM、VFS 或用户态返回值。
+
+离线验证结果：
+
+```text
+git diff --check                                      PASS
+hide1_control ARM64 -Wall -Wextra -Werror            PASS
+pathguard_hide_probe_contract_test                    PASS
+pathguard_hide_vfs_model_test                         PASS
+pathguard_hide_vfs_teardown_contract_test             PASS
+pathguard_hide_vfs_concurrency_test                    PASS
+DDK Kbuild CC/MODPOST/LD/BTF                           PASS
+```
+
+产物：
+
+```text
+package = pathguard-hide1-lab-myron-ddk-v7-symlink-stage-int-return.zip
+KO SHA-256 = e743c70467b411cd117e40fc35dc6efb580966b57c14165559561c0703ae034d
+control SHA-256 = b9b003bf036cf7385d3670eee56144009b5d2e0fc35b64de18c2142780e5f79a
+ZIP SHA-256 = 19521facbf634588dee74cf96ffd92b7ba1186a95fdbb4b73115fbe1ee173163
+automatic_load = no
+automatic_enable = no
+```
+
+ZIP 已传送到设备
+`/sdcard/Download/pathguard-hide1-lab-myron-ddk-v7-symlink-stage-int-return.zip`，设备端
+SHA-256 与本地一致。传送时设备没有 live PathGuard 模块。安装并重启后仍须重新建立
+fixture 和 generation；只有观察到 `inode_security_stage=1/0/1/0/0`，才可关闭返回
+类型诊断门禁。
+
+### generation 11001 真机结果与 v8 bridge 候选
+
+v7 安装重启后使用新 fixture 和 generation `11001`，固定身份为：
+
+```text
+target PID        = 22676
+target UID        = 10552
+mount namespace   = 4026536029
+held directory FD = 214
+fixture           = /storage/emulated/0/Pictures/PathGuardHideLab/20260920-231012
+```
+
+经用户明确批准执行 `ENABLE 11001` 后，单次 held-FD `symlinkat` 得到：
+
+```text
+symlink_probe        = 1/8/3/3/1
+vfs_symlink_probe    = 1/8/3/3/1/1/1/1
+may_create_stage     = 0/0/0/0/0
+inode_security_stage = 1/0/1/0/0
+mutation.symlink     = 0/0/0/0
+target symlinkat     = -1/EACCES/no-side-effect
+```
+
+这关闭了 arm64 返回类型诊断门禁：`security_inode_symlink()` 的原始返回确实是
+`-EACCES`，PathGuard shadow 已发布，但 filesystem `i_op->symlink` 尚未执行。root oracle
+与 canary 哈希未变化。随后 `DISABLE -> CLEAR -> UNLOAD` 全部成功，boot ID 未变化，模块
+不再 live，pstore 为空。证据目录：
+
+```text
+build/device-evidence/hidelab-symlink-stage-v7-prepare/20260920-231012/
+build/device-evidence/hidelab-symlink-stage-v7/20260920-231218/
+```
+
+基于该证据实现 ABI v7/v8 候选：只在
+`ACTIVE + generation + thread-group + fsuid + mount namespace + hidden parent + child-parent
+identity + negative child` 全部匹配，且 inode LSM 原始返回严格等于 `-EACCES` 时，使用
+kretprobe 将返回值收敛为 `-ENOENT`。成功和其他 errno 保持原样；独立
+`inode_security_bridge_enoent` 计数记录实际改写。该 bridge 位于 filesystem callback
+之前，不跳过 `do_symlinkat()` 的 `done_path_create()`/`putname()` 清理路径。
+
+离线候选验证：
+
+```text
+PowerShell parser + git diff --check                         PASS
+hide1_control ARM64 static -Wall -Wextra -Werror            PASS
+pathguard_hide_probe_contract_test                           PASS
+pathguard_hide_vfs_model_test                                PASS
+pathguard_hide_vfs_teardown_contract_test                    PASS
+pathguard_hide_vfs_concurrency_test                          PASS
+DDK Kbuild CC/MODPOST/LD/BTF                                 PASS
+```
+
+本候选尚未安装或真机 ENABLE，不构成 strict `symlinkat -> ENOENT` 通过证据。
+
+候选产物：
+
+```text
+package = pathguard-hide1-lab-myron-ddk-v8-symlink-enoent-bridge.zip
+KO SHA-256 = 70a81e31dee92ea387d1d7235b5791c806d3004314c197b5b01470af214d15d4
+control SHA-256 = 41c906553bea537bbd2791bffe08e300eb095ffa4927ac2be8727a7703c2190e
+ZIP SHA-256 = de76cbde3e387ca4835fc68b3d720587f741031bac4fd83a611d80f294d29eec
+automatic_load = no
+automatic_enable = no
+```
+
+### generation 12001 v8 strict `ENOENT` bridge 真机通过
+
+v8 安装重启后重新建立 fixture，不复用 v7 的进程或 namespace：
+
+```text
+target PID        = 19720
+target UID        = 10552
+mount namespace   = 4026536027
+held directory FD = 213
+fixture           = /storage/emulated/0/Pictures/PathGuardHideLab/20260920-232621
+generation        = 12001
+```
+
+经用户明确批准执行 `ENABLE 12001`，boot ID、PID 和 namespace 均保持不变。单操作
+`symlink-held-fd` 的严格 target/control 对照结果为：
+
+```text
+target  symlinkat = -1/ENOENT/no-side-effect
+control symlinkat = -1/EACCES/no-side-effect
+fixture_unchanged = true
+conclusion        = PASS
+
+symlink_probe                 = 1/7/3/3/1
+vfs_symlink_probe             = 1/7/3/3/1/1/1/1
+inode_security_stage          = 1/0/1/0/0
+inode_security_bridge_enoent  = 1
+mutation.symlink              = 0/0/0/0
+```
+
+结果证明 bridge 只作用于 target：control 保持设备原始 `EACCES`，target 被收敛为严格
+`ENOENT`，filesystem callback 未执行，真实对象和 canary 均未改变。测试后
+`DISABLE -> CLEAR -> UNLOAD` 完整成功，boot ID
+`59998fab-5906-42b6-af4a-56ef89d49067` 未变化，设备在线，模块不再 live，pstore 为空。
+
+证据目录：
+
+```text
+build/device-evidence/hidelab-symlink-bridge-v8-prepare/20260920-232621/
+build/device-evidence/hidelab-symlink-bridge-v8/20260920-232820/
+```
+
+strict held-FD symlink 语义门禁至此通过。下一阶段恢复 `shadow_mode=0` 的完整 held-FD
+mutation 回归，覆盖 create、truncate、mkdir、unlink、rmdir、rename、link、mknod 和
+symlink；本结果本身仍不足以宣告 Hide 1.0 成功。
+
+## 轮次 91：held-FD cached-child 修复真机结果与 symlinkat 诊断后端（2026-09-20）
+
+用户安装 `pathguard-hide1-lab-myron-ddk-v3-heldfd-cache.zip` 并重启后，严格保持
+同一 target native PID、mount namespace、held directory FD 和 fixture，执行了
+generation `7001` 的两阶段回归：
+
+```text
+target PID       = 22041
+target UID       = 10552
+mount namespace  = 4026536090
+held FD          = 206
+fixture          = /storage/emulated/0/Pictures/PathGuardHideLab/20260920-211627
+parent inode     = 816702
+hidden inode     = 816708
+```
+
+ENABLE 后 status 为 `state=2/lifecycle=2`，`dentry_install=5/5/0`，证明普通缓存文件
+child 也进入 dentry shadow。此前造成真实破坏的关键操作已经封闭：
+
+```text
+openat(fd, "canary.txt", O_TRUNC) -> -1/ENOENT
+side_effect                         = false
+target_oracle_changed               = false
+```
+
+`openat(O_CREAT)`、`mkdirat`、`unlinkat`、`rmdir`、`renameat`、`linkat` 和 `mknodat`
+同样返回 `ENOENT` 且没有 target 副作用。唯一未满足 exact-hide 契约的是：
+
+```text
+symlinkat(..., held_fd, ...) -> -1/EACCES
+side_effect                  = false
+```
+
+control observer 的 shared-storage/FUSE `symlinkat` 同样返回 `EACCES`，说明它是
+Android 存储栈在 `i_op->symlink` 前的既有拒绝；但 target 合同仍要求统一 `ENOENT`，
+所以本轮结论是 `SEMANTIC_DRIFT`，不能降级验收标准。实验后已完成
+`DISABLE -> CLEAR -> UNLOAD`，fixture 已删除，设备在线。
+
+源码调用链确认 `do_symlinkat()` 在 `filename_create()` 后先执行
+`security_path_symlink()`，随后才到 `vfs_symlink()` 和 `dir->i_op->symlink()`；设备
+symlink mutation counter 为零，与“拒绝发生在 operation-table shadow 前”一致。
+SUSFS 也通过直接修改 `do_symlinkat` 在该层做判定，而不是依赖 inode callback。
+
+因此新增 ABI v4 的窄诊断后端：
+
+- 使用导出的 `register_kprobe()` 在 `do_symlinkat` 入口只做观测；
+- 从 arm64 第二个函数参数读取 `newdfd`；
+- 仅对 active generation、target thread group/fsuid、固定 mount namespace继续；
+- 使用 `lookup_fdget_rcu()` 获得稳定 file 引用，只比较 `(super_block, i_ino)`；
+- 输出 `registered/calls/target/fd/hidden_fd` 五项计数；
+- 不读取用户路径、不修改 `pt_regs`、不改变 syscall 返回值；
+- CLEAR/绑定替换等待 active probe handler 归零，模块退出先 unregister 再释放绑定；
+- kprobe 注册失败时模块加载直接失败，禁止伪装为完整诊断能力。
+
+离线验证：
+
+```text
+android16-6.12 DDK CC/MODPOST/LD/BTF                    PASS
+pathguard_hide_vfs_model_test                          PASS
+pathguard_hide_vfs_teardown_contract_test              PASS
+pathguard_hide_vfs_concurrency_test                     PASS
+hide1_control ABI v4 Android ARM64 -Werror build       PASS
+git diff --check                                        PASS
+```
+
+构建产物：
+
+```text
+package = pathguard-hide1-lab-myron-ddk-v4-symlink-diagnostics.zip
+KO SHA-256 = d90d74c9b6f637cb61c3487311dc398c919dbc169a887f7842c3da4331974533
+control SHA-256 = 633157d2e845b56adbfd47164130efc8609c4ba655ec09d9e66a7032762d2a49
+ZIP SHA-256 = 383593bdf1fb573363329f9fcc9ff725550deb4e3ba26d05e1beec809938b477
+automatic_load = no
+automatic_enable = no
+```
+
+ZIP 已传送到设备 `/sdcard/Download/`，设备侧 SHA-256 与本地一致；尚未安装、加载或
+执行 ENABLE。
+
+该诊断包的下一阶段目标仅是证明 target `symlinkat` 确实命中 `do_symlinkat`，且
+`newdfd` 指向 hidden inode。只有真机计数正确后，才评估固定 myron 上的窄返回值
+bridge；在此之前不实施 PC redirect，产品状态继续为 `Hide 1.0 = unsupported`。
+
+## 轮次 90：held-FD positive-cache 修复候选（2026-09-20）
+
+对轮次 89 的 `openat(fd, "canary.txt", O_TRUNC)` 绕过继续审查后，根因收敛为：
+已打开目录 FD 的相对 namei 可以直接命中已缓存的 positive child dentry，走
+`lookup_fast` 后进入 open/truncate，不再调用 hidden directory 的
+`i_op->lookup/atomic_open`。旧实现只给缓存中的目录 child 安装 dentry shadow，普通文件
+`canary.txt` 没有 observer-aware `d_revalidate`，因此真实对象被修改。
+
+候选修复包括：
+
+- 统一 `hide1_dentry_should_hide()`，同时覆盖顶层 basename 与隐藏目录的后代；
+- target 从 hidden directory 发起的新 lookup 直接生成 synthetic negative，不进入 FUSE；
+- ENABLE 时为所有 cached child 安装 dentry shadow，文件和目录均覆盖；
+- 目录 child 继续安装独立 `i_op` 并递归覆盖后代；
+- descendant `i_op/d_op` 安装失败或单层缓存超过 64 项时，返回错误并回滚 ENABLE，
+  不再静默留下绕过对象；
+- inode alias 身份由指针比较改为 `(super_block, i_ino)`。
+
+离线验证：
+
+```text
+DDK Kbuild CC/MODPOST/LD/BTF                         PASS
+pathguard_hide_vfs_model_test                       PASS
+pathguard_hide_vfs_teardown_contract_test           PASS
+pathguard_hide_vfs_concurrency_test                  PASS
+git diff --check                                     PASS
+```
+
+候选 KO SHA-256：
+
+```text
+9e4e2e192764fdf2cadeb296abb56852e194f63cc9d49fb55864f70cff480cd7
+```
+
+这仍只是离线候选。必须重新执行同 PID、同 namespace、同 held FD 的
+`prepare -> ENABLE -> preopen-hidden-fd` 真机回归，确认全部操作为 `ENOENT` 且 root
+oracle 不变后，才能把 held-FD mutation 门禁标记为通过。当前产品状态仍为
+`Hide 1.0 = unsupported`。
+
+## 轮次 88：myron 设备 KPM capability gate（2026-09-19）
+
+手机重新连接后执行了只读采集器。首次采集暴露 Android `sh` 不接受多行 `if` 的脚本
+兼容性问题；已将查询改为 `test -r ... && ... || ...`，并增加 `ro.product.device` 回退。
+第二次证据目录：
+
+```text
+build/device-evidence/kernel-backend-capability/20260919-111448/
+```
+
+设备事实：
+
+| 项目 | 结果 |
+|---|---|
+| product/codename | `myron` / `25102RKBEC`（fingerprint 中确认） |
+| kernel release | `6.12.23-android16-5-g16e473de48a3-abogki462654244-4k` |
+| `CONFIG_KALLSYMS` / `CONFIG_KALLSYMS_ALL` | `y` / `y` |
+| `CONFIG_KPROBES` / `CONFIG_KPROBE_EVENTS` | `y` / `y` |
+| `CONFIG_CFI_CLANG` | `y` |
+| `CONFIG_MODULES` | `y` |
+| `CONFIG_KPM` | 未出现 `CONFIG_KPM=y` |
+| `ksud kpm version` | `ENOTTY` |
+| `ksud kpm num` | `ENOTTY` |
+| `ksud kpm list` | `ENOTTY` |
+| gate decision | `unsupported` |
+
+`ksud kpm --help` 的帮助文本不构成能力证据；真正的 KPM 子命令均在 ioctl 层失败。
+本轮没有执行 KPM load/unload、`.ko` insmod、syscall/namei hook、VFS operation-table
+替换或 mutation。设备仍在线，未改变行为。
+
+结论：myron 当前运行内核没有可用的 SukiSU KPM 后端，KPM/namei 路线在本设备被
+capability gate 正常阻断。后续不能绕过门禁加载 `.kpm`；应转向已验证的 LKM/VFS
+实验后端继续生命周期、缓存、mutation 和 HideLab 回归，或另行获取启用 `CONFIG_KPM`
+的固定内核/KernelPatch companion。产品状态继续为：
+
+```text
+Hide 1.0 = unsupported
+```
+
+### 参考链接
+
+- https://www.kernel.org/doc/html/latest/filesystems/path-lookup.html
+- https://github.com/KernelSU-Next/KPatch-Next
+- https://github.com/SukiSU-Ultra/SukiSU-Ultra/blob/main/docs/guide/tracepoint-hook.md
+- https://github.com/SukiSU-Ultra/SukiSU-Ultra/blob/main/docs/zh/README.md
+- https://gitlab.com/simonpunk/susfs4ksu
+
+## 2026-09-19：mutation 验收矛修复与构建门禁复核
+
+本轮先修正测试证据链，再继续数据面实现：
+
+- `JavaVfsProbe` 现在只有在显式传入 `attack_mutations=true` 时才执行
+  `create/truncate/mkdir/delete/rename`；baseline、cache-order、concurrency 和
+  reliability 不再偷偷修改 fixture。
+- native probe 的 held-FD 路径补齐 `rmdir`、`rename`、`link`、`mknod`，与已有
+  create/truncate/mkdir/unlink/symlink 一起覆盖九类 mutation；并将
+  `prepare-hidden-fd` 与 `preopen-hidden-fd` 明确为两阶段、同一 PID/namespace 的
+  测试。
+- 新 binding 提交时清零 lookup、readdir、d_revalidate 和每操作 mutation 计数，
+  防止上一 generation 的累计计数污染当前证据。
+
+离线验证：
+
+```text
+Gradle testTargetDebugUnitTest/testControlDebugUnitTest        PASS
+Gradle assembleTargetDebug/assembleControlDebug                PASS
+pathguard_hide_probe_contract_test                             PASS
+pathguard_hide_vfs_model_test                                  PASS
+pathguard_hide_vfs_teardown_contract_test                      PASS
+pathguard_hide_vfs_concurrency_test                            PASS
+PowerShell parser + git diff --check                           PASS
+```
+
+尝试使用 `refer/hide-refer/android16-6.12` 构建内核模块时，Kbuild 拒绝
+未准备的源码树：缺少 `include/generated/autoconf.h`、`include/generated/rustc_cfg`
+和 `include/config/auto.conf`。仓库内 Kleaf `workspace_status_dir` 只有一个
+`CONFIG_LOCALVERSION_AUTO=y` 片段，不是可用于外部模块的 prepared output；因此本轮
+没有生成新的 `pathguard_hide1.ko`，也没有打包/加载设备模块。
+
+当前结论：测试矛已收口，mutation 真机证据仍待新模块；Hide 1.0 继续保持
+`unsupported`。下一步必须取得与 Android 16/6.12 DDK 匹配的 prepared output
+（或在 Linux/WSL 中完成官方 Kleaf prepare），再构建模块并按两阶段 held-FD
+协议执行受控回归。
+
+## 轮次 89：held-FD 两阶段 mutation 回归（2026-09-20）
+
+本轮使用重新构建的 target/control APK 和 DDK v2 LKM，严格执行：
+
+1. disabled 状态下 `prepare-hidden-fd`，保持 target PID、mount namespace 和
+   fixture 不变；
+2. 加载模块、`INSTALL` generation `6001`，经用户确认执行 `ENABLE 6001`；
+3. `preopen-hidden-fd` 阶段通过同一 native 进程和同一目录 FD 执行 mutation；
+4. 完成后 `DISABLE -> CLEAR -> UNLOAD` 并删除 disposable fixture。
+
+证据目录：
+
+```text
+build/device-evidence/hidelab-heldfd/20260920-000413/
+build/device-evidence/hidelab-heldfd/20260920-001044/
+```
+
+prepare 证据：native PID `25256`、mount namespace `mnt:[4026536015]`、held FD
+`190`，fixture oracle 未变化。ENABLE 后，普通路径 lookup/open/readdir 均按隐藏语义
+返回；但是同一 pre-opened directory FD 的：
+
+```text
+openat(fd, "canary.txt", O_TRUNC) -> 0
+side_effect = true
+```
+
+且 oracle 的 canary 内容发生变化，最终结论为：
+
+```text
+DESTRUCTIVE_FAIL
+```
+
+设备 status 同时显示 `mutation_original=12`；`symlinkat`/`linkat` 还存在
+`EACCES` 语义漂移。该结果证明当前 operation-table shadow 只封闭了路径解析入口，
+不能封闭已打开目录 FD 的 mutation；不能据此宣布 mutation 通过，也不能激活
+Hide 1.0。恢复动作已成功完成，设备在线，产品状态继续为：
+
+```text
+Hide 1.0 = unsupported
+```

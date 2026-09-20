@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define PATHGUARD_HIDE1_ABI_VERSION 3U
+#define PATHGUARD_HIDE1_ABI_VERSION 7U
 #define PATHGUARD_HIDE1_PATH_MAX 384U
 #define PATHGUARD_HIDE1_NAME_MAX 255U
 
@@ -82,6 +82,34 @@ struct pathguard_hide1_status {
     __u64 mutation_blocked;
     __u64 mutation_original;
     __u64 mutation_unsupported;
+    __u32 symlink_probe_registered;
+    __u32 symlink_probe_reserved;
+    __u64 symlink_probe_calls;
+    __u64 symlink_probe_target;
+    __u64 symlink_probe_fd;
+    __u64 symlink_probe_hidden_fd;
+    __u32 vfs_symlink_probe_registered;
+    __u32 vfs_symlink_probe_reserved;
+    __u64 vfs_symlink_probe_calls;
+    __u64 vfs_symlink_probe_target;
+    __u64 vfs_symlink_probe_valid;
+    __u64 vfs_symlink_probe_hidden_parent;
+    __u64 vfs_symlink_probe_child_parent;
+    __u64 vfs_symlink_probe_negative_child;
+    __u64 vfs_symlink_probe_shadow_iop;
+    __u32 symlink_stage_probe_mask;
+    __u32 symlink_stage_probe_reserved;
+    __u64 may_create_stage_calls;
+    __u64 may_create_stage_zero;
+    __u64 may_create_stage_eacces;
+    __u64 may_create_stage_other;
+    __u64 may_create_stage_nmissed;
+    __u64 inode_security_stage_calls;
+    __u64 inode_security_stage_zero;
+    __u64 inode_security_stage_eacces;
+    __u64 inode_security_stage_other;
+    __u64 inode_security_stage_nmissed;
+    __u64 inode_security_bridge_enoent;
     struct pathguard_hide1_mutation_counters mutation_atomic_open;
     struct pathguard_hide1_mutation_counters mutation_create;
     struct pathguard_hide1_mutation_counters mutation_mkdir;

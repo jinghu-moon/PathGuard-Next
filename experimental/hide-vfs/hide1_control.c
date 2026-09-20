@@ -80,6 +80,17 @@ static int print_status(int fd)
            " active=%" PRIu64 "/%" PRIu64 "/%" PRIu64
            " open_count=%" PRIu64
            " mutation=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " symlink_probe=%" PRIu32 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64
+           " vfs_symlink_probe=%" PRIu32 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64
+           " symlink_stage_mask=0x%" PRIx32
+           " may_create_stage=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64
+           " inode_security_stage=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64
+           " inode_security_bridge_enoent=%" PRIu64
            MUTATION_FORMAT("atomic_open")
            MUTATION_FORMAT("create")
            MUTATION_FORMAT("mkdir")
@@ -114,6 +125,31 @@ static int print_status(int fd)
            (uint64_t)status.mutation_blocked,
            (uint64_t)status.mutation_original,
            (uint64_t)status.mutation_unsupported,
+           status.symlink_probe_registered,
+           (uint64_t)status.symlink_probe_calls,
+           (uint64_t)status.symlink_probe_target,
+           (uint64_t)status.symlink_probe_fd,
+           (uint64_t)status.symlink_probe_hidden_fd,
+           status.vfs_symlink_probe_registered,
+           (uint64_t)status.vfs_symlink_probe_calls,
+           (uint64_t)status.vfs_symlink_probe_target,
+           (uint64_t)status.vfs_symlink_probe_valid,
+           (uint64_t)status.vfs_symlink_probe_hidden_parent,
+           (uint64_t)status.vfs_symlink_probe_child_parent,
+           (uint64_t)status.vfs_symlink_probe_negative_child,
+           (uint64_t)status.vfs_symlink_probe_shadow_iop,
+           status.symlink_stage_probe_mask,
+           (uint64_t)status.may_create_stage_calls,
+           (uint64_t)status.may_create_stage_zero,
+           (uint64_t)status.may_create_stage_eacces,
+           (uint64_t)status.may_create_stage_other,
+           (uint64_t)status.may_create_stage_nmissed,
+           (uint64_t)status.inode_security_stage_calls,
+           (uint64_t)status.inode_security_stage_zero,
+           (uint64_t)status.inode_security_stage_eacces,
+           (uint64_t)status.inode_security_stage_other,
+           (uint64_t)status.inode_security_stage_nmissed,
+           (uint64_t)status.inode_security_bridge_enoent,
            MUTATION_VALUES(mutation_atomic_open),
            MUTATION_VALUES(mutation_create),
            MUTATION_VALUES(mutation_mkdir),

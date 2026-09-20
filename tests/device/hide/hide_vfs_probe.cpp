@@ -864,14 +864,26 @@ void ObserveExternalMutations(const std::string& hidden_path) {
 }
 
 void ObserveExternalHiddenFdMutations(const std::string& hidden_path) {
+    errno = 0;
+    const int path_fd = open(hidden_path.c_str(),
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    const int path_errno = path_fd < 0 ? errno : 0;
+    Emit("external.fd_mutation.open_hidden", "mutation", hidden_path,
+         path_fd < 0 ? -1 : 0, path_errno, false,
+         ProbeStatus::kObserved);
+    if (path_fd >= 0) close(path_fd);
+
     const bool held = g_held_hidden_fd >= 0;
     const int hidden_fd = held ? g_held_hidden_fd : open(
         hidden_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (hidden_fd < 0) {
-        Emit("external.fd_mutation.open_hidden", "mutation", hidden_path,
-             -1, errno, false, ProbeStatus::kSetupError);
+        Emit("external.fd_mutation.held_fd", "mutation", hidden_path,
+             -1, EBADF, false, ProbeStatus::kSetupError);
         return;
     }
+    Emit("external.fd_mutation.held_fd", "mutation", hidden_path,
+         held ? g_held_hidden_fd : -1, 0, false,
+         held ? ProbeStatus::kObserved : ProbeStatus::kSetupError);
 
     const std::string created = "hidelab-fd-created";
     const int create_fd = openat(hidden_fd, created.c_str(),
@@ -897,7 +909,6 @@ void ObserveExternalHiddenFdMutations(const std::string& hidden_path) {
     Emit("external.fd_mutation.mkdirat", "mutation",
          hidden_path + "/hidelab-fd-dir", mkdir_result, mkdir_errno,
          mkdir_result == 0);
-    if (mkdir_result == 0) unlinkat(hidden_fd, "hidelab-fd-dir", AT_REMOVEDIR);
 
     const int unlink_result = unlinkat(hidden_fd, "nested/nested.txt", 0);
     const int unlink_errno = unlink_result < 0 ? errno : 0;
@@ -911,9 +922,65 @@ void ObserveExternalHiddenFdMutations(const std::string& hidden_path) {
     Emit("external.fd_mutation.symlinkat", "mutation",
          hidden_path + "/hidelab-fd-symlink", symlink_result,
          symlink_errno, symlink_result == 0);
-    unlinkat(hidden_fd, "hidelab-fd-symlink", 0);
+
+    errno = 0;
+    const int rmdir_result = unlinkat(hidden_fd, "nested", AT_REMOVEDIR);
+    const int rmdir_errno = rmdir_result < 0 ? errno : 0;
+    Emit("external.fd_mutation.rmdir", "mutation",
+         hidden_path + "/nested", rmdir_result, rmdir_errno,
+         rmdir_result == 0);
+
+    errno = 0;
+    const int rename_result = renameat(hidden_fd, "canary.txt", hidden_fd,
+                                       "hidelab-fd-renamed.txt");
+    const int rename_errno = rename_result < 0 ? errno : 0;
+    Emit("external.fd_mutation.rename", "mutation",
+         hidden_path + "/canary.txt", rename_result, rename_errno,
+         rename_result == 0);
+
+    errno = 0;
+    const int link_result = linkat(hidden_fd, "canary.txt", hidden_fd,
+                                   "hidelab-fd-link.txt", 0);
+    const int link_errno = link_result < 0 ? errno : 0;
+    Emit("external.fd_mutation.link", "mutation",
+         hidden_path + "/hidelab-fd-link.txt", link_result, link_errno,
+         link_result == 0);
+
+    errno = 0;
+    const int mknod_result = mknodat(hidden_fd, "hidelab-fd-node",
+                                     S_IFREG | 0600, 0);
+    const int mknod_errno = mknod_result < 0 ? errno : 0;
+    Emit("external.fd_mutation.mknod", "mutation",
+         hidden_path + "/hidelab-fd-node", mknod_result, mknod_errno,
+         mknod_result == 0);
 
     if (!held) close(hidden_fd);
+}
+
+void ObserveExternalHeldFdSymlink(const std::string& hidden_path) {
+    const bool held = g_held_hidden_fd >= 0;
+    const int hidden_fd = held ? g_held_hidden_fd : open(
+        hidden_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (hidden_fd < 0) {
+        Emit("external.fd_mutation.held_fd", "mutation", hidden_path,
+             -1, EBADF, false, ProbeStatus::kSetupError);
+        return;
+    }
+    Emit("external.fd_mutation.held_fd", "mutation", hidden_path,
+         held ? g_held_hidden_fd : hidden_fd, 0, false,
+         ProbeStatus::kObserved);
+
+    errno = 0;
+    const int result = symlinkat("canary.txt", hidden_fd,
+                                 "hidelab-fd-symlink");
+    const int error_number = result < 0 ? errno : 0;
+    Emit("external.fd_mutation.symlinkat", "mutation",
+         hidden_path + "/hidelab-fd-symlink", result, error_number,
+         result == 0);
+    if (result == 0)
+        unlinkat(hidden_fd, "hidelab-fd-symlink", 0);
+    if (!held)
+        close(hidden_fd);
 }
 
 std::string ReadSmallFile(const char* path) {
@@ -986,7 +1053,9 @@ int pathguard::hide_probe::RunHideVfsProbe(
     }
     if (scenario != "baseline" && scenario != "cache-order"
         && scenario != "concurrency" && scenario != "reliability"
-        && scenario != "preopen-hidden-fd") {
+        && scenario != "prepare-hidden-fd"
+        && scenario != "preopen-hidden-fd"
+        && scenario != "symlink-held-fd") {
         return Fail("scenario", scenario, EINVAL);
     }
 
@@ -1041,15 +1110,43 @@ int pathguard::hide_probe::RunHideVfsProbe(
     const std::string mountstats_before = ReadSmallFile("/proc/self/mountstats");
 
     const std::string hidden_path = sandbox + "/hidden";
-    if (scenario == "preopen-hidden-fd" && !observed_paths.empty()) {
+    if (scenario == "prepare-hidden-fd" && !observed_paths.empty()) {
         if (g_held_hidden_fd >= 0) close(g_held_hidden_fd);
         g_held_hidden_fd = open(observed_paths.front().c_str(),
                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        const int fd_flags = g_held_hidden_fd >= 0
+            ? fcntl(g_held_hidden_fd, F_GETFD) : -1;
+        struct stat held_metadata {};
+        const int stat_result = g_held_hidden_fd >= 0
+            ? fstat(g_held_hidden_fd, &held_metadata) : -1;
+        Emit("process.native_pid", "process", "", getpid(), 0);
         Emit("external.fd_mutation.preopen", "mutation",
-             observed_paths.front(), g_held_hidden_fd >= 0 ? 0 : -1,
-             g_held_hidden_fd >= 0 ? 0 : errno, false,
-             g_held_hidden_fd >= 0 ? ProbeStatus::kObserved
-                                   : ProbeStatus::kSetupError);
+             observed_paths.front(),
+             g_held_hidden_fd >= 0 && fd_flags >= 0 && stat_result == 0
+                 ? g_held_hidden_fd : -1,
+             g_held_hidden_fd >= 0 && fd_flags >= 0 && stat_result == 0
+                 ? 0 : EBADF,
+             false,
+             g_held_hidden_fd >= 0 && fd_flags >= 0 && stat_result == 0
+                 ? ProbeStatus::kObserved : ProbeStatus::kSetupError);
+    } else if ((scenario == "preopen-hidden-fd"
+                || scenario == "symlink-held-fd") &&
+               !observed_paths.empty()) {
+        const int fd_flags = g_held_hidden_fd >= 0
+            ? fcntl(g_held_hidden_fd, F_GETFD) : -1;
+        struct stat held_metadata {};
+        const int stat_result = g_held_hidden_fd >= 0
+            ? fstat(g_held_hidden_fd, &held_metadata) : -1;
+        Emit("process.native_pid", "process", "", getpid(), 0);
+        Emit("external.fd_mutation.preopen", "mutation",
+             observed_paths.front(),
+             g_held_hidden_fd >= 0 && fd_flags >= 0 && stat_result == 0
+                 ? g_held_hidden_fd : -1,
+             g_held_hidden_fd >= 0 && fd_flags >= 0 && stat_result == 0
+                 ? 0 : EBADF,
+             false,
+             g_held_hidden_fd >= 0 && fd_flags >= 0 && stat_result == 0
+                 ? ProbeStatus::kObserved : ProbeStatus::kSetupError);
     }
     ObservePath("sandbox.hidden", hidden_path);
     ObservePath("sandbox.descendant", hidden_path + "/canary");
@@ -1072,6 +1169,8 @@ int pathguard::hide_probe::RunHideVfsProbe(
     if (attack_mutations && !observed_paths.empty()) {
         ObserveExternalMutations(observed_paths.front());
         ObserveExternalHiddenFdMutations(observed_paths.front());
+    } else if (scenario == "symlink-held-fd" && !observed_paths.empty()) {
+        ObserveExternalHeldFdSymlink(observed_paths.front());
     }
 
     const std::string mountinfo_after = ReadSmallFile("/proc/self/mountinfo");

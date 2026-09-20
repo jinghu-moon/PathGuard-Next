@@ -6,7 +6,7 @@ import java.nio.file.Files
 import java.nio.file.StandardOpenOption
 
 internal object JavaVfsProbe {
-    fun run(context: Context, observedPaths: Array<String>): String {
+    fun run(context: Context, observedPaths: Array<String>, attackMutations: Boolean): String {
         val output = StringBuilder()
         val sandbox = File(context.noBackupFilesDir, "pathguard-hide-h0-java-${System.nanoTime()}")
         if (!sandbox.mkdir()) return row(output, "java.fixture", "setup_error", sandbox.path).toString()
@@ -17,7 +17,7 @@ internal object JavaVfsProbe {
             canary.writeText("pathguard-hide-canary")
             observe(output, "java.sandbox.hidden", hidden)
             observe(output, "java.sandbox.descendant", canary)
-            mutate(output, hidden, canary)
+            if (attackMutations) mutate(output, hidden, canary)
             observedPaths.forEachIndexed { index, path -> observe(output, "java.external.$index", File(path)) }
         } finally {
             File(hidden, "created").delete(); File(hidden, "created-dir").delete()

@@ -5,8 +5,9 @@ param(
     [switch]$GrantAllFilesAccess,
     [switch]$GrantReadMediaImages,
     [switch]$KeepTargetProcess,
+    [switch]$KeepFixture,
     [string]$ExistingHiddenPath,
-    [ValidateSet('baseline', 'cache-order', 'concurrency', 'reliability')]
+    [ValidateSet('baseline', 'cache-order', 'concurrency', 'reliability', 'prepare-hidden-fd', 'preopen-hidden-fd', 'symlink-held-fd')]
     [string]$Scenario = 'baseline',
     [switch]$AttackMutations,
     [switch]$ConfirmMutation,
@@ -20,8 +21,18 @@ $ErrorActionPreference = 'Stop'
 if ($AttackMutations -and -not $ConfirmMutation) {
     throw 'AttackMutations changes the shared-storage fixture; pass -ConfirmMutation explicitly'
 }
-if ($ExistingHiddenPath -and $AttackMutations) {
+if ($ExistingHiddenPath -and $AttackMutations -and $Scenario -ne 'preopen-hidden-fd') {
     throw 'AttackMutations is not allowed with ExistingHiddenPath; use a disposable fixture'
+}
+if ($Scenario -eq 'prepare-hidden-fd' -and -not $KeepTargetProcess) {
+    throw 'prepare-hidden-fd requires -KeepTargetProcess so the held directory FD survives to the post-ENABLE phase'
+}
+if ($Scenario -eq 'prepare-hidden-fd' -and -not $KeepFixture) {
+    throw 'prepare-hidden-fd requires -KeepFixture so the held directory remains valid after this phase'
+}
+if ($Scenario -in @('preopen-hidden-fd', 'symlink-held-fd') -and
+    (-not $ExistingHiddenPath -or -not $KeepTargetProcess)) {
+    throw "$Scenario requires -ExistingHiddenPath and -KeepTargetProcess"
 }
 $targetPackage = 'dev.pathguard.hideprobe.target'
 $controlPackage = 'dev.pathguard.hideprobe.control'
@@ -266,6 +277,74 @@ function Assert-Reliability([string]$Role, [bool]$ExpectHidden) {
     }
 }
 
+function Assert-PreopenHiddenFd([string]$Role, [bool]$ExpectHidden) {
+    $rows = Read-Observations $Role
+    if (-not $ExpectHidden) {
+        Assert-BaselineVisible $Role
+        return
+    }
+    $preopen = @($rows | Where-Object { $_.test -eq 'external.fd_mutation.preopen' })
+    if ($preopen.Count -ne 1 -or $preopen[0].status -ne 'observed' -or
+        $preopen[0].return_value -lt 0) {
+        throw "SETUP_ERROR: HideLab $Role did not retain the pre-opened directory FD"
+    }
+    $expected = @(
+        'external.fd_mutation.open_hidden',
+        'external.fd_mutation.openat_create',
+        'external.fd_mutation.openat_truncate',
+        'external.fd_mutation.mkdirat',
+        'external.fd_mutation.unlinkat',
+        'external.fd_mutation.symlinkat',
+        'external.fd_mutation.rmdir',
+        'external.fd_mutation.rename',
+        'external.fd_mutation.link',
+        'external.fd_mutation.mknod'
+    )
+    foreach ($test in $expected) {
+        $row = @($rows | Where-Object { $_.test -eq $test })
+        if ($row.Count -ne 1 -or $row[0].return_value -ne -1 -or
+            $row[0].errno -ne 2 -or $row[0].side_effect) {
+            $kind = if ($row.Count -eq 1 -and $row[0].return_value -eq -1 -and $row[0].errno -ne 2) { 'SEMANTIC_DRIFT' } else { 'LEAK' }
+            throw "$kind`: HideLab $Role pre-opened-FD mutation failed $test"
+        }
+    }
+}
+
+function Assert-PrepareHiddenFd([string]$Role) {
+    Assert-BaselineVisible $Role
+    $rows = Read-Observations $Role
+    $preopen = @($rows | Where-Object { $_.test -eq 'external.fd_mutation.preopen' })
+    if ($preopen.Count -ne 1 -or $preopen[0].status -ne 'observed' -or
+        $preopen[0].return_value -lt 0) {
+        throw "SETUP_ERROR: HideLab $Role failed to retain the pre-opened directory FD"
+    }
+}
+
+function Assert-SymlinkHeldFd([string]$Role, [bool]$RequireRetainedFd,
+                              [bool]$ExpectHidden) {
+    $rows = Read-Observations $Role
+    $held = @($rows | Where-Object { $_.test -eq 'external.fd_mutation.held_fd' })
+    if ($held.Count -ne 1 -or $held[0].status -ne 'observed' -or
+        $held[0].return_value -lt 0) {
+        throw "SETUP_ERROR: HideLab $Role has no usable hidden-directory FD"
+    }
+    if ($RequireRetainedFd) {
+        $preopen = @($rows | Where-Object { $_.test -eq 'external.fd_mutation.preopen' })
+        if ($preopen.Count -ne 1 -or $preopen[0].status -ne 'observed' -or
+            $preopen[0].return_value -ne $held[0].return_value) {
+            throw "SETUP_ERROR: HideLab $Role did not retain the prepared directory FD"
+        }
+    }
+    $symlink = @($rows | Where-Object { $_.test -eq 'external.fd_mutation.symlinkat' })
+    $expectedErrno = if ($ExpectHidden) { 2 } else { 13 }
+    if ($symlink.Count -ne 1 -or $symlink[0].return_value -ne -1 -or
+        $symlink[0].errno -ne $expectedErrno -or $symlink[0].side_effect) {
+        $expectedName = if ($ExpectHidden) { 'ENOENT' } else { 'EACCES' }
+        $kind = if ($ExpectHidden) { 'SEMANTIC_DRIFT' } else { 'DIAGNOSTIC_DRIFT' }
+        throw "${kind}: HideLab $Role symlink-only result was not $expectedName without side effects"
+    }
+}
+
 try {
     if ($KeepTargetProcess) {
         $targetPackagePath = ((& $adb shell pm path $targetPackage 2>$null) -join '').Trim()
@@ -287,7 +366,7 @@ try {
     $targetBefore = Get-OracleSnapshot 'oracle-before-target'
     Invoke-Probe 'target' $targetPackage
     $targetAfter = Get-OracleSnapshot 'oracle-after-target'
-    if ($AttackMutations) { Reset-Fixture }
+    if ($AttackMutations -and $Scenario -ne 'prepare-hidden-fd' -and -not $ExistingHiddenPath) { Reset-Fixture }
     $controlBefore = Get-OracleSnapshot 'oracle-before-control'
     Invoke-Probe 'control' $controlPackage
     $controlAfter = Get-OracleSnapshot 'oracle-after-control'
@@ -302,6 +381,12 @@ try {
             Assert-CacheOrder 'target' $ExpectTargetHidden
         } elseif ($Scenario -eq 'concurrency') {
             Assert-Concurrency 'target' $ExpectTargetHidden
+        } elseif ($Scenario -eq 'prepare-hidden-fd') {
+            Assert-PrepareHiddenFd 'target'
+        } elseif ($Scenario -eq 'preopen-hidden-fd') {
+            Assert-PreopenHiddenFd 'target' $ExpectTargetHidden
+        } elseif ($Scenario -eq 'symlink-held-fd') {
+            Assert-SymlinkHeldFd 'target' $true ([bool]$ExpectTargetHidden)
         } else {
             Assert-Reliability 'target' $ExpectTargetHidden
         }
@@ -313,6 +398,9 @@ try {
         if ($Scenario -eq 'baseline') { Assert-BaselineVisible 'control' }
         elseif ($Scenario -eq 'cache-order') { Assert-CacheOrder 'control' $false }
         elseif ($Scenario -eq 'concurrency') { Assert-Concurrency 'control' $false }
+        elseif ($Scenario -eq 'prepare-hidden-fd') { Assert-BaselineVisible 'control' }
+        elseif ($Scenario -eq 'preopen-hidden-fd') { Assert-PreopenHiddenFd 'control' $false }
+        elseif ($Scenario -eq 'symlink-held-fd') { Assert-SymlinkHeldFd 'control' $false $false }
         else { Assert-Reliability 'control' $false }
     } catch {
         $controlError = $_.Exception.Message
@@ -333,7 +421,7 @@ try {
     Set-Content -LiteralPath (Join-Path $runOutput 'summary.json') -Value $summary -Encoding utf8
     Write-Output "HIDELAB_EVIDENCE:$runOutput"
 } finally {
-    if (-not $ExistingHiddenPath -and $fixtureRoot -match '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
+    if (-not $ExistingHiddenPath -and -not $KeepFixture -and $fixtureRoot -match '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
         Invoke-Root "rm -rf $fixtureRoot" 2>$null
     }
 }

@@ -25,6 +25,13 @@ test that case separately and classify any visible governed basename as `LEAK`.
 The control status output includes diagnostic counters in the form
 `operation=total/hidden` and `dentry_install=total/success/failure`. These
 counters are observational only and do not change the hide policy.
+ABI v7 prints `symlink_probe=registered/calls/target/fd/hidden_fd`,
+`vfs_symlink_probe=registered/calls/target/valid/hidden_parent/child_parent/negative_child/shadow_iop`,
+and return classifications for `may_create` and `security_inode_symlink`.
+The inode-security return bridge changes `-EACCES` to `-ENOENT` only for an
+active rule whose target identity, namespace, generation, hidden parent and
+negative child all match. `inode_security_bridge_enoent` reports actual
+rewrites. This narrow bridge is still experimental and is not a Hide 1.0 pass.
 
 After reboot, use a root shell:
 

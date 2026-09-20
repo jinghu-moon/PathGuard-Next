@@ -68,7 +68,7 @@ class ProbeActivity : Activity() {
         val dir = File(filesDir, "hide-h0"); dir.mkdirs(); val status = File(dir, "status")
         runCatching {
             status.writeText("running"); val aliases = StoragePath.expandVfsAliases(paths); val nativeSandbox = File(noBackupFilesDir, "pathguard-hide-h0-native-${System.nanoTime()}").apply { mkdirs() }
-            val output = JavaVfsProbe.run(this, aliases) + (NativeProbe.run(nativeSandbox.canonicalPath, aliases, attackMutations, scenario) ?: error("native probe returned null")) + MediaStoreProbe.run(this, paths)
+            val output = JavaVfsProbe.run(this, aliases, attackMutations) + (NativeProbe.run(nativeSandbox.canonicalPath, aliases, attackMutations, scenario) ?: error("native probe returned null")) + MediaStoreProbe.run(this, paths)
             if (!probeRunGate.isCurrent(runToken)) return@runCatching
             File(dir, "observations.jsonl").writeText(output); File(dir, "metadata.json").writeText(metadata(paths, aliases, scenario, attackMutations, runId)); status.writeText("complete"); runOnUiThread { statusView.text = "HideLab complete: ${BuildConfig.OBSERVER_ROLE}" }
         }.onFailure { error ->

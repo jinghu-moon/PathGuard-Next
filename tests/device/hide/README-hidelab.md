@@ -86,6 +86,23 @@ and archive evidence under ignored `build/device-evidence/`.
 
 ## VFS topology preflight
 
+## Kernel backend capability gate
+
+在任何 KPM、namei inline hook 或行为型模块实验之前，先执行只读能力采集：
+
+```powershell
+./tests/device/hide/collect_kernel_backend_capability.ps1
+```
+
+脚本只查询设备标识、`uname -r`、`/proc/config.gz` 中的 KPM/KALLSYMS/KPROBES 配置、
+SukiSU `ksud kpm version/num/list` 和 `/proc/kallsyms` 可见性。它不执行 KPM
+`load/unload`、`insmod`、syscall hook 或文件系统 mutation。只有同时满足
+`CONFIG_KPM=y`、`CONFIG_KALLSYMS=y`，且三个 KPM 只读查询没有失败文本、版本非空、
+数量为整数时，报告才会给出 `eligible_for_kpm_probe`；不能只看 `ksud` 的进程退出码，
+因为 SukiSU CLI 可能打印内核负错误码后仍返回 0。否则保持 `unsupported` 或
+`indeterminate`，不能继续行为型 namei hook。结果保存在被 Git 忽略的
+`build/device-evidence/kernel-backend-capability/`。
+
 在进入只读 FUSE-aware 后端前，先使用 `collect_vfs_topology.ps1` 采集同一设备、同一
 mount namespace 中的 `/storage/emulated/0`、`/sdcard` 和 `/storage/self/primary`：
 
@@ -116,3 +133,47 @@ runner 还要求 `status=complete` 对应当前 run id/scenario，避免复用�
 `-ExistingHiddenPath /storage/emulated/0/Pictures/Nagram`。此模式不会重置或删除该目录，
 并自动禁止 `-AttackMutations`；它只适用于 baseline/cache/reliability 等只读场景。一次性
 fixture 仍应使用默认路径，以保留 Root Oracle 和清理保证。
+### Pre-opened directory-FD mutation protocol
+
+The held-FD case is a two-phase test. The target process must open the governed
+directory before `ENABLE`, keep the same PID and mount namespace, and only then
+run mutations after `ENABLE`. Use `-KeepFixture` in the preparation phase so
+the root oracle fixture is not deleted:
+
+```powershell
+./run_hidelab_baseline.ps1 `
+  -TargetApk .../app-target-debug.apk `
+  -ControlApk .../app-control-debug.apk `
+  -Scenario prepare-hidden-fd -KeepTargetProcess -KeepFixture
+```
+
+After the module is installed and the target binding is enabled, rerun with
+the exact `fixture_root` from the preparation evidence:
+
+```powershell
+./run_hidelab_baseline.ps1 `
+  -TargetApk .../app-target-debug.apk `
+  -ControlApk .../app-control-debug.apk `
+  -Scenario preopen-hidden-fd -ExistingHiddenPath <fixture_root>/hidden `
+  -KeepTargetProcess -ExpectTargetHidden -AttackMutations -ConfirmMutation
+```
+
+The second invocation must use the same target PID/process. A fresh process
+would not retain the original directory FD and is not evidence for this case.
+
+For the diagnostic-only `do_symlinkat` probe, use `symlink-held-fd` instead of
+the full mutation scenario. It issues exactly one `symlinkat` through the
+retained target FD and requires the existing shared-storage result
+`EACCES/no-side-effect`; it does not create, truncate, unlink, rename, or mknod:
+
+```powershell
+./run_hidelab_baseline.ps1 `
+  -TargetApk .../app-target-debug.apk `
+  -ControlApk .../app-control-debug.apk `
+  -Scenario symlink-held-fd -ExistingHiddenPath <fixture_root>/hidden `
+  -KeepTargetProcess -KeepFixture
+```
+
+For a backend that implements strict hidden-path semantics at this stage, add
+`-ExpectTargetHidden`. The target must then return `ENOENT/no-side-effect`,
+while the control observer must retain the baseline `EACCES/no-side-effect`.

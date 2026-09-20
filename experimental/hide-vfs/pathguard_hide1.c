@@ -7,8 +7,11 @@
  * and HideLab evidence exists.
  */
 #include <linux/fs.h>
+#include <linux/fdtable.h>
+#include <linux/file.h>
 #include <linux/hashtable.h>
 #include <linux/jiffies.h>
+#include <linux/kprobes.h>
 #include <linux/miscdevice.h>
 #include <linux/mnt_namespace.h>
 #include <linux/module.h>
@@ -20,6 +23,7 @@
 #include <linux/ns_common.h>
 #include <linux/nsproxy.h>
 #include <linux/pid.h>
+#include <linux/ptrace.h>
 #include <linux/cred.h>
 #include <linux/dcache.h>
 #include <linux/sched/signal.h>
@@ -158,6 +162,36 @@ static atomic64_t hide1_mutation_calls = ATOMIC64_INIT(0);
 static atomic64_t hide1_mutation_blocked_calls = ATOMIC64_INIT(0);
 static atomic64_t hide1_mutation_original = ATOMIC64_INIT(0);
 static atomic64_t hide1_mutation_unsupported = ATOMIC64_INIT(0);
+static atomic64_t hide1_symlink_probe_calls = ATOMIC64_INIT(0);
+static atomic64_t hide1_symlink_probe_target = ATOMIC64_INIT(0);
+static atomic64_t hide1_symlink_probe_fd = ATOMIC64_INIT(0);
+static atomic64_t hide1_symlink_probe_hidden_fd = ATOMIC64_INIT(0);
+static atomic_t hide1_symlink_probe_active = ATOMIC_INIT(0);
+static DECLARE_WAIT_QUEUE_HEAD(hide1_symlink_probe_wait);
+static bool hide1_symlink_probe_registered;
+static atomic64_t hide1_vfs_symlink_probe_calls = ATOMIC64_INIT(0);
+static atomic64_t hide1_vfs_symlink_probe_target = ATOMIC64_INIT(0);
+static atomic64_t hide1_vfs_symlink_probe_valid = ATOMIC64_INIT(0);
+static atomic64_t hide1_vfs_symlink_probe_hidden_parent = ATOMIC64_INIT(0);
+static atomic64_t hide1_vfs_symlink_probe_child_parent = ATOMIC64_INIT(0);
+static atomic64_t hide1_vfs_symlink_probe_negative_child = ATOMIC64_INIT(0);
+static atomic64_t hide1_vfs_symlink_probe_shadow_iop = ATOMIC64_INIT(0);
+static atomic_t hide1_vfs_symlink_probe_active = ATOMIC_INIT(0);
+static DECLARE_WAIT_QUEUE_HEAD(hide1_vfs_symlink_probe_wait);
+static bool hide1_vfs_symlink_probe_registered;
+static atomic64_t hide1_may_create_stage_calls = ATOMIC64_INIT(0);
+static atomic64_t hide1_may_create_stage_zero = ATOMIC64_INIT(0);
+static atomic64_t hide1_may_create_stage_eacces = ATOMIC64_INIT(0);
+static atomic64_t hide1_may_create_stage_other = ATOMIC64_INIT(0);
+static atomic64_t hide1_inode_security_stage_calls = ATOMIC64_INIT(0);
+static atomic64_t hide1_inode_security_stage_zero = ATOMIC64_INIT(0);
+static atomic64_t hide1_inode_security_stage_eacces = ATOMIC64_INIT(0);
+static atomic64_t hide1_inode_security_stage_other = ATOMIC64_INIT(0);
+static atomic64_t hide1_inode_security_bridge_enoent = ATOMIC64_INIT(0);
+static atomic_t hide1_symlink_stage_active = ATOMIC_INIT(0);
+static DECLARE_WAIT_QUEUE_HEAD(hide1_symlink_stage_wait);
+static bool hide1_may_create_stage_registered;
+static bool hide1_inode_security_stage_registered;
 
 enum hide1_mutation_operation {
     HIDE1_MUTATION_ATOMIC_OPEN,
@@ -224,6 +258,53 @@ static void hide1_snapshot_mutation_counters(
     destination->blocked = atomic64_read(&source->blocked);
     destination->original = atomic64_read(&source->original);
     destination->unsupported = atomic64_read(&source->unsupported);
+}
+
+static void hide1_reset_observation_counters(void)
+{
+    unsigned int operation;
+
+    atomic64_set(&hide1_lookup_calls, 0);
+    atomic64_set(&hide1_lookup_hidden, 0);
+    atomic64_set(&hide1_atomic_open_calls, 0);
+    atomic64_set(&hide1_atomic_open_hidden, 0);
+    atomic64_set(&hide1_readdir_calls, 0);
+    atomic64_set(&hide1_readdir_filtered, 0);
+    atomic64_set(&hide1_d_revalidate_calls, 0);
+    atomic64_set(&hide1_d_revalidate_hidden, 0);
+    atomic64_set(&hide1_dentry_install_calls, 0);
+    atomic64_set(&hide1_dentry_install_success, 0);
+    atomic64_set(&hide1_dentry_install_failures, 0);
+    atomic64_set(&hide1_mutation_calls, 0);
+    atomic64_set(&hide1_mutation_blocked_calls, 0);
+    atomic64_set(&hide1_mutation_original, 0);
+    atomic64_set(&hide1_mutation_unsupported, 0);
+    atomic64_set(&hide1_symlink_probe_calls, 0);
+    atomic64_set(&hide1_symlink_probe_target, 0);
+    atomic64_set(&hide1_symlink_probe_fd, 0);
+    atomic64_set(&hide1_symlink_probe_hidden_fd, 0);
+    atomic64_set(&hide1_vfs_symlink_probe_calls, 0);
+    atomic64_set(&hide1_vfs_symlink_probe_target, 0);
+    atomic64_set(&hide1_vfs_symlink_probe_valid, 0);
+    atomic64_set(&hide1_vfs_symlink_probe_hidden_parent, 0);
+    atomic64_set(&hide1_vfs_symlink_probe_child_parent, 0);
+    atomic64_set(&hide1_vfs_symlink_probe_negative_child, 0);
+    atomic64_set(&hide1_vfs_symlink_probe_shadow_iop, 0);
+    atomic64_set(&hide1_may_create_stage_calls, 0);
+    atomic64_set(&hide1_may_create_stage_zero, 0);
+    atomic64_set(&hide1_may_create_stage_eacces, 0);
+    atomic64_set(&hide1_may_create_stage_other, 0);
+    atomic64_set(&hide1_inode_security_stage_calls, 0);
+    atomic64_set(&hide1_inode_security_stage_zero, 0);
+    atomic64_set(&hide1_inode_security_stage_eacces, 0);
+    atomic64_set(&hide1_inode_security_stage_other, 0);
+    atomic64_set(&hide1_inode_security_bridge_enoent, 0);
+    for (operation = 0; operation < HIDE1_MUTATION_COUNT; ++operation) {
+        atomic64_set(&hide1_mutation_by_operation[operation].calls, 0);
+        atomic64_set(&hide1_mutation_by_operation[operation].blocked, 0);
+        atomic64_set(&hide1_mutation_by_operation[operation].original, 0);
+        atomic64_set(&hide1_mutation_by_operation[operation].unsupported, 0);
+    }
 }
 
 static struct hide1_iop_meta *hide1_iop_lookup_rcu(const struct inode *inode)
@@ -325,10 +406,10 @@ static int hide1_install_iop_shadow_locked(
     struct hide1_binding *binding, struct inode *inode,
     const struct inode_operations *expected, bool parent_ingress,
     bool hidden_object, struct hide1_iop_meta **slot);
-static void hide1_install_descendant_iop_shadow(struct hide1_binding *binding,
-                                                struct inode *inode);
-static void hide1_install_cached_descendant_shadows(struct hide1_binding *binding,
-                                                    struct dentry *parent);
+static int hide1_install_descendant_iop_shadow(struct hide1_binding *binding,
+                                               struct inode *inode);
+static int hide1_install_cached_descendant_shadows(struct hide1_binding *binding,
+                                                   struct dentry *parent);
 static bool hide1_mutation_blocked(struct hide1_binding *binding,
                                    struct inode *parent,
                                    struct dentry *dentry);
@@ -519,6 +600,288 @@ static bool hide1_should_hide(const struct hide1_binding *binding,
            parent && parent->i_sb == binding->parent_sb &&
            parent->i_ino == binding->parent_inode->i_ino &&
            hide1_name_matches(binding, dentry);
+}
+
+static bool hide1_same_inode_identity(const struct inode *left,
+                                      const struct inode *right)
+{
+    return left && right && left->i_sb == right->i_sb &&
+           left->i_ino == right->i_ino;
+}
+
+static bool hide1_is_hidden_inode(const struct hide1_binding *binding,
+                                  const struct inode *inode)
+{
+    const struct inode *hidden;
+
+    if (!binding || !inode)
+        return false;
+    hidden = READ_ONCE(binding->hidden_inode);
+    return hide1_same_inode_identity(hidden, inode);
+}
+
+/* Diagnostic only: observe do_symlinkat(newdfd) before filename_create and
+ * the LSM path hook. Never parse a userspace pathname or alter pt_regs here.
+ * lookup_fdget_rcu() handles the file slab's SLAB_TYPESAFE_BY_RCU lifetime;
+ * the stable reference is released before returning from the probe. */
+static int hide1_do_symlinkat_pre(struct kprobe *probe, struct pt_regs *regs)
+{
+    struct inode *inode;
+    struct file *file;
+    int newdfd;
+
+    (void)probe;
+    atomic_inc(&hide1_symlink_probe_active);
+    atomic64_inc(&hide1_symlink_probe_calls);
+
+    if (!hide1_is_target_observer(&hide1_binding))
+        goto out;
+    atomic64_inc(&hide1_symlink_probe_target);
+
+    newdfd = (int)regs_get_kernel_argument(regs, 1);
+    if (newdfd < 0)
+        goto out;
+
+    rcu_read_lock();
+    file = lookup_fdget_rcu((unsigned int)newdfd);
+    rcu_read_unlock();
+    if (!file)
+        goto out;
+    atomic64_inc(&hide1_symlink_probe_fd);
+    inode = file_inode(file);
+    if (hide1_is_hidden_inode(&hide1_binding, inode))
+        atomic64_inc(&hide1_symlink_probe_hidden_fd);
+    fput(file);
+
+out:
+    if (atomic_dec_and_test(&hide1_symlink_probe_active))
+        wake_up_all(&hide1_symlink_probe_wait);
+    return 0;
+}
+
+static struct kprobe hide1_symlink_probe = {
+    .symbol_name = "do_symlinkat",
+    .pre_handler = hide1_do_symlinkat_pre,
+};
+
+static void hide1_drain_symlink_probe(void)
+{
+    wait_event(hide1_symlink_probe_wait,
+               atomic_read(&hide1_symlink_probe_active) == 0);
+}
+
+/* Diagnostic only: observe the kernel-owned parent inode and destination
+ * dentry passed by do_symlinkat() after filename_create(). Never read
+ * oldname, change pt_regs, or change vfs_symlink()'s return value. */
+static int hide1_vfs_symlink_pre(struct kprobe *probe, struct pt_regs *regs)
+{
+    struct dentry *child;
+    struct dentry *parent;
+    struct inode *parent_inode;
+
+    (void)probe;
+    atomic_inc(&hide1_vfs_symlink_probe_active);
+    atomic64_inc(&hide1_vfs_symlink_probe_calls);
+
+    if (!hide1_is_target_observer(&hide1_binding))
+        goto out;
+    atomic64_inc(&hide1_vfs_symlink_probe_target);
+
+    parent_inode = (struct inode *)regs_get_kernel_argument(regs, 1);
+    child = (struct dentry *)regs_get_kernel_argument(regs, 2);
+    if (!parent_inode || !child)
+        goto out;
+    parent = READ_ONCE(child->d_parent);
+    if (!parent)
+        goto out;
+    atomic64_inc(&hide1_vfs_symlink_probe_valid);
+
+    if (!hide1_is_hidden_inode(&hide1_binding, parent_inode))
+        goto out;
+    atomic64_inc(&hide1_vfs_symlink_probe_hidden_parent);
+    if (!hide1_same_inode_identity(d_inode(parent), parent_inode))
+        goto out;
+    atomic64_inc(&hide1_vfs_symlink_probe_child_parent);
+    if (d_is_negative(child))
+        atomic64_inc(&hide1_vfs_symlink_probe_negative_child);
+    if (READ_ONCE(parent_inode->i_op) &&
+        READ_ONCE(parent_inode->i_op)->symlink == hide1_symlink)
+        atomic64_inc(&hide1_vfs_symlink_probe_shadow_iop);
+
+out:
+    if (atomic_dec_and_test(&hide1_vfs_symlink_probe_active))
+        wake_up_all(&hide1_vfs_symlink_probe_wait);
+    return 0;
+}
+
+static struct kprobe hide1_vfs_symlink_probe = {
+    .symbol_name = "vfs_symlink",
+    .pre_handler = hide1_vfs_symlink_pre,
+};
+
+static void hide1_drain_vfs_symlink_probe(void)
+{
+    wait_event(hide1_vfs_symlink_probe_wait,
+               atomic_read(&hide1_vfs_symlink_probe_active) == 0);
+}
+
+struct hide1_symlink_stage_data {
+    bool matched;
+};
+
+static bool hide1_symlink_stage_matches(struct inode *parent,
+                                        struct dentry *child)
+{
+    struct dentry *child_parent;
+
+    if (!hide1_is_target_observer(&hide1_binding) || !parent || !child ||
+        !hide1_is_hidden_inode(&hide1_binding, parent))
+        return false;
+    child_parent = READ_ONCE(child->d_parent);
+    return child_parent &&
+           hide1_same_inode_identity(d_inode(child_parent), parent) &&
+           d_is_negative(child);
+}
+
+static void hide1_record_stage_return(int result, atomic64_t *zero,
+                                      atomic64_t *eacces, atomic64_t *other)
+{
+    if (!result)
+        atomic64_inc(zero);
+    else if (result == -EACCES)
+        atomic64_inc(eacces);
+    else
+        atomic64_inc(other);
+}
+
+static int hide1_may_create_stage_entry(struct kretprobe_instance *instance,
+                                        struct pt_regs *regs)
+{
+    struct hide1_symlink_stage_data *data = (void *)instance->data;
+    struct inode *parent;
+    struct dentry *child;
+
+    data->matched = false;
+    parent = (struct inode *)regs_get_kernel_argument(regs, 1);
+    child = (struct dentry *)regs_get_kernel_argument(regs, 2);
+    if (!hide1_symlink_stage_matches(parent, child))
+        return 1;
+    data->matched = true;
+    atomic_inc(&hide1_symlink_stage_active);
+    atomic64_inc(&hide1_may_create_stage_calls);
+    return 0;
+}
+
+static int hide1_may_create_stage_return(struct kretprobe_instance *instance,
+                                         struct pt_regs *regs)
+{
+    struct hide1_symlink_stage_data *data = (void *)instance->data;
+
+    if (!data->matched)
+        return 0;
+    hide1_record_stage_return((int)regs_return_value(regs),
+                              &hide1_may_create_stage_zero,
+                              &hide1_may_create_stage_eacces,
+                              &hide1_may_create_stage_other);
+    if (atomic_dec_and_test(&hide1_symlink_stage_active))
+        wake_up_all(&hide1_symlink_stage_wait);
+    return 0;
+}
+
+static struct kretprobe hide1_may_create_stage_probe = {
+    .kp.symbol_name = "may_create",
+    .entry_handler = hide1_may_create_stage_entry,
+    .handler = hide1_may_create_stage_return,
+    .data_size = sizeof(struct hide1_symlink_stage_data),
+    .maxactive = 64,
+};
+
+static int hide1_inode_security_stage_entry(
+    struct kretprobe_instance *instance, struct pt_regs *regs)
+{
+    struct hide1_symlink_stage_data *data = (void *)instance->data;
+    struct inode *parent;
+    struct dentry *child;
+
+    data->matched = false;
+    parent = (struct inode *)regs_get_kernel_argument(regs, 0);
+    child = (struct dentry *)regs_get_kernel_argument(regs, 1);
+    if (!hide1_symlink_stage_matches(parent, child))
+        return 1;
+    data->matched = true;
+    atomic_inc(&hide1_symlink_stage_active);
+    atomic64_inc(&hide1_inode_security_stage_calls);
+    return 0;
+}
+
+static int hide1_inode_security_stage_return(
+    struct kretprobe_instance *instance, struct pt_regs *regs)
+{
+    struct hide1_symlink_stage_data *data = (void *)instance->data;
+    int result;
+
+    if (!data->matched)
+        return 0;
+    result = (int)regs_return_value(regs);
+    hide1_record_stage_return(result,
+                              &hide1_inode_security_stage_zero,
+                              &hide1_inode_security_stage_eacces,
+                              &hide1_inode_security_stage_other);
+    /* The target-specific FUSE path has already rejected this mutation and
+     * no filesystem callback has run.  Normalize only that exact denial to
+     * hidden-path semantics; preserve success and every other errno. */
+    if (result == -EACCES) {
+        atomic64_inc(&hide1_inode_security_bridge_enoent);
+        regs_set_return_value(regs, (unsigned long)(long)-ENOENT);
+    }
+    if (atomic_dec_and_test(&hide1_symlink_stage_active))
+        wake_up_all(&hide1_symlink_stage_wait);
+    return 0;
+}
+
+static struct kretprobe hide1_inode_security_stage_probe = {
+    .kp.symbol_name = "security_inode_symlink",
+    .entry_handler = hide1_inode_security_stage_entry,
+    .handler = hide1_inode_security_stage_return,
+    .data_size = sizeof(struct hide1_symlink_stage_data),
+    .maxactive = 64,
+};
+
+static void hide1_drain_symlink_stage_probes(void)
+{
+    wait_event(hide1_symlink_stage_wait,
+               atomic_read(&hide1_symlink_stage_active) == 0);
+}
+
+static bool hide1_hidden_parent(struct hide1_binding *binding,
+                                const struct inode *parent)
+{
+    struct hide1_iop_meta *meta;
+    unsigned long flags;
+    bool match = false;
+
+    if (!hide1_is_target_observer(binding) || !parent)
+        return false;
+    if (hide1_is_hidden_inode(binding, parent))
+        return true;
+
+    spin_lock_irqsave(&binding->hidden_iop_lock, flags);
+    list_for_each_entry(meta, &binding->hidden_iop_metas, binding_node) {
+        if (hide1_same_inode_identity(meta->inode, parent)) {
+            match = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&binding->hidden_iop_lock, flags);
+    return match;
+}
+
+static bool hide1_dentry_should_hide(struct hide1_binding *binding,
+                                     const struct inode *parent,
+                                     const struct dentry *dentry)
+{
+    return hide1_should_hide(binding, parent, dentry) ||
+           hide1_hidden_parent(binding, parent);
 }
 
 static bool hide1_update_dentry_shadow_locked(
@@ -772,38 +1135,43 @@ static int hide1_install_named_object_shadows(struct hide1_binding *binding)
     ret = hide1_mode_has_dop() ?
           hide1_install_dentry_shadow(binding, child.dentry, false) : 0;
     if (!ret && !hide1_mode_is_readonly())
-        hide1_install_cached_descendant_shadows(binding, child.dentry);
+        ret = hide1_install_cached_descendant_shadows(binding, child.dentry);
     path_put(&child);
     return ret;
 }
 
-static void hide1_install_descendant_iop_shadow(struct hide1_binding *binding,
-                                                struct inode *inode)
+static int hide1_install_descendant_iop_shadow(struct hide1_binding *binding,
+                                               struct inode *inode)
 {
     struct hide1_iop_meta *existing;
+    bool owned = false;
 
     if (!binding || !inode || !S_ISDIR(inode->i_mode) ||
         hide1_mode_is_readonly())
-        return;
+        return 0;
     rcu_read_lock();
     existing = hide1_iop_lookup_rcu(inode);
+    if (existing)
+        owned = existing->binding == binding;
     rcu_read_unlock();
-    if (existing && existing->binding == binding)
-        return;
-    (void)hide1_install_iop_shadow_locked(
+    if (existing)
+        return owned ? 0 : -EBUSY;
+    return hide1_install_iop_shadow_locked(
         binding, inode, READ_ONCE(inode->i_op), false, true, NULL);
 }
 
-static void hide1_install_cached_descendant_shadows(struct hide1_binding *binding,
-                                                    struct dentry *parent)
+static int hide1_install_cached_descendant_shadows(struct hide1_binding *binding,
+                                                   struct dentry *parent)
 {
     struct dentry *child;
     struct dentry *children[64];
     unsigned int count = 0;
     unsigned int index;
+    bool overflow = false;
+    int ret = 0;
 
     if (!binding || !parent || READ_ONCE(binding->retiring))
-        return;
+        return -ESHUTDOWN;
 
     /* Snapshot references while holding only the parent d_lock.  Installing
      * operation tables may allocate and take unrelated locks, so it must not
@@ -812,8 +1180,10 @@ static void hide1_install_cached_descendant_shadows(struct hide1_binding *bindin
      * claiming full subtree coverage. */
     spin_lock(&parent->d_lock);
     hlist_for_each_entry(child, &parent->d_children, d_sib) {
-        if (count == ARRAY_SIZE(children))
+        if (count == ARRAY_SIZE(children)) {
+            overflow = true;
             break;
+        }
         children[count++] = dget_dlock(child);
     }
     spin_unlock(&parent->d_lock);
@@ -821,16 +1191,27 @@ static void hide1_install_cached_descendant_shadows(struct hide1_binding *bindin
     for (index = 0; index < count; ++index) {
         struct inode *inode = d_backing_inode(children[index]);
 
+        if (inode && hide1_mode_has_dop()) {
+            ret = hide1_install_dentry_shadow(
+                binding, children[index], false);
+            if (ret)
+                break;
+        }
         if (inode && S_ISDIR(inode->i_mode)) {
-            hide1_install_descendant_iop_shadow(binding, inode);
-            if (hide1_mode_has_dop())
-                (void)hide1_install_dentry_shadow(binding,
-                                                  children[index], false);
-            hide1_install_cached_descendant_shadows(binding,
-                                                    children[index]);
+            ret = hide1_install_descendant_iop_shadow(binding, inode);
+            if (!ret)
+                ret = hide1_install_cached_descendant_shadows(
+                    binding, children[index]);
+            if (ret)
+                break;
         }
         dput(children[index]);
     }
+    while (index < count)
+        dput(children[index++]);
+    if (ret)
+        return ret;
+    return overflow ? -E2BIG : 0;
 }
 
 static void hide1_restore_hidden_iop_metas_locked(
@@ -1067,7 +1448,7 @@ static struct dentry *hide1_lookup(struct inode *dir, struct dentry *dentry,
         return ERR_PTR(-EIO);
 
     idx = srcu_read_lock(&hide1_srcu);
-    if (hide1_should_hide(binding, dir, dentry)) {
+    if (hide1_dentry_should_hide(binding, dir, dentry)) {
         atomic64_inc(&hide1_lookup_hidden);
         if (hide1_mode_has_dop() &&
             hide1_install_dentry_shadow(binding, dentry, true)) {
@@ -1080,12 +1461,28 @@ static struct dentry *hide1_lookup(struct inode *dir, struct dentry *dentry,
     }
     orig = meta->orig;
     result = orig && orig->lookup ? orig->lookup(dir, dentry, flags) : NULL;
-    if (!IS_ERR(result) &&
-        (meta->hidden_object ||
-         (binding->hidden_inode && dir == binding->hidden_inode))) {
-        struct inode *child_inode = result ? d_backing_inode(result) :
-                                            d_backing_inode(dentry);
-        hide1_install_descendant_iop_shadow(binding, child_inode);
+    if (!IS_ERR(result) && meta->hidden_object) {
+        struct dentry *resolved = result ? result : dentry;
+        struct inode *child_inode = d_backing_inode(resolved);
+
+        int install_ret = hide1_install_descendant_iop_shadow(
+            binding, child_inode);
+
+        if (install_ret) {
+            d_drop(resolved);
+            if (result && result != dentry)
+                dput(result);
+            ret = ERR_PTR(install_ret);
+            goto out;
+        }
+        if (hide1_mode_has_dop() &&
+            hide1_install_dentry_shadow(binding, resolved, false)) {
+            d_drop(resolved);
+            if (result && result != dentry)
+                dput(result);
+            ret = ERR_PTR(-EAGAIN);
+            goto out;
+        }
     }
     if (!IS_ERR(result) && hide1_mode_has_dop() &&
         dir == binding->parent_inode && hide1_name_matches(binding, dentry)) {
@@ -1295,8 +1692,8 @@ static int hide1_d_revalidate(struct dentry *dentry, unsigned int flags)
     }
     synthetic_negative = READ_ONCE(meta->synthetic_negative);
     if (synthetic_negative) {
-        if (hide1_should_hide(binding,
-                              d_backing_inode(dentry->d_parent), dentry) &&
+        if (hide1_dentry_should_hide(
+                binding, d_backing_inode(dentry->d_parent), dentry) &&
             READ_ONCE(meta->cache_generation) ==
                 binding->rule.expected_generation) {
             atomic64_inc(&hide1_d_revalidate_hidden);
@@ -1311,17 +1708,22 @@ static int hide1_d_revalidate(struct dentry *dentry, unsigned int flags)
         }
         goto out;
     }
-    if (hide1_should_hide(binding, d_backing_inode(dentry->d_parent), dentry)) {
+    if (hide1_dentry_should_hide(
+            binding, d_backing_inode(dentry->d_parent), dentry)) {
         atomic64_inc(&hide1_d_revalidate_hidden);
         if (d_is_negative(dentry)) {
             ret = 1;
         } else if (flags & LOOKUP_RCU) {
             ret = -ECHILD;
         } else {
-            /* The real positive dentry is invalid for the target.  Retire it
-             * only after VFS unhashed it and all path-walk references drain. */
+            /* A positive governed dentry must fail the current name walk.
+             * Returning zero only asks VFS to retry the filesystem lookup;
+             * on FUSE that retry can reach the server and return EACCES
+             * before our inode mutation wrappers run.  Return ENOENT after
+             * retiring the stale cache entry so lookup, descendant traversal,
+             * and mutation namei paths share the hidden result. */
             hide1_mark_dentry_stale(meta);
-            ret = 0;
+            ret = -ENOENT;
         }
         goto out;
     }
@@ -1338,27 +1740,7 @@ static bool hide1_mutation_blocked(struct hide1_binding *binding,
                                    struct inode *parent,
                                    struct dentry *dentry)
 {
-    struct hide1_iop_meta *hidden_meta;
-    struct hide1_iop_meta *meta;
-    unsigned long flags;
-    bool hidden_parent = false;
-
-    if (hide1_should_hide(binding, parent, dentry))
-        return true;
-    if (!hide1_is_target_observer(binding) || !parent)
-        return false;
-    hidden_meta = READ_ONCE(binding->shadow.hidden_iop_meta);
-    if (hidden_meta && parent == hidden_meta->inode)
-        return true;
-    spin_lock_irqsave(&binding->hidden_iop_lock, flags);
-    list_for_each_entry(meta, &binding->hidden_iop_metas, binding_node) {
-        if (meta->inode == parent) {
-            hidden_parent = true;
-            break;
-        }
-    }
-    spin_unlock_irqrestore(&binding->hidden_iop_lock, flags);
-    return hidden_parent;
+    return hide1_dentry_should_hide(binding, parent, dentry);
 }
 
 static bool hide1_hidden_source(struct hide1_binding *binding,
@@ -1371,10 +1753,10 @@ static bool hide1_hidden_source(struct hide1_binding *binding,
         return false;
     old_inode = d_backing_inode(old_dentry);
     spin_lock(&binding->identity_lock);
-    match = old_inode &&
-            ((binding->hidden_inode && old_inode == binding->hidden_inode) ||
-             (binding->shadow.hidden_iop_meta &&
-              old_inode == binding->shadow.hidden_iop_meta->inode));
+    match = hide1_is_hidden_inode(binding, old_inode);
+    if (!match && binding->shadow.hidden_iop_meta)
+        match = hide1_same_inode_identity(
+            binding->shadow.hidden_iop_meta->inode, old_inode);
     spin_unlock(&binding->identity_lock);
     return match;
 }
@@ -1898,6 +2280,11 @@ static u64 hide1_operation_mask(const struct inode *inode,
 
 static void hide1_release_binding(struct hide1_binding *binding)
 {
+    if (binding == &hide1_binding) {
+        hide1_drain_symlink_probe();
+        hide1_drain_vfs_symlink_probe();
+        hide1_drain_symlink_stage_probes();
+    }
     if (binding->parent_path.dentry) {
         path_put(&binding->parent_path);
         binding->parent_path = (struct path){};
@@ -2110,6 +2497,7 @@ static void hide1_commit_binding(struct hide1_binding *binding)
     hide1_status.generation = hide1_binding.rule.expected_generation;
     hide1_status.operation_mask = hide1_binding.operation_mask;
     hide1_status.parent_inode = inode->i_ino;
+    hide1_reset_observation_counters();
 }
 
 static long hide1_ioctl(struct file *file, unsigned int command,
@@ -2269,6 +2657,57 @@ static long hide1_ioctl(struct file *file, unsigned int command,
         status.mutation_blocked = atomic64_read(&hide1_mutation_blocked_calls);
         status.mutation_original = atomic64_read(&hide1_mutation_original);
         status.mutation_unsupported = atomic64_read(&hide1_mutation_unsupported);
+        status.symlink_probe_registered =
+            READ_ONCE(hide1_symlink_probe_registered) ? 1 : 0;
+        status.symlink_probe_reserved = 0;
+        status.symlink_probe_calls = atomic64_read(&hide1_symlink_probe_calls);
+        status.symlink_probe_target = atomic64_read(&hide1_symlink_probe_target);
+        status.symlink_probe_fd = atomic64_read(&hide1_symlink_probe_fd);
+        status.symlink_probe_hidden_fd =
+            atomic64_read(&hide1_symlink_probe_hidden_fd);
+        status.vfs_symlink_probe_registered =
+            READ_ONCE(hide1_vfs_symlink_probe_registered) ? 1 : 0;
+        status.vfs_symlink_probe_reserved = 0;
+        status.vfs_symlink_probe_calls =
+            atomic64_read(&hide1_vfs_symlink_probe_calls);
+        status.vfs_symlink_probe_target =
+            atomic64_read(&hide1_vfs_symlink_probe_target);
+        status.vfs_symlink_probe_valid =
+            atomic64_read(&hide1_vfs_symlink_probe_valid);
+        status.vfs_symlink_probe_hidden_parent =
+            atomic64_read(&hide1_vfs_symlink_probe_hidden_parent);
+        status.vfs_symlink_probe_child_parent =
+            atomic64_read(&hide1_vfs_symlink_probe_child_parent);
+        status.vfs_symlink_probe_negative_child =
+            atomic64_read(&hide1_vfs_symlink_probe_negative_child);
+        status.vfs_symlink_probe_shadow_iop =
+            atomic64_read(&hide1_vfs_symlink_probe_shadow_iop);
+        status.symlink_stage_probe_mask =
+            (READ_ONCE(hide1_may_create_stage_registered) ? 1U : 0U) |
+            (READ_ONCE(hide1_inode_security_stage_registered) ? 2U : 0U);
+        status.symlink_stage_probe_reserved = 0;
+        status.may_create_stage_calls =
+            atomic64_read(&hide1_may_create_stage_calls);
+        status.may_create_stage_zero =
+            atomic64_read(&hide1_may_create_stage_zero);
+        status.may_create_stage_eacces =
+            atomic64_read(&hide1_may_create_stage_eacces);
+        status.may_create_stage_other =
+            atomic64_read(&hide1_may_create_stage_other);
+        status.may_create_stage_nmissed =
+            READ_ONCE(hide1_may_create_stage_probe.nmissed);
+        status.inode_security_stage_calls =
+            atomic64_read(&hide1_inode_security_stage_calls);
+        status.inode_security_stage_zero =
+            atomic64_read(&hide1_inode_security_stage_zero);
+        status.inode_security_stage_eacces =
+            atomic64_read(&hide1_inode_security_stage_eacces);
+        status.inode_security_stage_other =
+            atomic64_read(&hide1_inode_security_stage_other);
+        status.inode_security_stage_nmissed =
+            READ_ONCE(hide1_inode_security_stage_probe.nmissed);
+        status.inode_security_bridge_enoent =
+            atomic64_read(&hide1_inode_security_bridge_enoent);
         hide1_snapshot_mutation_counters(&status.mutation_atomic_open,
                                          HIDE1_MUTATION_ATOMIC_OPEN);
         hide1_snapshot_mutation_counters(&status.mutation_create,
@@ -2312,8 +2751,60 @@ static struct miscdevice hide1_device = {
     .mode = 0600,
 };
 
+static void hide1_unregister_diagnostic_probes(void)
+{
+    if (READ_ONCE(hide1_inode_security_stage_registered)) {
+        WRITE_ONCE(hide1_inode_security_stage_registered, false);
+        unregister_kretprobe(&hide1_inode_security_stage_probe);
+    }
+    if (READ_ONCE(hide1_may_create_stage_registered)) {
+        WRITE_ONCE(hide1_may_create_stage_registered, false);
+        unregister_kretprobe(&hide1_may_create_stage_probe);
+    }
+    if (READ_ONCE(hide1_vfs_symlink_probe_registered)) {
+        WRITE_ONCE(hide1_vfs_symlink_probe_registered, false);
+        unregister_kprobe(&hide1_vfs_symlink_probe);
+    }
+    if (READ_ONCE(hide1_symlink_probe_registered)) {
+        WRITE_ONCE(hide1_symlink_probe_registered, false);
+        unregister_kprobe(&hide1_symlink_probe);
+    }
+    hide1_drain_symlink_stage_probes();
+    hide1_drain_vfs_symlink_probe();
+    hide1_drain_symlink_probe();
+}
+
+static int hide1_register_diagnostic_probes(void)
+{
+    int ret;
+
+    ret = register_kprobe(&hide1_symlink_probe);
+    if (ret)
+        return ret;
+    WRITE_ONCE(hide1_symlink_probe_registered, true);
+    ret = register_kprobe(&hide1_vfs_symlink_probe);
+    if (ret)
+        goto rollback;
+    WRITE_ONCE(hide1_vfs_symlink_probe_registered, true);
+    ret = register_kretprobe(&hide1_may_create_stage_probe);
+    if (ret)
+        goto rollback;
+    WRITE_ONCE(hide1_may_create_stage_registered, true);
+    ret = register_kretprobe(&hide1_inode_security_stage_probe);
+    if (ret)
+        goto rollback;
+    WRITE_ONCE(hide1_inode_security_stage_registered, true);
+    return 0;
+
+rollback:
+    hide1_unregister_diagnostic_probes();
+    return ret;
+}
+
 static int __init hide1_init(void)
 {
+    int ret;
+
     if (hide1_shadow_mode < 0 || hide1_shadow_mode > 4)
         return -EINVAL;
     if (strcmp(init_utsname()->release, PATHGUARD_HIDE1_EXPECTED_RELEASE) != 0)
@@ -2331,12 +2822,19 @@ static int __init hide1_init(void)
     strscpy(hide1_status.kernel_release, init_utsname()->release,
             sizeof(hide1_status.kernel_release));
     hide1_status.last_error = -EOPNOTSUPP;
-    return misc_register(&hide1_device);
+    ret = hide1_register_diagnostic_probes();
+    if (ret)
+        return ret;
+    ret = misc_register(&hide1_device);
+    if (ret)
+        hide1_unregister_diagnostic_probes();
+    return ret;
 }
 
 static void __exit hide1_exit(void)
 {
     misc_deregister(&hide1_device);
+    hide1_unregister_diagnostic_probes();
     cancel_delayed_work_sync(&hide1_dop_stale_work);
     mutex_lock(&hide1_lock);
     (void)hide1_reset_locked();
@@ -2348,4 +2846,4 @@ module_exit(hide1_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("PathGuard");
 MODULE_DESCRIPTION("PathGuard Hide 1.0 fixed-device VFS shadow prototype");
-MODULE_VERSION("0.3.0-prototype");
+MODULE_VERSION("0.8.0-symlink-enoent-bridge");
