@@ -1021,6 +1021,11 @@ oracle 未变化；control 保持可见并可执行允许的 mutation。`dentry_
 恢复链和卸载通过，boot ID 未变化。held-FD mutation 门禁已关闭，下一门禁为 cache-order、
 并发、规则切换和生命周期全矩阵；产品状态仍为 `Hide 1.0 = unsupported`。
 
+generation `13001` 已通过 cache-order：三个可访问 shared-storage alias 的 cold open、
+cold opendir、stat-then-open、readdir-then-open 和 positive-warm-then-open 对 target 全部
+为 `ENOENT`，control 全部可见，fixture/oracle 未变化；恢复和卸载通过。cache-order
+门禁已关闭，下一项是 20 线程并发与规则切换/生命周期回归。
+
 ### held-FD 修复候选
 
 离线实现已覆盖 cached positive child：所有缓存文件/目录都安装 observer-aware

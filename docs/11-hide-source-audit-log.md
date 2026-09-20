@@ -4331,6 +4331,64 @@ held-FD mutation 门禁至此关闭。下一阶段是使用同一 v8 后端重�
 规则切换与 `DISABLE/CLEAR/unload` 生命周期矩阵；完成前产品状态保持
 `Hide 1.0 = unsupported`。
 
+## 轮次 98：generation 13001 cache-order 回归通过（2026-09-20）
+
+使用 v8 `shadow_mode=0` 和全新 fixture，先在 disabled 状态建立可见基线，再绑定：
+
+```text
+target PID       = 19720
+target UID       = 10552
+mount namespace  = 4026536027
+fixture          = /storage/emulated/0/Pictures/PathGuardHideLab/20260920-234250
+generation       = 13001
+```
+
+经用户明确批准执行 ENABLE 后，`dentry_install=5/5/0`，boot ID 和 target 身份保持
+不变。三个 target 可访问 alias：
+
+```text
+/storage/emulated/0/...
+/sdcard/...
+/storage/self/primary/...
+```
+
+分别在以下五种顺序中全部返回严格 `ENOENT`，且无副作用：
+
+```text
+cold_open
+cold_opendir
+stat_then_open
+readdir_then_open
+positive_warm_then_open
+```
+
+control 对相同三个 alias 全部保持可见；其余 `/mnt/user`、`/mnt/runtime` 和
+`/data/media` alias 在 target/control 均为设备原生 `EACCES`，不计为 PathGuard 隐藏
+通过。runner 结论：
+
+```text
+conclusion = PASS
+fixture_unchanged = true
+target_oracle_changed = false
+control_oracle_changed = false
+readdir = 75/24
+revalidate = 475/120
+dentry_install = 5/5/0
+```
+
+测试后 `DISABLE -> CLEAR -> UNLOAD` 完整成功，boot ID
+`59998fab-5906-42b6-af4a-56ef89d49067` 未变化，设备在线，模块不再 live，pstore 为空。
+
+证据目录：
+
+```text
+build/device-evidence/hidelab-cache-order-v8-prepare/20260920-234250/
+build/device-evidence/hidelab-cache-order-v8/20260920-234434/
+```
+
+cache-order 门禁至此关闭。下一项是 20 线程并发读访问，以及并发期间的规则切换、
+DISABLE/CLEAR 和卸载生命周期回归。
+
 ## 轮次 91：held-FD cached-child 修复真机结果与 symlinkat 诊断后端（2026-09-20）
 
 用户安装 `pathguard-hide1-lab-myron-ddk-v3-heldfd-cache.zip` 并重启后，严格保持
