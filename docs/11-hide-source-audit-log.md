@@ -3862,6 +3862,72 @@ KPM load/status/unload、inline hook、syscall/namei 行为修改或 mutation。
 Hide 1.0 = unsupported
 ```
 
+## 轮次 91：规则切换与生命周期回归（2026-09-21）
+
+本轮在同一 target PID `30544`、mount namespace `4026536066` 上验证规则切换和
+生命周期边界，使用同一 fixture 下的 `hidden` 与临时 `hidden2` 两个目录。
+
+### 规则切换
+
+- generation `15001` 绑定 `hidden2`，`ENABLE` 后 target 观察为 `PASS`，`hidden2`
+  返回 `ENOENT`，control 可见，oracle 未变化；
+- `DISABLE` 后同一 PID 对 `hidden2` 恢复可见，结果为
+  `BASELINE_VISIBLE_NOT_HIDE_PASS`；
+- `CLEAR` 清空 binding；
+- generation `15002` 重新绑定 `hidden`，`ENABLE` 后 target 隐藏 `hidden`，旧
+  `hidden2` 保持可见，两个 target/control oracle 均未变化。
+
+证据目录：
+
+```text
+build/device-evidence/hidelab-baseline/20260921-090205/
+build/device-evidence/hidelab-baseline/20260921-090435/
+build/device-evidence/hidelab-baseline/20260921-090721/
+build/device-evidence/hidelab-baseline/20260921-090828/
+```
+
+### DISABLE/CLEAR 竞态
+
+在 generation `15002` active 期间启动 reliability（1000 轮 stat/open/readdir），
+确认 target probe 正在运行后并发发出 `DISABLE` 与 `CLEAR`：
+
+- reliability 结果为 `PASS`，target/control oracle 均未变化；
+- 竞态中的 `DISABLE` 和 `CLEAR` 均返回 `EBUSY`（`last_error=-16`），未半发布、
+  未崩溃、未重启；
+- 访问 drain 后重试 `DISABLE` 成功，再执行 `CLEAR` 成功，状态和 binding 均归零。
+
+证据目录：
+
+```text
+build/device-evidence/hidelab-baseline/20260921-091117/
+```
+
+### 已有 FD、卸载和 namespace
+
+重新启动模块并在 ENABLE 前由 target 持有 governed directory FD `194`，generation
+`16001` 的 held-FD mutation 回归中 create/truncate/mkdir/unlink/rmdir/rename/link/
+mknod/symlink 全部返回 `ENOENT`，无副作用。即使该 FD 仍存活，`DISABLE`、`CLEAR` 均
+成功，随后 `rmmod pathguard_hide1` 返回 `0`，模块从 `/proc/modules` 消失，boot ID
+保持不变。
+
+之后结束原 target，旧 namespace 被销毁；设备无崩溃或重启。重新启动 target 得到
+新 namespace `mnt:[4026535693]`，无旧 binding、无模块时目录恢复可见，证明旧规则不会
+跨 namespace/PID 生命周期泄漏。
+
+证据目录：
+
+```text
+build/device-evidence/hidelab-heldfd/20260921-091455/
+build/device-evidence/hidelab-baseline/20260921-092253/
+```
+
+本轮关闭规则切换、DISABLE/CLEAR 竞态、已有 FD、卸载和 namespace 销毁门禁；仍未完成
+OTA/设备准入、完整 mutation + 全量 HideLab admission，产品状态继续为：
+
+```text
+Hide 1.0 = unsupported
+```
+
 ## 轮次 90：generation 14002 并发回归（2026-09-21）
 
 本轮先清理失效的 generation `14001` binding：旧 target PID `19720` 已退出，

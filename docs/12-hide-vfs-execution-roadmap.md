@@ -28,15 +28,44 @@
    `STOP_NEW -> RESTORE -> DRAIN -> FREE`，再接入会改变真实文件系统的 callback。
 3. NoMount、Kasumi、PathMask、SUSFS 和 SukiSU 都只能提供局部参考，不能作为完整
    PathGuard hide 数据面直接引入。
-4. 只读 baseline、cache-order、20 线程并发、1000 轮 reliability 和
-   DISABLE/CLEAR/rmmod 恢复已经在当前设备的单路径实验范围内通过；期间修复了
-   readdir 后正 dentry 泄漏和 ACTIVE stale dentry 生命周期竞态。但 mutation、真实
-   namespace 销毁、OTA admission 和产品集成仍未完成。
+4. 只读 baseline、cache-order、20 线程并发、1000 轮 reliability、规则切换、
+   DISABLE/CLEAR 竞态、已有 FD、rmmod 恢复和真实 namespace 销毁已经在当前设备的
+   单路径实验范围内通过；期间修复了 readdir 后正 dentry 泄漏和 ACTIVE stale dentry
+   生命周期竞态。但 OTA admission 和产品集成仍未完成。
 5. 在所有阶段通过前，产品状态必须保持：
 
 ```text
 Hide 1.0 = unsupported
 ```
+
+### 规则切换、DISABLE/CLEAR 竞态与生命周期门禁
+
+本阶段已在固定 myron 设备完成以下真机回归：
+
+1. **规则切换**：generation `15001` 隐藏 `hidden2`；`DISABLE` 后恢复可见；
+   `CLEAR` 后 generation `15002` 切换到 `hidden`，新规则生效、旧目录保持可见。
+2. **DISABLE/CLEAR 竞态**：active reliability 访问期间并发控制命令均返回 `EBUSY`，
+   不发生部分恢复或崩溃；访问 drain 后重试成功并清空 binding。
+3. **已有目录 FD**：target 在 ENABLE 前持有目录 FD `194`，held-FD 九类 mutation
+   全部 `ENOENT/no-side-effect`；随后即使 FD 仍存活也能完成 `DISABLE -> CLEAR -> rmmod`。
+4. **namespace 生命周期**：销毁旧 target/namespace 后无崩溃；新 target 获得新的
+   namespace `4026535693`，不继承旧 binding，目录恢复可见。
+
+证据：
+
+```text
+build/device-evidence/hidelab-baseline/20260921-090205/
+build/device-evidence/hidelab-baseline/20260921-090435/
+build/device-evidence/hidelab-baseline/20260921-090721/
+build/device-evidence/hidelab-baseline/20260921-090828/
+build/device-evidence/hidelab-baseline/20260921-091117/
+build/device-evidence/hidelab-heldfd/20260921-091455/
+build/device-evidence/hidelab-baseline/20260921-092253/
+```
+
+这些结果关闭了路线 A 的规则切换、控制竞态、已有 FD、卸载和 namespace 生命周期
+门禁，但不代表 Hide 1.0 已准入。OTA/KMI allowlist、完整 HideLab admission、跨版本
+设备验证和产品 daemon 集成仍保持未完成，状态继续为 `unsupported`。
 
 ## 2. 当前基线
 
@@ -51,7 +80,7 @@ Hide 1.0 = unsupported
 | 数据面 | 目标共享存储 FUSE 父目录 |
 | 当前 scope | 单 UID、单 mount namespace、单父目录、单 basename |
 | 当前 basename | `hidden`（一次性 HideLab fixture） |
-| 当前 mode | `shadow_mode=4`，只读 FUSE-aware |
+| 当前 mode | `shadow_mode=0`，完整实验 shadow（仅在受控回归期间启用） |
 | 产品状态 | `unsupported` |
 
 ### 2.2 已通过的实验
