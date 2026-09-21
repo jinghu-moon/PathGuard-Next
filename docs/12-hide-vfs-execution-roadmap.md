@@ -1026,6 +1026,37 @@ cold opendir、stat-then-open、readdir-then-open 和 positive-warm-then-open �
 为 `ENOENT`，control 全部可见，fixture/oracle 未变化；恢复和卸载通过。cache-order
 门禁已关闭，下一项是 20 线程并发与规则切换/生命周期回归。
 
+### generation 14002：20 线程只读并发门禁
+
+generation `14001` 因 target PID 退出而作废，禁止复用其 PID、namespace 或确认记录。
+清理旧 binding 后重新建立 generation `14002`：target PID `30544`、mount namespace
+`4026536066`、UID `10552`，fixture 为
+`/storage/emulated/0/Pictures/PathGuardHideLab/20260921-084328/hidden`。
+
+用户明确确认后执行 `ENABLE 14002`，随后在同一 PID/namespace 执行 HideLab concurrency：
+
+- target 三个可访问 alias × `stat/open/readdir` × 20 线程 × 100 次，全部返回隐藏结果，
+  每类成功数为 `0`；
+- control 同矩阵每类成功数为 `2000`；
+- target/control oracle 均未变化，`summary.json` 为 `PASS`；
+- target PID、mount namespace 和 boot ID 全程稳定；
+- 模块 status 的 `active=0/0/0`、`open_count=0`，未见引用泄漏。
+
+证据：
+
+```text
+build/device-evidence/hidelab-baseline/20260921-084601/
+```
+
+测试结束后执行 `DISABLE -> CLEAR -> UNLOAD`，`rmmod` 成功且模块已从
+`/proc/modules` 消失。该阶段只证明只读并发访问的 target isolation 和 control
+非误阻断；尚未证明规则切换、DISABLE/CLEAR 竞态、卸载期间已有 FD、mutation、
+namespace 销毁、OTA 重新准入或 HideLab 全量矩阵。因此产品状态不变：
+
+```text
+Hide 1.0 = unsupported
+```
+
 ### held-FD 修复候选
 
 离线实现已覆盖 cached positive child：所有缓存文件/目录都安装 observer-aware

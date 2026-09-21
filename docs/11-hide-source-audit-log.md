@@ -3862,6 +3862,48 @@ KPM load/status/unload、inline hook、syscall/namei 行为修改或 mutation。
 Hide 1.0 = unsupported
 ```
 
+## 轮次 90：generation 14002 并发回归（2026-09-21）
+
+本轮先清理失效的 generation `14001` binding：旧 target PID `19720` 已退出，
+`DISABLE -> CLEAR -> UNLOAD` 完成且设备未重启。随后冷启动新的 target，建立并固定：
+
+```text
+target PID       = 30544
+target UID       = 10552
+mount namespace  = 4026536066
+generation       = 14002
+fixture          = /storage/emulated/0/Pictures/PathGuardHideLab/20260921-084328/hidden
+```
+
+模块在 `shadow_mode=0` 下 INSTALL 后，经明确确认执行 `ENABLE 14002`。HideLab
+`Scenario=concurrency` 在同一 PID/namespace 上执行三类操作（`stat/open/readdir`），
+三个 shared-storage alias 各进行 20 线程 × 100 次：
+
+| observer | 期望 | 实际 |
+|---|---:|---:|
+| target 三个 shared-storage alias | 每类 `0` 成功 | 全部隐藏，`ENOENT` |
+| control 同三 alias | 每类 `2000` 成功 | 全部 `2000` |
+| root oracle | fixture 不变 | target/control 均未变化 |
+
+证据目录：
+
+```text
+build/device-evidence/hidelab-baseline/20260921-084601/
+```
+
+`summary.json` 结论为 `PASS`，target PID 和 mount namespace 在整个采集期间保持不变。
+模块状态计数为 `readdir=18066/6021`、`revalidate=72366/24078`，
+`active=0/0/0`、`open_count=0`，未观察到活动引用泄漏。完成后再次执行
+`DISABLE -> CLEAR -> UNLOAD`，`rmmod` 返回 `0`，`/proc/modules` 无
+`pathguard_hide1`，boot ID 未变化。
+
+本轮仅关闭 20 线程只读并发门禁；规则切换、DISABLE/CLEAR 竞态、卸载中已有 FD、
+mutation 全量重测、OTA/设备准入和全量 HideLab 仍未完成，产品状态继续为：
+
+```text
+Hide 1.0 = unsupported
+```
+
 ## 轮次 92：generation 8002 `do_symlinkat` 诊断闭环（2026-09-20）
 
 用户明确批准 `ENABLE 8002` 后，使用
