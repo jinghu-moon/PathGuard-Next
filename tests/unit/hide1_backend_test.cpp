@@ -5,38 +5,14 @@
 #include <utility>
 
 #include "pathguard/hide1_backend.h"
-#include "pathguard/pattern.h"
 
 namespace {
 
 using namespace pathguard;
 using namespace pathguard::hide1;
 
-PolicyV6 Policy(std::string root,
-                PolicyActionKind kind = PolicyActionKind::kDeny,
-                PolicyExecutionDomain domain = PolicyExecutionDomain::kCompleteVfs,
-                PolicyMatchKind match = PolicyMatchKind::kLiteralPrefix) {
-    PolicyV6 policy;
-    PolicyPackageV6 package;
-    package.package = "dev.pathguard.hidelab";
-    package.users = {0};
-    PolicySelectorV6 selector;
-    selector.match_kind = match;
-    selector.object_type = PolicyObjectType::kAny;
-    selector.root = std::move(root);
-    if (match == PolicyMatchKind::kGlob) {
-        const auto compiled = pattern::CompilePattern("**");
-        assert(compiled.ok());
-        selector.base_pattern = *compiled.program;
-    }
-    package.selectors.push_back(std::move(selector));
-    PolicyActionV6 action;
-    action.selector_index = 0;
-    action.kind = kind;
-    action.domain = domain;
-    package.actions.push_back(action);
-    policy.packages.push_back(std::move(package));
-    return policy;
+RuleSet Rules(std::string parent, std::string basename = "hidden") {
+    return {Rule{0, 0, 0, std::move(parent), std::move(basename)}};
 }
 
 Identity Target() {
@@ -56,17 +32,17 @@ Admission AdmissionEvidence(std::uint64_t generation = 7) {
 
 class FakeTransport final : public Transport {
 public:
-    Result Install(const Rule& rule) override {
+    Result Install(const RuleSet& rules) override {
         ++install_calls;
         if (fail_install) return {ErrorCode::kTransport, "install-failed"};
-        installed = rule;
+        installed = rules;
         status.abi_version = kAbiVersion;
         status.state = kStateInactive;
         status.lifecycle = kLifecycleReady;
-        status.target_uid = rule.target_uid;
-        status.target_pid = rule.target_pid;
+        status.target_uid = rules.front().target_uid;
+        status.target_pid = rules.front().target_pid;
         status.target_mount_namespace = 4026536012;
-        status.generation = rule.expected_generation;
+        status.generation = rules.front().expected_generation;
         return {};
     }
     Result Enable(std::uint64_t generation) override {
@@ -107,28 +83,25 @@ public:
     int enable_calls = 0;
     int disable_calls = 0;
     int clear_calls = 0;
-    std::optional<Rule> installed;
+    std::optional<RuleSet> installed;
     Status status;
 };
 
 void TranslationContract() {
-    const auto accepted = TranslateRule(
-        Policy("/storage/emulated/0/Pictures/hidden"), Target(), 1);
+    const auto accepted = TranslateRules(
+        {{"/storage/emulated/0/Pictures", "hidden"}}, Target(), 1);
     assert(accepted.ok());
-    assert(accepted.rule->parent == "/storage/emulated/0/Pictures");
-    assert(accepted.rule->basename == "hidden");
-    assert(accepted.rule->expected_generation == 1);
+    assert(accepted.rules->size() == 1);
+    assert(accepted.rules->front().parent == "/storage/emulated/0/Pictures");
+    assert(accepted.rules->front().basename == "hidden");
+    assert(accepted.rules->front().expected_generation == 1);
 
-    assert(!TranslateRule(Policy("Pictures/hidden"), Target(), 1).ok());
-    assert(!TranslateRule(Policy("/storage/emulated/0/Pictures/**",
-                                PolicyActionKind::kDeny,
-                                PolicyExecutionDomain::kCompleteVfs,
-                                PolicyMatchKind::kGlob), Target(), 1).ok());
-    assert(!TranslateRule(Policy("/storage/emulated/0/Pictures/hidden",
-                                PolicyActionKind::kRedirect), Target(), 1).ok());
-    assert(!TranslateRule(Policy("/storage/emulated/0/Pictures/hidden",
-                                PolicyActionKind::kDeny,
-                                PolicyExecutionDomain::kMount), Target(), 1).ok());
+    assert(!TranslateRules({{"Pictures", "hidden"}}, Target(), 1).ok());
+    assert(!TranslateRules({{"/storage/emulated/0/Pictures", "a/b"}}, Target(), 1).ok());
+    const auto multiple = TranslateRules(
+        {{"/storage/emulated/0/Pictures", "hidden"},
+         {"/storage/emulated/0/DCIM", "private"}}, Target(), 1);
+    assert(multiple.ok() && multiple.rules->size() == 2);
 }
 
 void BackendTransactionContract() {
@@ -144,7 +117,7 @@ void BackendTransactionContract() {
 
     assert(backend.Admit(AdmissionEvidence()).ok());
     assert(backend.state() == BackendState::kInactive);
-    assert(backend.Apply(Policy("/storage/emulated/0/Pictures/hidden"),
+    assert(backend.Apply(Rules("/storage/emulated/0/Pictures"),
                          AdmissionEvidence()).ok());
     assert(backend.state() == BackendState::kActive);
     assert(fake->install_calls == 1 && fake->enable_calls == 1);
@@ -154,7 +127,7 @@ void BackendTransactionContract() {
     assert(backend.state() == BackendState::kInactive);
     assert(fake->disable_calls == 1 && fake->clear_calls == 1);
 
-    assert(backend.Apply(Policy("/storage/emulated/0/Pictures/hidden"),
+    assert(backend.Apply(Rules("/storage/emulated/0/Pictures"),
                          AdmissionEvidence()).ok());
     assert(backend.deployment_generation() == 2);
     current.starttime++;
@@ -171,7 +144,7 @@ void TeardownRetryContract() {
         return current;
     });
     assert(backend.Admit(AdmissionEvidence()).ok());
-    assert(backend.Apply(Policy("/storage/emulated/0/Pictures/hidden"),
+    assert(backend.Apply(Rules("/storage/emulated/0/Pictures"),
                          AdmissionEvidence()).ok());
 
     fake->fail_disable = true;
@@ -193,7 +166,7 @@ void ClearRetryContract() {
         return std::optional<Identity>(Target());
     });
     assert(backend.Admit(AdmissionEvidence()).ok());
-    assert(backend.Apply(Policy("/storage/emulated/0/Pictures/hidden"),
+    assert(backend.Apply(Rules("/storage/emulated/0/Pictures"),
                          AdmissionEvidence()).ok());
 
     fake->fail_clear = true;
@@ -216,7 +189,7 @@ void ApplyRollbackRetryContract() {
         return std::optional<Identity>(Target());
     });
     assert(backend.Admit(AdmissionEvidence()).ok());
-    assert(!backend.Apply(Policy("/storage/emulated/0/Pictures/hidden"),
+    assert(!backend.Apply(Rules("/storage/emulated/0/Pictures"),
                           AdmissionEvidence()).ok());
     assert(backend.state() == BackendState::kStopping);
     assert(fake->disable_calls == 1 && fake->clear_calls == 0);
@@ -235,7 +208,7 @@ void RollbackContract() {
         return std::optional<Identity>(Target());
     });
     assert(backend.Admit(AdmissionEvidence()).ok());
-    assert(!backend.Apply(Policy("/storage/emulated/0/Pictures/hidden"),
+    assert(!backend.Apply(Rules("/storage/emulated/0/Pictures"),
                           AdmissionEvidence()).ok());
     assert(backend.state() == BackendState::kFailed);
     assert(fake->disable_calls == 1 && fake->clear_calls == 1);

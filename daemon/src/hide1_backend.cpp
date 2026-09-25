@@ -1,6 +1,5 @@
 #include "pathguard/hide1_backend.h"
 
-#include <algorithm>
 #include <charconv>
 #include <cctype>
 #include <filesystem>
@@ -122,12 +121,6 @@ bool ReadJsonBoolField(const std::string& json, std::string_view key,
         return true;
     }
     return false;
-}
-
-bool HasUser(const pathguard::PolicyPackageV6& package) {
-    return package.all_users || package.users.empty()
-        || std::find(package.users.begin(), package.users.end(), 0)
-               != package.users.end();
 }
 
 std::optional<Admission> ReadAdmissionJsonInternal(const std::string& json,
@@ -313,27 +306,42 @@ public:
     LinuxTransport(std::string path, std::int32_t target_pid)
         : path_(std::move(path)), target_pid_(target_pid) {}
 
-    Result Install(const Rule& rule) override {
-        pathguard_hide1_rule request{};
+    Result Install(const RuleSet& rules) override {
+        if (rules.empty() || rules.size() > kMaxRules) {
+            return Error(ErrorCode::kUnsupportedRule, "hide-rule-count-out-of-range");
+        }
+        pathguard_hide1_rule_set request{};
         request.abi_version = PATHGUARD_HIDE1_ABI_VERSION;
         request.size = sizeof(request);
-        request.target_uid = rule.target_uid;
-        request.target_pid = rule.target_pid;
-        request.expected_generation = rule.expected_generation;
-        if (rule.parent.size() >= sizeof(request.parent)
-            || rule.basename.size() >= sizeof(request.basename)) {
-            return Error(ErrorCode::kUnsupportedRule, "hide-path-too-long");
+        request.rule_count = static_cast<__u32>(rules.size());
+        request.target_uid = rules.front().target_uid;
+        request.target_pid = rules.front().target_pid;
+        request.expected_generation = rules.front().expected_generation;
+        for (std::size_t index = 0; index < rules.size(); ++index) {
+            const Rule& rule = rules[index];
+            if (rule.target_uid != rules.front().target_uid
+                || rule.target_pid != rules.front().target_pid
+                || rule.expected_generation != rules.front().expected_generation
+                || rule.parent.size() >= sizeof(request.rules[index].parent)
+                || rule.basename.size() >= sizeof(request.rules[index].basename)) {
+                return Error(ErrorCode::kUnsupportedRule, "hide-rule-identity-or-path-mismatch");
+            }
+            request.rules[index].abi_version = PATHGUARD_HIDE1_ABI_VERSION;
+            request.rules[index].size = sizeof(request.rules[index]);
+            request.rules[index].target_uid = rule.target_uid;
+            request.rules[index].target_pid = rule.target_pid;
+            request.rules[index].expected_generation = rule.expected_generation;
+            std::memcpy(request.rules[index].parent, rule.parent.data(), rule.parent.size());
+            std::memcpy(request.rules[index].basename, rule.basename.data(), rule.basename.size());
         }
-        std::memcpy(request.parent, rule.parent.data(), rule.parent.size());
-        std::memcpy(request.basename, rule.basename.data(), rule.basename.size());
         NamespaceIoctlResult result{};
-        if (!RunIoctl(PATHGUARD_HIDE1_IOC_INSTALL, &request, &result,
+        if (!RunIoctl(PATHGUARD_HIDE1_IOC_INSTALL_SET, &request, &result,
                       true)) {
             return Error(ErrorCode::kTransport,
                          "hide-namespace-ioctl-errno=" + std::to_string(errno));
         }
         return result.ioctl_result == 0 ? Ok() : Error(ErrorCode::kTransport,
-            "hide-install-errno=" + std::to_string(result.error));
+            "hide-install-set-errno=" + std::to_string(result.error));
     }
 
     Result Enable(std::uint64_t generation) override {
@@ -494,52 +502,32 @@ std::optional<Admission> ReadDeviceAdmissionConfig(
     return admission;
 }
 
-TranslationResult TranslateRule(const pathguard::PolicyV6& policy,
-                                const Identity& identity,
-                                std::uint64_t generation) {
+TranslationResult TranslateRules(
+        const std::vector<std::pair<std::string, std::string>>& paths,
+        const Identity& identity, std::uint64_t generation) {
     if (identity.uid < 10000 || identity.pid <= 0 || identity.starttime == 0
         || identity.mount_namespace == 0 || generation == 0) {
         return {std::nullopt, Error(ErrorCode::kIdentityMismatch,
                                     "hide-identity-unconfirmed")};
     }
-    if (policy.packages.size() != 1) {
+    if (paths.empty() || paths.size() > kMaxRules) {
         return {std::nullopt, Error(ErrorCode::kUnsupportedRule,
-                                    "hide-scope-not-single-package")};
+                                    "hide-rule-count-out-of-range")};
     }
-    const auto& package = policy.packages.front();
-    if (!HasUser(package) || package.selectors.size() != 1
-        || package.actions.size() != 1) {
-        return {std::nullopt, Error(ErrorCode::kUnsupportedRule,
-                                    "hide-scope-out-of-range")};
+    RuleSet result;
+    result.reserve(paths.size());
+    for (const auto& [parent, basename] : paths) {
+        if (parent.empty() || parent.front() != '/' || basename.empty()
+            || basename == "." || basename == ".."
+            || basename.find('/') != std::string::npos
+            || parent.size() >= kPathMax
+            || basename.size() >= kNameMax) {
+            return {std::nullopt, Error(ErrorCode::kUnsupportedRule,
+                                        "hide-path-must-be-absolute-single-basename")};
+        }
+        result.push_back({identity.uid, identity.pid, generation, parent, basename});
     }
-    const auto& selector = package.selectors.front();
-    const auto& action = package.actions.front();
-    if (action.kind != pathguard::PolicyActionKind::kDeny
-        || action.domain != pathguard::PolicyExecutionDomain::kCompleteVfs
-        || selector.match_kind != pathguard::PolicyMatchKind::kLiteralPrefix
-        || selector.root.empty() || !selector.base_pattern.components.empty()
-        || !selector.except_patterns.empty()) {
-        return {std::nullopt, Error(ErrorCode::kUnsupportedRule,
-                                    "hide-unsupported-rule")};
-    }
-    const std::size_t slash = selector.root.find_last_of('/');
-    if (slash == std::string::npos || slash == 0
-        || slash + 1 >= selector.root.size()) {
-        return {std::nullopt, Error(ErrorCode::kUnsupportedRule,
-                                    "hide-scope-requires-parent-basename")};
-    }
-    Rule rule;
-    rule.target_uid = identity.uid;
-    rule.target_pid = identity.pid;
-    rule.expected_generation = generation;
-    rule.parent = selector.root.substr(0, slash);
-    rule.basename = selector.root.substr(slash + 1);
-    if (rule.parent.front() != '/' || rule.basename == "."
-        || rule.basename == ".." || rule.basename.find('/') != std::string::npos) {
-        return {std::nullopt, Error(ErrorCode::kUnsupportedRule,
-                                    "hide-path-must-be-absolute-single-basename")};
-    }
-    return {std::move(rule), Ok()};
+    return {std::move(result), Ok()};
 }
 
 Backend::Backend(std::unique_ptr<Transport> transport,
@@ -631,7 +619,7 @@ Result Backend::Rollback() {
     return Ok();
 }
 
-Result Backend::Apply(const pathguard::PolicyV6& policy,
+Result Backend::Apply(const RuleSet& rules,
                       const Admission& admission) {
     if (!admission.admitted || admission.evidence_generation == 0) {
         Fail(ErrorCode::kAdmissionMissing, "hide-admission-missing");
@@ -647,13 +635,26 @@ Result Backend::Apply(const pathguard::PolicyV6& policy,
         return Error(ErrorCode::kIdentityMismatch, error_reason_);
     }
     const std::uint64_t generation = ++deployment_generation_;
-    const TranslationResult translated = TranslateRule(policy, *identity, generation);
-    if (!translated.ok()) {
-        Fail(translated.result.error, translated.result.reason);
-        return translated.result;
+    RuleSet translated = rules;
+    for (Rule& rule : translated) {
+        rule.target_uid = identity->uid;
+        rule.target_pid = identity->pid;
+        rule.expected_generation = generation;
+    }
+    const TranslationResult validated = TranslateRules(
+        [&]() {
+            std::vector<std::pair<std::string, std::string>> paths;
+            paths.reserve(translated.size());
+            for (const Rule& rule : translated)
+                paths.emplace_back(rule.parent, rule.basename);
+            return paths;
+        }(), *identity, generation);
+    if (!validated.ok()) {
+        Fail(validated.result.error, validated.result.reason);
+        return validated.result;
     }
     state_ = BackendState::kInstalling;
-    Result result = transport_->Install(*translated.rule);
+    Result result = transport_->Install(*validated.rules);
     if (!result.ok()) {
         Fail(result.error, result.reason);
         return result;

@@ -1,20 +1,25 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
-#include "pathguard/policy_v6.h"
 
 namespace pathguard::hide1 {
 
-inline constexpr std::uint32_t kAbiVersion = 8;
+inline constexpr std::uint32_t kAbiVersion = 9;
 inline constexpr std::uint32_t kStateInactive = 1;
 inline constexpr std::uint32_t kStateActive = 2;
 inline constexpr std::uint32_t kLifecycleReady = 1;
 inline constexpr std::uint32_t kLifecycleRunning = 2;
+inline constexpr std::size_t kMaxRules = 64;
+inline constexpr std::size_t kPathMax = 384;
+inline constexpr std::size_t kNameMax = 256;
 
 enum class BackendState : std::uint8_t {
     kUnsupported,
@@ -42,6 +47,8 @@ struct Rule {
     std::string parent;
     std::string basename;
 };
+
+using RuleSet = std::vector<Rule>;
 
 struct Admission {
     bool admitted = false;
@@ -108,7 +115,7 @@ struct Result {
 class Transport {
 public:
     virtual ~Transport() = default;
-    virtual Result Install(const Rule& rule) = 0;
+    virtual Result Install(const RuleSet& rules) = 0;
     virtual Result Enable(std::uint64_t generation) = 0;
     virtual Result Disable() = 0;
     virtual Result Clear() = 0;
@@ -116,15 +123,15 @@ public:
 };
 
 struct TranslationResult {
-    std::optional<Rule> rule;
+    std::optional<RuleSet> rules;
     Result result;
 
-    bool ok() const { return rule.has_value() && result.ok(); }
+    bool ok() const { return rules.has_value() && !rules->empty() && result.ok(); }
 };
 
-TranslationResult TranslateRule(const pathguard::PolicyV6& policy,
-                                const Identity& identity,
-                                std::uint64_t generation);
+TranslationResult TranslateRules(const std::vector<std::pair<std::string, std::string>>& paths,
+                                 const Identity& identity,
+                                 std::uint64_t generation);
 
 // Parses the device-side admission artifact emitted by admit_hide1.ps1.
 // boot-state is intentionally not accepted by this API.
@@ -144,7 +151,7 @@ public:
             IdentityReader identity_reader);
 
     Result Admit(const Admission& admission);
-    Result Apply(const pathguard::PolicyV6& policy,
+    Result Apply(const RuleSet& rules,
                  const Admission& admission);
     Result Stop();
     Result Revoke();

@@ -21,6 +21,7 @@ enum class SelectorObjectType : std::uint8_t {
 enum class RuleActionKind : std::uint8_t {
     kDeny,
     kRedirect,
+    kHide,
     kObserve,
     kExport,
 };
@@ -65,9 +66,12 @@ struct ActionRuleInputV2 {
     ExportMode export_mode = ExportMode::kCopy;
     bool media_scan = false;
     bool audit = false;
+    std::string hide_parent;
+    std::string hide_basename;
 };
 
 struct HideRuleInputV2 {
+    RuleId id = 0;
     std::string parent;
     std::string basename;
 };

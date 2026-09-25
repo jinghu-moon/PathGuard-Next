@@ -172,6 +172,7 @@ PatternPlanBuildResult BuildPatternPlan(
             continue;
         }
         for (const CanonicalActionV2& source : app.actions) {
+            if (source.action == RuleActionKind::kHide) continue;
             const std::string selector_key = SelectorKey(source.selector);
             const auto selector_found = selector_ids.find(selector_key);
             if (selector_found == selector_ids.end()) {
@@ -193,6 +194,9 @@ PatternPlanBuildResult BuildPatternPlan(
                     break;
                 case RuleActionKind::kExport:
                     action.kind = RuntimeActionKind::kExport;
+                    break;
+                case RuleActionKind::kHide:
+                    action.kind = RuntimeActionKind::kDeny;
                     break;
             }
             action.domain = SelectDomain(source);

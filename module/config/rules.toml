@@ -7,22 +7,21 @@ allow_legacy_mount = true
 [apps."org.localsend.localsend_app"]
 users = [0]
 provider = { enabled = true }
-deny_rules = [
-    { select = { root = "Pictures", glob = "Nagram", type = "directory" } },
-    { select = { root = "DCIM", glob = "Screenshots", type = "directory" } },
-]
-redirect_rules = [
-    { select = { root = "Download", glob = "localsend-source", type = "directory" }, to = "Download/localsend-redirect" },
-    { select = { root = "Download/localsend-source", glob = "**", type = "file" }, to = "Download/localsend-redirect" },
-    { select = { root = "Download/localsend-source", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider", audit = true },
-    { select = { root = "Pictures", glob = "**", type = "file" }, to = "Download/localsend-redirect" },
-    { select = { root = "Pictures", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider", audit = true },
+actions = [
+    { kind = "deny", select = { root = "Pictures", glob = "Nagram", type = "directory" } },
+    { kind = "deny", select = { root = "DCIM", glob = "Screenshots", type = "directory" } },
+    { kind = "redirect", select = { root = "Download", glob = "localsend-source", type = "directory" }, to = "Download/localsend-redirect" },
+    { kind = "redirect", select = { root = "Download/localsend-source", glob = "**", type = "file" }, to = "Download/localsend-redirect" },
+    { kind = "redirect", select = { root = "Download/localsend-source", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider", audit = true },
+    { kind = "redirect", select = { root = "Pictures", glob = "**", type = "file" }, to = "Download/localsend-redirect" },
+    { kind = "redirect", select = { root = "Pictures", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider", audit = true },
 ]
 
-# Experimental Hide 1.0-LKM rule. It is independently admitted and only
-# activates while this package process is present on the fixed test device.
+# Unified action rules. Hide remains backed by the dedicated LKM execution
+# domain, but multiple hide actions are installed as one transaction.
 [apps."dev.pathguard.hideprobe.target"]
 users = [0]
-hide_rules = [
-    { parent = "/storage/emulated/0/Pictures/PathGuardHideLab/20260925-000308", basename = "hidden" },
+actions = [
+    { kind = "hide", parent = "/storage/emulated/0/Pictures/PathGuardHideLab/20260925-164221", basename = "hidden" },
+    { kind = "hide", parent = "/storage/emulated/0/Pictures/PathGuardHideLab/20260925-164221", basename = "hidden-2" },
 ]

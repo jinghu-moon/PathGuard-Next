@@ -81,6 +81,7 @@ PolicyRuleKind ToRuleKind(RuleActionKind kind) {
         case RuleActionKind::kRedirect: return PolicyRuleKind::kRedirect;
         case RuleActionKind::kObserve: return PolicyRuleKind::kObserve;
         case RuleActionKind::kExport: return PolicyRuleKind::kExport;
+        case RuleActionKind::kHide: return PolicyRuleKind::kDeny;
     }
     return PolicyRuleKind::kDeny;
 }

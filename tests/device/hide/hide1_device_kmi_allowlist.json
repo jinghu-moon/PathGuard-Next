@@ -9,9 +9,9 @@
       "kernel_release": "6.12.23-android16-5-g16e473de48a3-abogki462654244-4k",
       "module_vermagic_release": "6.12.76-4k",
       "kmi": "android16-6.12",
-      "module_sha256": "0aaf0bf4dfca38b36f2d81db07fd47d4124713067d02d2b7ad416193fbe12313",
-      "undefined_symbol_count": 78,
-      "undefined_symbols_sha256": "26c161cd433e14eef2a1bab6c2851b9ece67f94c1af60bad8f3cc846df848441",
+      "module_sha256": "71b74907a9b49fe5ba6c68e02f21286c65369295a603f4caa1189a6f1db0bc89",
+      "undefined_symbol_count": 80,
+      "undefined_symbols_sha256": "9322d957fcedba7dd780de003102132fe23c1307e1b2e27d0adb5a2d60967138",
       "reference_symbol_crcs": {
         "module_layout": "0xe976b219",
         "misc_register": "0xd9a13df1",

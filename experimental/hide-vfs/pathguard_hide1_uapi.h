@@ -5,7 +5,8 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define PATHGUARD_HIDE1_ABI_VERSION 8U
+#define PATHGUARD_HIDE1_ABI_VERSION 9U
+#define PATHGUARD_HIDE1_MAX_RULES 64U
 #define PATHGUARD_HIDE1_PATH_MAX 384U
 #define PATHGUARD_HIDE1_NAME_MAX 255U
 
@@ -52,6 +53,17 @@ struct pathguard_hide1_rule {
     char basename[PATHGUARD_HIDE1_NAME_MAX + 1U];
 };
 
+struct pathguard_hide1_rule_set {
+    __u32 abi_version;
+    __u32 size;
+    __u32 rule_count;
+    __u32 target_uid;
+    __s32 target_pid;
+    __u32 reserved;
+    __u64 expected_generation;
+    struct pathguard_hide1_rule rules[PATHGUARD_HIDE1_MAX_RULES];
+};
+
 struct pathguard_hide1_mutation_counters {
     __u64 calls;
     __u64 blocked;
@@ -69,6 +81,8 @@ struct pathguard_hide1_status {
     __s32 target_pid;
     __u64 target_mnt_ns;
     __u64 generation;
+    __u32 rule_count;
+    __u32 reserved_rule_count;
     __u64 operation_mask;
     __u64 parent_inode;
     __u64 lookup_calls;
@@ -156,5 +170,7 @@ struct pathguard_hide1_status {
     _IO(PATHGUARD_HIDE1_IOC_MAGIC, 4)
 #define PATHGUARD_HIDE1_IOC_STATUS \
     _IOR(PATHGUARD_HIDE1_IOC_MAGIC, 5, struct pathguard_hide1_status)
+#define PATHGUARD_HIDE1_IOC_INSTALL_SET \
+    _IOW(PATHGUARD_HIDE1_IOC_MAGIC, 6, __u64)
 
 #endif

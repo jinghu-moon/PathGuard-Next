@@ -209,6 +209,54 @@ static int install_rule(int fd, int argc, char **argv)
     return print_status(fd);
 }
 
+static int install_rule_set(int fd, int argc, char **argv)
+{
+    struct pathguard_hide1_rule_set *set;
+    uint64_t generation;
+    int index;
+
+    if (argc < 7 || ((argc - 5) % 2) != 0
+        || ((argc - 5) / 2) > PATHGUARD_HIDE1_MAX_RULES)
+        return 2;
+    set = calloc(1, sizeof(*set));
+    if (!set)
+        return 1;
+    set->abi_version = PATHGUARD_HIDE1_ABI_VERSION;
+    set->size = sizeof(*set);
+    set->rule_count = (argc - 5) / 2;
+    if (parse_u32(argv[2], &set->target_uid)
+        || parse_i32(argv[3], &set->target_pid)
+        || parse_u64(argv[4], &generation)) {
+        free(set);
+        return 2;
+    }
+    set->expected_generation = generation;
+    for (index = 0; index < (int)set->rule_count; ++index) {
+        struct pathguard_hide1_rule *rule = &set->rules[index];
+        const char *parent = argv[5 + index * 2];
+        const char *basename = argv[6 + index * 2];
+        rule->abi_version = PATHGUARD_HIDE1_ABI_VERSION;
+        rule->size = sizeof(*rule);
+        rule->target_uid = set->target_uid;
+        rule->target_pid = set->target_pid;
+        rule->expected_generation = generation;
+        if (strlen(parent) >= sizeof(rule->parent)
+            || strlen(basename) >= sizeof(rule->basename)) {
+            free(set);
+            return 2;
+        }
+        strcpy(rule->parent, parent);
+        strcpy(rule->basename, basename);
+    }
+    if (ioctl(fd, PATHGUARD_HIDE1_IOC_INSTALL_SET, set) < 0) {
+        perror("install-set");
+        free(set);
+        return 1;
+    }
+    free(set);
+    return print_status(fd);
+}
+
 int main(int argc, char **argv)
 {
     uint64_t generation;
@@ -216,7 +264,7 @@ int main(int argc, char **argv)
     int result = 2;
 
     if (argc < 2) {
-        fprintf(stderr, "usage: %s status|install|enable|disable|clear ...\n",
+        fprintf(stderr, "usage: %s status|install|install-set|enable|disable|clear ...\n",
                 argv[0]);
         return 2;
     }
@@ -229,6 +277,8 @@ int main(int argc, char **argv)
         result = print_status(fd);
     } else if (strcmp(argv[1], "install") == 0) {
         result = install_rule(fd, argc, argv);
+    } else if (strcmp(argv[1], "install-set") == 0) {
+        result = install_rule_set(fd, argc, argv);
     } else if (strcmp(argv[1], "enable") == 0 && argc == 3 &&
                parse_u64(argv[2], &generation) == 0) {
         if (ioctl(fd, PATHGUARD_HIDE1_IOC_ENABLE, &generation) < 0) {

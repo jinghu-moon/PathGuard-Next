@@ -48,6 +48,7 @@ redirect_rules = [
 ]
 hide_rules = [
   { parent = "/storage/emulated/0/Pictures", basename = "hidden" },
+  { parent = "/storage/emulated/0/DCIM", basename = "private" },
 ]
 )";
     const auto parsed = Parse(valid);
@@ -62,14 +63,14 @@ hide_rules = [
     assert(app.actions[0].enforcement == RuleEnforcement::kProvider);
     assert(app.actions[1].preserve == PreserveMode::kRelative);
     assert(app.actions[1].collision == CollisionPolicy::kReject);
-    assert(app.hide_rules.size() == 1);
+    assert(app.hide_rules.size() == 2);
     assert(app.hide_rules.front().parent == "/storage/emulated/0/Pictures");
     assert(app.hide_rules.front().basename == "hidden");
 
     const auto built = BuildCanonicalPolicyV2(*parsed.document, RulesLimits{});
     assert(built.ok());
     assert(built.canonical->apps.front().actions.size() == 3);
-    assert(built.canonical->apps.front().hide_rules.size() == 1);
+    assert(built.canonical->apps.front().hide_rules.size() == 2);
     assert(built.canonical->apps.front().hide_rules.front().package
            == "org.localsend.localsend_app");
     const auto& actions = built.canonical->apps.front().actions;
@@ -81,6 +82,22 @@ hide_rules = [
         [](const CanonicalActionV2& action) {
             return action.selector.source_kind == SelectorSourceKind::kGlob;
         }) == 2);
+
+    const auto unified = Parse(R"(format = 2
+[apps."dev.pathguard.hideprobe.target"]
+users = [0]
+actions = [
+  { kind = "hide", parent = "/storage/emulated/0/Pictures", basename = "one" },
+  { kind = "hide", parent = "/storage/emulated/0/DCIM", basename = "two" },
+]
+)");
+    assert(unified.ok());
+    assert(unified.document->apps.front().actions.size() == 2);
+    const auto unified_build = BuildCanonicalPolicyV2(
+        *unified.document, RulesLimits{});
+    assert(unified_build.ok());
+    assert(unified_build.canonical->apps.front().hide_rules.size() == 2);
+    assert(unified_build.canonical->apps.front().actions.size() == 2);
 
     ExpectCode("format = 1\n[apps.\"com.example.app\"]\ndeny=[]\n",
                kFormatUnsupported);

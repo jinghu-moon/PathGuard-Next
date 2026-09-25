@@ -166,6 +166,9 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
         }
         std::map<std::string, std::uint32_t> selector_ids;
         for (const CanonicalActionV2& source_action : source_app.actions) {
+            if (source_action.action == RuleActionKind::kHide) {
+                continue;
+            }
             const std::string selector_root = source_action.selector.source_kind
                     == SelectorSourceKind::kLiteral
                 ? source_action.selector.root + "/" + source_action.selector.glob
@@ -218,6 +221,8 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
                 case RuleActionKind::kExport:
                     action.kind = pathguard::PolicyActionKind::kExport;
                     break;
+                case RuleActionKind::kHide:
+                    continue;
             }
             if (action.kind == pathguard::PolicyActionKind::kObserve
                 || action.kind == pathguard::PolicyActionKind::kExport) {

@@ -109,10 +109,13 @@ public:
             backend_.reset();
             return true;
         }
-        if (built.hide_rules.size() != 1) {
-            return Fail(error, "hide requires exactly one active hide_rules entry");
-        }
         const auto& source = built.hide_rules.front();
+        for (const auto& rule : built.hide_rules) {
+            if (rule.package != source.package || rule.users != source.users
+                || rule.processes != source.processes) {
+                return Fail(error, "hide rules must share one target identity");
+            }
+        }
         const auto pid = FindTargetPid(source);
         if (!pid.has_value()) {
             if (backend_) {
@@ -160,8 +163,10 @@ public:
             return Fail(error, admission_error.empty()
                 ? "hide-admission-evidence-invalid" : admission_error);
         }
-        const std::string rule_key = source.package + "\n" + source.parent
-            + "\n" + source.basename;
+        std::string rule_key = source.package;
+        for (const auto& rule : built.hide_rules) {
+            rule_key += "\n" + rule.parent + "\n" + rule.basename;
+        }
         if (backend_ && backend_->state() == pathguard::hide1::BackendState::kActive
             && active_rule_key_ == rule_key && active_pid_ == *pid) {
             if (backend_->Reconcile().ok()) return true;
@@ -179,33 +184,21 @@ public:
         if (!candidate->Admit(*admission).ok()) {
             return Fail(error, candidate->error_reason());
         }
-        pathguard::PolicyV6 policy;
-        pathguard::PolicyPackageV6 package;
-        package.package = source.package;
-        package.all_processes = source.processes.empty();
-        package.processes = source.processes;
-        for (const auto user : source.users) {
-            if (user >= 0) package.users.push_back(static_cast<std::uint32_t>(user));
-        }
-        pathguard::PolicySelectorV6 selector;
-        selector.match_kind = pathguard::PolicyMatchKind::kLiteralPrefix;
-        selector.object_type = pathguard::PolicyObjectType::kAny;
-        selector.root = source.parent + "/" + source.basename;
-        package.selectors.push_back(std::move(selector));
-        pathguard::PolicyActionV6 action;
-        action.selector_index = 0;
-        action.kind = pathguard::PolicyActionKind::kDeny;
-        action.domain = pathguard::PolicyExecutionDomain::kCompleteVfs;
-        action.required_capabilities = pathguard::kCapabilityFuseCompletePath;
-        action.required_operations = pathguard::kCompleteVfsOperationsV1;
-        package.actions.push_back(action);
-        policy.packages.push_back(std::move(package));
+        std::vector<std::pair<std::string, std::string>> paths;
+        paths.reserve(built.hide_rules.size());
+        for (const auto& rule : built.hide_rules)
+            paths.emplace_back(rule.parent, rule.basename);
+        const auto identity = pathguard::hide1::ReadProcessIdentity(*pid);
+        if (!identity) return Fail(error, "hide-target-identity-unavailable");
+        const auto translated = pathguard::hide1::TranslateRules(
+            paths, *identity, candidate->deployment_generation() + 1);
+        if (!translated.ok()) return Fail(error, translated.result.reason);
 
         if (backend_) {
             const auto stopped = backend_->Revoke();
             if (!stopped.ok()) return Fail(error, stopped.reason);
         }
-        if (!candidate->Apply(policy, *admission).ok()) {
+        if (!candidate->Apply(*translated.rules, *admission).ok()) {
             return Fail(error, candidate->error_reason());
         }
         backend_ = std::move(candidate);

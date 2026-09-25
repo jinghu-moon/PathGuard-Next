@@ -2,7 +2,7 @@
 
 ## 0. 当前结论
 
-> 当前已完成 P0、P1 和 P2 验收。设备已完成一次完整重启，旧 boot admission 被拒绝；当前 boot 已重新生成 admission 并由 daemon 自动接管。`product_state` 仍为 `unsupported`。
+> 当前 ABI 9/v8 设备闭环已通过：active regression 五场景全部 PASS，当前 boot admission=admitted，清理手动 binding 后 daemon 自动接管两条 Hide 规则。`product_state` 仍为 `unsupported`。
 
 ### 当前最新身份
 
@@ -10,39 +10,51 @@
 | ----------------- | ------------------------------------------------------------ |
 | device            | `myron`                                                      |
 | arch              | `aarch64`                                                    |
-| boot_id           | `34e0e807-09ee-44c0-8055-34e74423df30`                       |
+| boot_id           | `1955c5b7-6a7c-4b0a-af9d-d4bcc5c3d3d8`                       |
 | kernel            | `6.12.23-android16-5-g16e473de48a3-abogki462654244-4k`       |
-| module_sha256     | `0aaf0bf4dfca38b36f2d81db07fd47d4124713067d02d2b7ad416193fbe12313` |
-| pathguardd_sha256 | `2e66d651e0c20cb19471c466d59f65906a06c2ec322e9b2d079c6f129a0ef6fe` |
+| module_sha256     | `71b74907a9b49fe5ba6c68e02f21286c65369295a603f4caa1189a6f1db0bc89` |
+| pathguardd_sha256 | `4e25d05ea7ee4822de8e3b1ef1dab7ddd47afb4c583a89befd53c5a3fb8e34db` |
 
 ### 当前内核状态
 
 | 字段           | 值    |
 | -------------- | ----- |
-| abi_version    | `8`   |
+| abi_version    | `9`   |
 | state          | `2`   |
 | lifecycle      | `2`   |
 | last_error     | `0`   |
 | generation     | `1`   |
-| operation_mask | `0x0000000000000fff` |
-| parent_inode   | `836528` |
+| operation_mask | `0x0000000000000000` |
+| parent_inode   | `776462` |
 | shadow_mode    | `0`   |
 
 当前准确实验状态是：
 
-> `Hide 1.0-LKM/myron admitted on current boot; P0/P1/P2 evidence complete`
+> `module_live=true; admission=admitted; daemon-owned state=2/lifecycle=2; product_state=unsupported`
 
-当前自动回归证据（重启后的 current boot）：
+本轮设备证据来自重启后的实时采样：模块加载成功且哈希匹配；active regression 使用 parent inode `776462`，五个场景均通过；导入 admission 后清理手动 binding，daemon 自动重新安装并启用两条规则，Target/Control 快速复验通过。
+
+Host 收口证据：
 
 ```text
-build/device-evidence/hide1-latest/reboot-regression/20260925-105836/full-regression.json
-build/device-evidence/hide1-latest/reboot-admission/20260925-105917/admission.json
+ctest --test-dir build-release -C Release --output-on-failure  -> 91/91
+LKM SHA-256  -> 71b74907a9b49fe5ba6c68e02f21286c65369295a603f4caa1189a6f1db0bc89
+ZIP SHA-256  -> 68501B8AB420BB5913767FF7EE353E314FA37DB3CD417B1DC31CEACFDA139756
 ```
 
-五个场景均为 `PASS`，`mountinfo_unchanged=true`，daemon 已自动 `INSTALL/ENABLE`。
-`product_state` 仍必须保持 `unsupported`。
+当前 ZIP 为 `download/pathguard-hide1-multirule-20260925-v8.zip`，配置已统一使用 `actions`，包含两条 Hide action。
 
-### 最终验收证据索引（2026-09-25）
+当前证据：
+
+```text
+build/device-evidence/hide1-regression-v7/20260925-165203/full-regression.json
+build/device-evidence/hide1-admission-v7/20260925-165956/admission.json
+build/device-evidence/hidelab-daemon-v7/20260925-171143/summary.json
+```
+
+### 历史验收证据索引（非当前 ABI 9 结论）
+
+下表保留此前设备回归的可追溯路径；其 `PASS` 只表示当时对应产物和 boot，不能作为本轮 v7 包的准入证据。当前包必须重新执行 active regression、allowlist 和 admission 流程。
 
 | 阶段 | 结果 | 证据 |
 |---|---|---|
@@ -472,7 +484,7 @@ parent_inode=<当前 fixture 实际 inode>
 
 输出必须是新的 `full-regression.json`，不能修改旧证据冒充新模块结果。
 
-### 已完成 P0：更新固定设备 allowlist
+### 待当前 ABI 9 回归：更新固定设备 allowlist
 
 只有新模块 Active 回归通过后，才更新：
 
@@ -495,7 +507,7 @@ kmi=android16-6.12
 product_state=unsupported
 ```
 
-### 已完成 P0：生成当前 boot 正式 admission
+### 待当前 ABI 9 回归：生成当前 boot 正式 admission
 
 使用新 full regression 运行：
 
@@ -522,7 +534,7 @@ product_state=unsupported
 "status_shadow_mode": 0
 ```
 
-### 已完成 P0：daemon 自动接管闭环
+### 待当前 ABI 9 回归：daemon 自动接管闭环
 
 正式 admission 生成后：
 
@@ -545,7 +557,7 @@ product_state=unsupported
 - 内核状态与规则一致
 - daemon 日志能区分“模块已加载”和“设备已准入”
 
-### P0：负向 admission 与自动撤权（已完成）
+### P0：负向 admission 与自动撤权（历史证据，待当前包复验）
 
 逐项验证：
 
@@ -575,7 +587,7 @@ daemon 拒绝 admission
 
 不能只检查日志，必须同时核对内核状态。
 
-### P1：target 生命周期（已完成）
+### P1：target 生命周期（历史证据，待当前包复验）
 
 需要验证：
 
@@ -604,7 +616,7 @@ target 再次启动
 - target 不存在时保持 inactive
 - target 出现后自动部署
 
-### P1：Hide 规则热更新（已完成）
+### P1：Hide 规则热更新（Host 已通过，设备待当前包复验）
 
 需要完成：
 
@@ -628,7 +640,7 @@ target 再次启动
 - parent 不存在时 fail-closed
 - 多条规则被明确拒绝
 
-### P1：deny、redirect、hide 组合回归（已完成）
+### P1：deny、redirect、hide 组合回归（Host 已通过，设备待当前包复验）
 
 必须验证：
 
@@ -643,7 +655,7 @@ target 再次启动
 
 这部分是 rules reconciler 的回归门禁，不属于 LKM 数据面测试。
 
-### P1：重启与重新准入（已完成）
+### P1：重启与重新准入（历史证据，待当前包复验）
 
 需要验证：
 
@@ -678,7 +690,7 @@ HideLab Active 回归
 
 预期均为 fail-closed。
 
-### P2：离线工程回归（已完成）
+### P2：离线工程回归（当前已完成）
 
 最新代码最终必须重新执行：
 
@@ -696,7 +708,7 @@ HideLab Active 回归
 
 历史上的 91/91 不能替代最新代码的最终执行结果。
 
-### P2：文档和证据收口（已完成）
+### P2：文档和证据收口（当前已完成；设备证据待补）
 
 需要更新：
 
@@ -887,3 +899,20 @@ product_state=unsupported
 尚未实现：
 
 - 通用产品级 Hide 1.0
+# 多规则重构进度（2026-09-25）
+
+当前 Hide 规则已从单条 binding 重构为统一 `actions` 中的规则集合：
+
+```toml
+actions = [
+  { kind = "hide", parent = "/storage/emulated/0/Pictures/PathGuardHideLab/20260925-000308", basename = "hidden" },
+  { kind = "hide", parent = "/storage/emulated/0/Pictures/PathGuardHideLab/20260925-000308", basename = "hidden-2" },
+]
+```
+
+- schema/compiler 已支持多个 `hide` action，并保留 deny/redirect 的统一 action 解析。
+- daemon 已按同一 Target identity 聚合完整 Hide RuleSet。
+- LKM UAPI 已新增 `INSTALL_SET`，规则集合按一次事务安装，状态包含 `rule_count`。
+- 多条规则均失败时，安装必须整体回滚；Target、admission、规则更新仍按整组 revoke/rebind。
+- 2026-09-25 本地验证：C++ 构建通过；Hide backend、schema、control-plane 测试通过；WSL LKM 构建通过。
+- 设备已安装 ABI 9 验证包并确认模块 Live、`INSTALL_SET` 返回 `rule_count=2`；`ENABLE` 在同一 parent 的重复 shadow 路径上发现并修复，修复版尚未重新安装设备。

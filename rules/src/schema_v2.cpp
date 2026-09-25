@@ -351,8 +351,37 @@ private:
 
     bool DecodeAction(const toml::table& table, RuleActionKind kind,
                       const std::string& path, ActionRuleInputV2* action) {
+        if (kind == RuleActionKind::kHide) {
+            bool valid = CheckFields(table, {"kind", "parent", "basename"}, path);
+            const toml::node* parent = table.get("parent");
+            const toml::node* basename = table.get("basename");
+            const auto parent_value = parent ? parent->value<std::string>() : std::nullopt;
+            const auto basename_value = basename ? basename->value<std::string>() : std::nullopt;
+            if (!parent_value || parent_value->empty() || parent_value->front() != '/') {
+                Add(kInvalidValue, "rules.hide_parent_absolute_required",
+                    parent ? SourceSpan(source_, parent->source()) : SourceSpan(source_, table.source()),
+                    path + "/parent");
+                valid = false;
+            }
+            if (!basename_value || basename_value->empty() || *basename_value == "."
+                || *basename_value == ".." || basename_value->find('/') != std::string::npos) {
+                Add(kInvalidValue, "rules.hide_basename_required",
+                    basename ? SourceSpan(source_, basename->source()) : SourceSpan(source_, table.source()),
+                    path + "/basename");
+                valid = false;
+            }
+            action->action = kind;
+            if (parent_value && basename_value) {
+                action->hide_parent = *parent_value;
+                action->hide_basename = *basename_value;
+                action->select.object_type = SelectorObjectType::kAny;
+                action->select.root = action->hide_parent;
+                action->select.glob = action->hide_basename;
+            }
+            return valid;
+        }
         bool valid = CheckFields(table,
-            {"select", "to", "priority", "preserve", "collision", "enforcement",
+            {"kind", "select", "to", "priority", "preserve", "collision", "enforcement",
              "mode", "media_scan", "audit"},
             path);
         action->action = kind;
@@ -531,6 +560,52 @@ private:
         return valid;
     }
 
+    bool DecodeUnifiedActions(const toml::node& node, const std::string& path,
+                              AppRulesV2* app) {
+        const toml::array* rules = node.as_array();
+        if (rules == nullptr) {
+            Add(kTypeMismatch, "rules.action_array_required",
+                SourceSpan(source_, node.source()), path);
+            return false;
+        }
+        bool valid = true;
+        std::size_t index = 0;
+        for (const toml::node& rule_node : *rules) {
+            const std::string rule_path = path + "/" + std::to_string(index++);
+            const toml::table* table = rule_node.as_table();
+            if (table == nullptr) {
+                Add(kTypeMismatch, "rules.action_table_required",
+                    SourceSpan(source_, rule_node.source()), rule_path);
+                valid = false;
+                continue;
+            }
+            const toml::node* kind_node = table->get("kind");
+            const auto kind_value = kind_node ? kind_node->value<std::string>() : std::nullopt;
+            RuleActionKind kind = RuleActionKind::kDeny;
+            if (!kind_value) {
+                Add(kTypeMismatch, "rules.action_kind_required",
+                    SourceSpan(source_, table->source()), rule_path + "/kind");
+                valid = false;
+                continue;
+            } else if (*kind_value == "deny") kind = RuleActionKind::kDeny;
+            else if (*kind_value == "redirect") kind = RuleActionKind::kRedirect;
+            else if (*kind_value == "hide") kind = RuleActionKind::kHide;
+            else if (*kind_value == "observe") kind = RuleActionKind::kObserve;
+            else if (*kind_value == "export") kind = RuleActionKind::kExport;
+            else {
+                Add(kInvalidValue, "rules.action_kind_invalid",
+                    SourceSpan(source_, kind_node->source()), rule_path + "/kind");
+                valid = false;
+                continue;
+            }
+            ActionRuleInputV2 action;
+            action.id = next_rule_id_++;
+            valid = DecodeAction(*table, kind, rule_path, &action) && valid;
+            app->actions.push_back(std::move(action));
+        }
+        return valid;
+    }
+
     bool DecodeHideRules(const toml::node& node, const std::string& path,
                          AppRulesV2* app) {
         const toml::array* rules = node.as_array();
@@ -572,7 +647,7 @@ private:
                 && parent_value->front() == '/' && !basename_value->empty()
                 && *basename_value != "." && *basename_value != ".."
                 && basename_value->find('/') == std::string::npos) {
-                app->hide_rules.push_back({*parent_value, *basename_value});
+                app->hide_rules.push_back({next_rule_id_++, *parent_value, *basename_value});
             }
         }
         return valid;
@@ -581,7 +656,7 @@ private:
     bool DecodeApp(const toml::table& table, const std::string& path,
                    AppRulesV2* app) {
         bool valid = CheckFields(table,
-            {"enabled", "users", "processes", "provider", "deny_rules",
+             {"enabled", "users", "processes", "provider", "actions", "deny_rules",
              "redirect_rules", "observe_rules", "export_rules", "hide_rules"}, path);
         valid = DecodeBool(table, "enabled", path + "/enabled", &app->enabled)
             && valid;
@@ -595,6 +670,9 @@ private:
         if (const toml::node* provider = table.get("provider")) {
             valid = DecodeProvider(*provider, path + "/provider", &app->provider)
                 && valid;
+        }
+        if (const toml::node* actions = table.get("actions")) {
+            valid = DecodeUnifiedActions(*actions, path + "/actions", app) && valid;
         }
         if (const toml::node* deny = table.get("deny_rules")) {
             valid = DecodeActions(*deny, RuleActionKind::kDeny,
@@ -676,6 +754,21 @@ RulesV2BuildResult BuildCanonicalPolicyV2(
         std::size_t token_total = 0;
         std::size_t except_total = 0;
         for (const ActionRuleInputV2& action : app.actions) {
+            if (action.action == RuleActionKind::kHide) {
+                canonical_app.hide_rules.push_back({
+                    app.package, app.users, app.processes,
+                    action.hide_parent, action.hide_basename});
+                CanonicalActionV2 canonical_action;
+                canonical_action.id = action.id;
+                canonical_action.action = action.action;
+                canonical_action.selector.source_kind = SelectorSourceKind::kLiteral;
+                canonical_action.selector.root = action.hide_parent;
+                canonical_action.selector.glob = action.hide_basename;
+                canonical_action.selector.object_type = SelectorObjectType::kAny;
+                canonical_action.priority = action.priority;
+                canonical_app.actions.push_back(std::move(canonical_action));
+                continue;
+            }
             if (!ValidateStoragePath(action.select.root, limits)
                 || ((action.action == RuleActionKind::kRedirect
                      || action.action == RuleActionKind::kExport)
