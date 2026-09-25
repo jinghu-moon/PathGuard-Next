@@ -1918,9 +1918,9 @@ static void hide1_drop_filtered_child(struct hide1_dir_proxy *proxy,
     dput(child);
 }
 
-static bool hide1_dir_actor(struct dir_context *ctx, const char *name,
-                            int namelen, loff_t offset, u64 ino,
-                            unsigned int d_type)
+static PATHGUARD_HIDE1_DIR_ACTOR_RET
+hide1_dir_actor(struct dir_context *ctx, const char *name, int namelen,
+                loff_t offset, u64 ino, unsigned int d_type)
 {
     struct hide1_dir_proxy *proxy = container_of(ctx, struct hide1_dir_proxy, ctx);
 
@@ -2374,12 +2374,12 @@ static int hide1_install_extra_fop_shadows_locked(
 {
     unsigned int index;
     struct hide1_rule_scope *scope;
+    struct hide1_fop_meta *meta;
 
     for (index = 1; index < hide1_scope_count(binding); ++index) {
         if (hide1_scope_is_duplicate(binding, index))
             continue;
         scope = &binding->scopes[index];
-        struct hide1_fop_meta *meta;
         if (!scope->orig_fop)
             return -EINVAL;
         meta = kzalloc(sizeof(*meta), GFP_KERNEL);
