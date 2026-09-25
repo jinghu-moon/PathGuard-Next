@@ -74,11 +74,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$OUT"
+          extra_kcflags=""
+          if [ "$KMI" = "android13-5.10" ]; then
+            extra_kcflags="-Wno-unused-but-set-variable"
+          fi
           make -C experimental/hide-vfs \
             KDIR="$KDIR" \
             DEVICE_KERNEL_RELEASE="$KERNEL_RELEASE" \
             CC=clang \
             LLVM=1 \
+            KCFLAGS="$extra_kcflags" \
             -j"$(nproc --all)"
           test -s experimental/hide-vfs/pathguard_hide1.ko
           cp experimental/hide-vfs/pathguard_hide1.ko "$OUT/pathguard_hide1.ko"
