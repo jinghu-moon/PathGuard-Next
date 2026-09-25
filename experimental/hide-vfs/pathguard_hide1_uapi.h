@@ -5,7 +5,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define PATHGUARD_HIDE1_ABI_VERSION 7U
+#define PATHGUARD_HIDE1_ABI_VERSION 8U
 #define PATHGUARD_HIDE1_PATH_MAX 384U
 #define PATHGUARD_HIDE1_NAME_MAX 255U
 
@@ -33,6 +33,14 @@
 #define PATHGUARD_HIDE1_OP_RENAME       (1ULL << 10)
 #define PATHGUARD_HIDE1_OP_REVALIDATE   (1ULL << 11)
 #define PATHGUARD_HIDE1_REQUIRED_OPS    ((1ULL << 12) - 1ULL)
+
+#define PATHGUARD_HIDE1_OBSERVER_STATE_INACTIVE 0U
+#define PATHGUARD_HIDE1_OBSERVER_STATE_MISMATCH 1U
+#define PATHGUARD_HIDE1_OBSERVER_NAMESPACE_MISMATCH 2U
+#define PATHGUARD_HIDE1_OBSERVER_GENERATION_MISMATCH 3U
+#define PATHGUARD_HIDE1_OBSERVER_TASK_MISMATCH 4U
+#define PATHGUARD_HIDE1_OBSERVER_UID_MISMATCH 5U
+#define PATHGUARD_HIDE1_OBSERVER_MATCHED 6U
 
 struct pathguard_hide1_rule {
     __u32 abi_version;
@@ -110,6 +118,21 @@ struct pathguard_hide1_status {
     __u64 inode_security_stage_other;
     __u64 inode_security_stage_nmissed;
     __u64 inode_security_bridge_enoent;
+    __u64 observer_state_rejects;
+    __u64 observer_namespace_rejects;
+    __u64 observer_generation_rejects;
+    __u64 observer_task_rejects;
+    __u64 observer_uid_rejects;
+    __u64 observer_matches;
+    __u32 last_observer_reason;
+    __u32 last_observer_tgid;
+    __u32 last_observer_fsuid;
+    __u32 last_observer_reserved;
+    __u64 last_observer_mnt_ns;
+    __u64 last_callback_parent_inode;
+    __u32 last_callback_basename_length;
+    __u32 last_callback_reserved;
+    char last_callback_basename[PATHGUARD_HIDE1_NAME_MAX + 1U];
     struct pathguard_hide1_mutation_counters mutation_atomic_open;
     struct pathguard_hide1_mutation_counters mutation_create;
     struct pathguard_hide1_mutation_counters mutation_mkdir;

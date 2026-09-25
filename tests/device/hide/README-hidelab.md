@@ -33,7 +33,7 @@ names differ, so an implementation must demonstrate real caller isolation.
 
 ## Result rules
 
-Each observation is JSONL schema 1. Run metadata is schema 2. The runner must
+Each observation is JSONL schema 1. Run metadata is schema 3. The runner must
 derive one of `PASS`, `LEAK`, `OVERBLOCK`, `SEMANTIC_DRIFT`,
 `DESTRUCTIVE_FAIL`, `STATE_LIE`, `CRASH`, `HANG`, `UNSUPPORTED`, or
 `INFRA_ERROR`. A failed syscall with any Oracle-visible change is always
@@ -120,6 +120,57 @@ coverage 命中计数。若 alias 指向不同 superblock，后端必须分别�
 当前无后端设备运行该脚本应得到 `blocked`（通常为 `LEAK` 或
 `DESTRUCTIVE_FAIL`）。需要重建无后端基线时显式传 `-BaselineOnly`，不得把基线
 结果当作 Hide 1.0 通过。
+
+全量 active 回归必须显式确认 disposable fixture mutation；编排器会显式运行
+`baseline`、`cache-order`、`concurrency`、`reliability` 和 `mutation` 五组场景，
+并在整轮前后比较 `/proc/self/mountinfo`。缺少任一场景、出现 mutation 失败或
+mountinfo 变化都会得到 `blocked`，不会生成可准入结论：
+
+```powershell
+./tests/device/hide/run_hide1_full_regression.ps1 `
+  -TargetApk ./tests/device/hide/app-probe/app/build/outputs/apk/target/debug/app-target-debug.apk `
+  -ControlApk ./tests/device/hide/app-probe/app/build/outputs/apk/control/debug/app-control-debug.apk `
+  -FixtureRoot /storage/emulated/0/Pictures/PathGuardHideLab/<timestamp> `
+  -ExpectedParentInode <parent_inode> -KeepTargetProcess `
+  -GrantReadMediaImages -GrantAllFilesAccess `
+  -ShadowMode 0 -RunMutations -ConfirmMutation -Backend pathguard-hide1
+```
+
+`-BaselineOnly` 仍可用于只读基线，但 active 模式不允许省略
+`-RunMutations -ConfirmMutation`。
+
+active 回归必须在 INSTALL 绑定的同一 disposable fixture 上运行。fixture 必须在
+`INSTALL` 之前创建，并且从 `INSTALL` 到整轮结束不得删除或重建 parent inode。先用
+一次显式初始化建立 fixture（此步骤不加载模块、不执行 ENABLE）：
+
+```powershell
+./run_hidelab_baseline.ps1 `
+  -TargetApk .../app-target-debug.apk `
+  -ControlApk .../app-control-debug.apk `
+  -FixtureRoot /storage/emulated/0/Pictures/PathGuardHideLab/<timestamp> `
+  -InitializeFixture -KeepFixture
+```
+
+记录初始化证据中的 `fixture_root`、`hidden_path` 和 `parent_inode`，完成
+`INSTALL -> ENABLE` 后再把相同的 `-FixtureRoot`（以及可选的
+`-ExpectedParentInode`）传给全量 runner，并显式指定 `-ShadowMode 0`。active runner 不会重置 fixture；如果发现
+fixture 或 parent inode 不存在/变化，会直接报告 `INFRA_ERROR`。不要使用
+`-ExistingHiddenPath` 代替，因为该模式专门禁止 mutation。
+
+```powershell
+./run_hide1_full_regression.ps1 `
+  -TargetApk .../app-target-debug.apk -ControlApk .../app-control-debug.apk `
+  -FixtureRoot /storage/emulated/0/Pictures/PathGuardHideLab/<timestamp> `
+  -ExpectedParentInode <parent_inode> -ShadowMode 0 -KeepTargetProcess `
+  -GrantReadMediaImages -GrantAllFilesAccess -RunMutations -ConfirmMutation
+```
+
+提交前可运行无设备依赖的矩阵契约检查，确保验收矩阵、PowerShell 编排器和 native
+probe 的覆盖声明没有漂移：
+
+```powershell
+./tests/device/hide/validate_hidelab_offline.ps1
+```
 
 设备后端已完成 INSTALL/ENABLE 后，使用 `-KeepTargetProcess` 运行采集。该选项要求 target
 APK 已安装，跳过 target 的重装和 `force-stop`；采集前会锁定已运行的 target PID 和 mount namespace，

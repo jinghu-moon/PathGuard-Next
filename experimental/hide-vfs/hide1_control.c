@@ -91,6 +91,12 @@ static int print_status(int fd)
            " inode_security_stage=%" PRIu64 "/%" PRIu64 "/%" PRIu64
            "/%" PRIu64 "/%" PRIu64
            " inode_security_bridge_enoent=%" PRIu64
+           " observer_rejects=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64
+           " observer_matches=%" PRIu64
+           " last_observer=%" PRIu32 "/tgid:%" PRIu32 "/uid:%" PRIu32
+           "/mnt:%" PRIu64
+           " last_callback=%" PRIu64 "/%" PRIu32 "/%s"
            MUTATION_FORMAT("atomic_open")
            MUTATION_FORMAT("create")
            MUTATION_FORMAT("mkdir")
@@ -150,6 +156,19 @@ static int print_status(int fd)
            (uint64_t)status.inode_security_stage_other,
            (uint64_t)status.inode_security_stage_nmissed,
            (uint64_t)status.inode_security_bridge_enoent,
+           (uint64_t)status.observer_state_rejects,
+           (uint64_t)status.observer_namespace_rejects,
+           (uint64_t)status.observer_generation_rejects,
+           (uint64_t)status.observer_task_rejects,
+           (uint64_t)status.observer_uid_rejects,
+           (uint64_t)status.observer_matches,
+           status.last_observer_reason,
+           status.last_observer_tgid,
+           status.last_observer_fsuid,
+           (uint64_t)status.last_observer_mnt_ns,
+           (uint64_t)status.last_callback_parent_inode,
+           status.last_callback_basename_length,
+           status.last_callback_basename,
            MUTATION_VALUES(mutation_atomic_open),
            MUTATION_VALUES(mutation_create),
            MUTATION_VALUES(mutation_mkdir),

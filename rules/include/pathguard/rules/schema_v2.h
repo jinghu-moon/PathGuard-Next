@@ -67,6 +67,11 @@ struct ActionRuleInputV2 {
     bool audit = false;
 };
 
+struct HideRuleInputV2 {
+    std::string parent;
+    std::string basename;
+};
+
 struct ProviderIntentV2 {
     bool enabled = false;
 };
@@ -77,6 +82,7 @@ struct AppRulesV2 {
     std::vector<std::int32_t> users{0};
     std::vector<std::string> processes;
     ProviderIntentV2 provider;
+    std::vector<HideRuleInputV2> hide_rules;
     std::vector<ActionRuleInputV2> actions;
 };
 
@@ -110,11 +116,20 @@ struct CanonicalActionV2 {
     bool audit = false;
 };
 
+struct CanonicalHideRuleV2 {
+    std::string package;
+    std::vector<std::int32_t> users;
+    std::vector<std::string> processes;
+    std::string parent;
+    std::string basename;
+};
+
 struct CanonicalAppPolicyV2 {
     std::string package;
     std::vector<std::int32_t> users;
     std::vector<std::string> processes;
     ProviderIntentV2 provider;
+    std::vector<CanonicalHideRuleV2> hide_rules;
     std::vector<CanonicalActionV2> actions;
 };
 

@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "capability": "hide-1.0-direct-vfs",
+  "device": "myron",
+  "arch": "aarch64",
+  "fingerprint": "Redmi/myron/myron:16/BP2A.250605.031.A3/OS3.0.23.0.WPMCNXM:user/release-keys",
+  "kernel_release": "6.12.23-android16-5-g16e473de48a3-abogki462654244-4k",
+  "kmi": "android16-6.12",
+  "module_sha256": "@MODULE_SHA256@"
+}

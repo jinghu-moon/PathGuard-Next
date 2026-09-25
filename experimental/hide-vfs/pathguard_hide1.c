@@ -53,6 +53,18 @@ module_param_named(shadow_mode, hide1_shadow_mode, int, 0600);
 MODULE_PARM_DESC(shadow_mode,
                  "Shadow isolation mode: 0=all, 1=i_op, 2=f_op, 3=d_op, 4=fuse-ro");
 
+/* Kernel-specific probes are opt-in diagnostics, not core data-plane hooks. */
+static bool hide1_diagnostic_probes;
+module_param_named(diagnostic_probes, hide1_diagnostic_probes, bool, 0600);
+MODULE_PARM_DESC(diagnostic_probes,
+                 "Register experimental symlink diagnostic probes");
+
+/* The errno bridge is an explicitly enabled lab experiment. */
+static bool hide1_symlink_errno_bridge;
+module_param_named(symlink_errno_bridge, hide1_symlink_errno_bridge, bool, 0600);
+MODULE_PARM_DESC(symlink_errno_bridge,
+                 "Normalize matching security_inode_symlink -EACCES to -ENOENT");
+
 struct hide1_binding;
 
 struct hide1_iop_meta {
@@ -188,6 +200,20 @@ static atomic64_t hide1_inode_security_stage_zero = ATOMIC64_INIT(0);
 static atomic64_t hide1_inode_security_stage_eacces = ATOMIC64_INIT(0);
 static atomic64_t hide1_inode_security_stage_other = ATOMIC64_INIT(0);
 static atomic64_t hide1_inode_security_bridge_enoent = ATOMIC64_INIT(0);
+static atomic64_t hide1_observer_state_rejects = ATOMIC64_INIT(0);
+static atomic64_t hide1_observer_namespace_rejects = ATOMIC64_INIT(0);
+static atomic64_t hide1_observer_generation_rejects = ATOMIC64_INIT(0);
+static atomic64_t hide1_observer_task_rejects = ATOMIC64_INIT(0);
+static atomic64_t hide1_observer_uid_rejects = ATOMIC64_INIT(0);
+static atomic64_t hide1_observer_matches = ATOMIC64_INIT(0);
+static DEFINE_SPINLOCK(hide1_observer_diag_lock);
+static u32 hide1_last_observer_reason;
+static u32 hide1_last_observer_tgid;
+static u32 hide1_last_observer_fsuid;
+static u64 hide1_last_observer_mnt_ns;
+static u64 hide1_last_callback_parent_inode;
+static u32 hide1_last_callback_basename_length;
+static char hide1_last_callback_basename[PATHGUARD_HIDE1_NAME_MAX + 1U];
 static atomic_t hide1_symlink_stage_active = ATOMIC_INIT(0);
 static DECLARE_WAIT_QUEUE_HEAD(hide1_symlink_stage_wait);
 static bool hide1_may_create_stage_registered;
@@ -299,6 +325,22 @@ static void hide1_reset_observation_counters(void)
     atomic64_set(&hide1_inode_security_stage_eacces, 0);
     atomic64_set(&hide1_inode_security_stage_other, 0);
     atomic64_set(&hide1_inode_security_bridge_enoent, 0);
+    atomic64_set(&hide1_observer_state_rejects, 0);
+    atomic64_set(&hide1_observer_namespace_rejects, 0);
+    atomic64_set(&hide1_observer_generation_rejects, 0);
+    atomic64_set(&hide1_observer_task_rejects, 0);
+    atomic64_set(&hide1_observer_uid_rejects, 0);
+    atomic64_set(&hide1_observer_matches, 0);
+    spin_lock(&hide1_observer_diag_lock);
+    hide1_last_observer_reason = PATHGUARD_HIDE1_OBSERVER_STATE_INACTIVE;
+    hide1_last_observer_tgid = 0;
+    hide1_last_observer_fsuid = 0;
+    hide1_last_observer_mnt_ns = 0;
+    hide1_last_callback_parent_inode = 0;
+    hide1_last_callback_basename_length = 0;
+    memset(hide1_last_callback_basename, 0,
+           sizeof(hide1_last_callback_basename));
+    spin_unlock(&hide1_observer_diag_lock);
     for (operation = 0; operation < HIDE1_MUTATION_COUNT; ++operation) {
         atomic64_set(&hide1_mutation_by_operation[operation].calls, 0);
         atomic64_set(&hide1_mutation_by_operation[operation].blocked, 0);
@@ -360,24 +402,49 @@ static void hide1_callback_exit(atomic_t *global, atomic_t *local,
 
 static int hide1_preflight_dentry_restore(struct hide1_binding *binding)
 {
-    const struct hide1_dentry_shadow *meta;
-    unsigned long flags;
-    int ret = 0;
+    if (!binding)
+        return -EINVAL;
+    /* Ownership is checked per object by hide1_restore_dentry_shadows().
+     * A foreign d_op is not an uninstall blocker: it means this dentry is
+     * already detached from our ingress and must not be overwritten. */
+    return 0;
+}
+
+static int hide1_preflight_all_ingress_pointers(
+    struct hide1_binding *binding)
+{
+    struct hide1_dentry_shadow *meta;
+    struct inode *inode;
 
     if (!binding)
         return -EINVAL;
-    spin_lock_irqsave(&binding->dentry_lock, flags);
+
+    /* Preflight all ingress pointers before STOP_NEW publishes any restore.
+     * A foreign owner means the object changed while the shadow was live;
+     * abort the transaction instead of overwriting that owner's vector. */
+    inode = binding->parent_inode;
+    if (binding->shadow.iop_installed && binding->shadow.iop_meta && inode &&
+        READ_ONCE(inode->i_op) != &binding->shadow.iop_meta->shadow)
+        return -EAGAIN;
+    if (binding->shadow.fop_installed && binding->shadow.fop_meta && inode &&
+        READ_ONCE(inode->i_fop) != &binding->shadow.fop_meta->ingress)
+        return -EAGAIN;
+    if (binding->shadow.hidden_iop_installed &&
+        binding->shadow.hidden_iop_meta && binding->hidden_inode &&
+        READ_ONCE(binding->hidden_inode->i_op) !=
+            &binding->shadow.hidden_iop_meta->shadow)
+        return -EAGAIN;
+
     list_for_each_entry(meta, &binding->dentry_shadows, node) {
+        const struct dentry_operations *dop;
+
         spin_lock(&meta->dentry->d_lock);
-        if (READ_ONCE(meta->dentry->d_op) != &meta->shadow_dop &&
-            READ_ONCE(meta->dentry->d_op) != meta->orig_dop)
-            ret = -EAGAIN;
+        dop = READ_ONCE(meta->dentry->d_op);
         spin_unlock(&meta->dentry->d_lock);
-        if (ret)
-            break;
+        if (dop != &meta->shadow_dop && dop != meta->orig_dop)
+            return -EAGAIN;
     }
-    spin_unlock_irqrestore(&binding->dentry_lock, flags);
-    return ret;
+    return 0;
 }
 
 static struct dentry *hide1_lookup(struct inode *, struct dentry *, unsigned int);
@@ -508,18 +575,68 @@ static void hide1_dop_stale_workfn(struct work_struct *work)
 
 static bool hide1_is_target_observer(const struct hide1_binding *binding)
 {
+    const struct nsproxy *nsproxy = current->nsproxy;
+    struct mnt_namespace *mnt_ns = nsproxy ? nsproxy->mnt_ns : NULL;
+    const u32 fsuid = __kuid_val(current_fsuid());
+    const struct ns_common *common = mnt_ns ? from_mnt_ns(mnt_ns) : NULL;
+    unsigned long flags;
+    u32 reason;
+
     if (!binding || READ_ONCE(binding->retiring) ||
-        READ_ONCE(hide1_status.state) != PATHGUARD_HIDE1_STATE_ACTIVE)
-        return false;
-    if (!current->nsproxy || current->nsproxy->mnt_ns != binding->target_mnt_ns)
-        return false;
-    if (READ_ONCE(hide1_status.generation) != binding->rule.expected_generation)
-        return false;
-    if (!binding->target_task ||
-        (READ_ONCE(binding->target_task->flags) & PF_EXITING) ||
-        !same_thread_group(current, binding->target_task))
-        return false;
-    return __kuid_val(current_fsuid()) == binding->rule.target_uid;
+        READ_ONCE(hide1_status.state) != PATHGUARD_HIDE1_STATE_ACTIVE) {
+        reason = PATHGUARD_HIDE1_OBSERVER_STATE_MISMATCH;
+        atomic64_inc(&hide1_observer_state_rejects);
+    } else if (!mnt_ns || mnt_ns != binding->target_mnt_ns
+               || current->nsproxy->mnt_ns != binding->target_mnt_ns) {
+        reason = PATHGUARD_HIDE1_OBSERVER_NAMESPACE_MISMATCH;
+        atomic64_inc(&hide1_observer_namespace_rejects);
+    } else if (READ_ONCE(hide1_status.generation) !=
+               binding->rule.expected_generation) {
+        reason = PATHGUARD_HIDE1_OBSERVER_GENERATION_MISMATCH;
+        atomic64_inc(&hide1_observer_generation_rejects);
+    } else if (!binding->target_task ||
+               (READ_ONCE(binding->target_task->flags) & PF_EXITING) ||
+               !same_thread_group(current, binding->target_task)) {
+        reason = PATHGUARD_HIDE1_OBSERVER_TASK_MISMATCH;
+        atomic64_inc(&hide1_observer_task_rejects);
+    } else if (fsuid != binding->rule.target_uid) {
+        reason = PATHGUARD_HIDE1_OBSERVER_UID_MISMATCH;
+        atomic64_inc(&hide1_observer_uid_rejects);
+    } else {
+        reason = PATHGUARD_HIDE1_OBSERVER_MATCHED;
+        atomic64_inc(&hide1_observer_matches);
+    }
+
+    spin_lock_irqsave(&hide1_observer_diag_lock, flags);
+    hide1_last_observer_reason = reason;
+    hide1_last_observer_tgid = task_tgid_nr(current);
+    hide1_last_observer_fsuid = fsuid;
+    hide1_last_observer_mnt_ns = common ? common->inum : 0;
+    spin_unlock_irqrestore(&hide1_observer_diag_lock, flags);
+    return reason == PATHGUARD_HIDE1_OBSERVER_MATCHED;
+}
+
+static void hide1_record_callback_name(const struct inode *parent,
+                                      const char *name, size_t name_length)
+{
+    unsigned long flags;
+    size_t length = min_t(size_t, name_length, PATHGUARD_HIDE1_NAME_MAX);
+
+    spin_lock_irqsave(&hide1_observer_diag_lock, flags);
+    hide1_last_callback_parent_inode = parent ? parent->i_ino : 0;
+    hide1_last_callback_basename_length = length;
+    if (length)
+        memcpy(hide1_last_callback_basename, name, length);
+    hide1_last_callback_basename[length] = '\0';
+    spin_unlock_irqrestore(&hide1_observer_diag_lock, flags);
+}
+
+static void hide1_record_callback(const struct inode *parent,
+                                 const struct dentry *dentry)
+{
+    hide1_record_callback_name(parent,
+                               dentry ? dentry->d_name.name : NULL,
+                               dentry ? dentry->d_name.len : 0);
 }
 
 /* A target task is pinned for the lifetime of the binding, so its task_struct
@@ -530,6 +647,43 @@ static bool hide1_target_exited_locked(const struct hide1_binding *binding)
 {
     return binding && binding->target_task &&
            (READ_ONCE(binding->target_task->flags) & PF_EXITING);
+}
+
+/* Existing file objects retain their original f_op.  ENABLE therefore fails
+ * closed when the target already has a descriptor for a governed directory;
+ * silently activating would leave an observable readdir path outside the
+ * bridge. */
+static bool hide1_target_has_open_inode(const struct hide1_binding *binding,
+                                        const struct inode *inode)
+{
+    struct files_struct *files;
+    struct fdtable *fdt;
+    unsigned int fd;
+    bool found = false;
+
+    if (!binding || !binding->target_task || !inode)
+        return false;
+    task_lock(binding->target_task);
+    files = binding->target_task->files;
+    if (files)
+        atomic_inc(&files->count);
+    task_unlock(binding->target_task);
+    if (!files)
+        return false;
+
+    spin_lock(&files->file_lock);
+    fdt = files_fdtable(files);
+    for (fd = 0; fd < fdt->max_fds; ++fd) {
+        struct file *file = fdt->fd[fd];
+
+        if (file && file_inode(file) == inode) {
+            found = true;
+            break;
+        }
+    }
+    spin_unlock(&files->file_lock);
+    put_files_struct(files);
+    return found;
 }
 
 static void hide1_revoke_dead_target_locked(void)
@@ -596,6 +750,10 @@ static bool hide1_should_hide(const struct hide1_binding *binding,
                               const struct inode *parent,
                               const struct dentry *dentry)
 {
+    /* VFS operation callbacks do not carry a vfsmount.  The fixed lab scope
+     * therefore intentionally collapses aliases to the same superblock/inode
+     * identity inside one mount namespace; a different namespace is rejected
+     * by hide1_is_target_observer(). */
     return hide1_is_target_observer(binding) &&
            parent && parent->i_sb == binding->parent_sb &&
            parent->i_ino == binding->parent_inode->i_ino &&
@@ -1254,7 +1412,6 @@ static int hide1_restore_dentry_shadows(struct hide1_binding *binding,
 {
     struct hide1_dentry_shadow *meta;
     unsigned long flags;
-    int ret = 0;
 
     if (!retired)
         return -EINVAL;
@@ -1278,8 +1435,11 @@ static int hide1_restore_dentry_shadows(struct hide1_binding *binding,
              * the shadow.  The dget held by meta keeps it alive until drain. */
             drop = true;
         } else if (READ_ONCE(meta->dentry->d_op) != meta->orig_dop) {
-            /* Another owner replaced the vector while the shadow was live. */
-            ret = -EAGAIN;
+            /* Another owner replaced the vector while the shadow was live.
+             * Do not clobber that owner.  Since the dentry no longer points
+             * at our shadow, removing our index and draining in-flight
+             * callbacks is sufficient for a complete, safe restore. */
+            pr_warn_ratelimited("pathguard_hide1: dentry owner changed during restore\n");
         }
         spin_unlock(&meta->dentry->d_lock);
         spin_lock(&hide1_meta_lock);
@@ -1288,7 +1448,7 @@ static int hide1_restore_dentry_shadows(struct hide1_binding *binding,
         if (drop)
             d_drop(meta->dentry);
     }
-    return ret;
+    return 0;
 }
 
 static void hide1_free_dentry_shadows(struct list_head *retired)
@@ -1444,6 +1604,7 @@ static struct dentry *hide1_lookup(struct inode *dir, struct dentry *dentry,
     struct dentry *ret;
 
     atomic64_inc(&hide1_lookup_calls);
+    hide1_record_callback(dir, dentry);
     if (!binding)
         return ERR_PTR(-EIO);
 
@@ -1521,6 +1682,7 @@ static int hide1_atomic_open(struct inode *dir, struct dentry *dentry,
     int ret;
 
     atomic64_inc(&hide1_atomic_open_calls);
+    hide1_record_callback(dir, dentry);
     if (!binding) {
         srcu_read_unlock(&hide1_srcu, idx);
         return -EIO;
@@ -1608,6 +1770,9 @@ static bool hide1_dir_actor(struct dir_context *ctx, const char *name,
 {
     struct hide1_dir_proxy *proxy = container_of(ctx, struct hide1_dir_proxy, ctx);
 
+    if (proxy->dir_inode == proxy->binding->parent_inode) {
+        hide1_record_callback_name(proxy->dir_inode, name, namelen);
+    }
     if (proxy->dir_inode == proxy->binding->parent_inode &&
         hide1_is_target_observer(proxy->binding) &&
         namelen == strlen(proxy->binding->rule.basename) &&
@@ -1642,6 +1807,7 @@ static int hide1_iterate_shared(struct file *file, struct dir_context *ctx)
     int ret;
 
     atomic64_inc(&hide1_readdir_calls);
+    hide1_record_callback(file_inode(file), file->f_path.dentry);
     if (!binding)
         return -EIO;
     idx = srcu_read_lock(&hide1_srcu);
@@ -1683,6 +1849,7 @@ static int hide1_d_revalidate(struct dentry *dentry, unsigned int flags)
     int ret;
 
     atomic64_inc(&hide1_d_revalidate_calls);
+    hide1_record_callback(d_backing_inode(dentry->d_parent), dentry);
     idx = srcu_read_lock(&hide1_srcu);
     meta = hide1_dop_enter(dentry);
     binding = meta ? meta->binding : NULL;
@@ -1691,6 +1858,16 @@ static int hide1_d_revalidate(struct dentry *dentry, unsigned int flags)
         return 1;
     }
     synthetic_negative = READ_ONCE(meta->synthetic_negative);
+    if (synthetic_negative) {
+        /* The dcache is shared by observers.  A control observer can make a
+         * previously synthetic negative dentry positive; clear the target-
+         * only marker before evaluating the normal governed-positive path. */
+        if (!d_is_negative(dentry)) {
+            WRITE_ONCE(meta->synthetic_negative, false);
+            WRITE_ONCE(meta->cache_generation, 0);
+            synthetic_negative = false;
+        }
+    }
     if (synthetic_negative) {
         if (hide1_dentry_should_hide(
                 binding, d_backing_inode(dentry->d_parent), dentry) &&
@@ -2084,6 +2261,13 @@ static int hide1_shadow_install_locked(struct hide1_binding *binding)
         shadow->fop_meta = fm;
         smp_store_release(&inode->i_fop, &fm->ingress);
         shadow->fop_installed = true;
+
+        /* Existing target directory files retain the original f_op.  Refuse
+         * activation before publishing a partially effective policy. */
+        if (hide1_target_has_open_inode(binding, inode)) {
+            ret = -EBUSY;
+            goto rollback;
+        }
     }
 
     ret = hide1_mode_has_dop() ?
@@ -2098,6 +2282,12 @@ static int hide1_shadow_install_locked(struct hide1_binding *binding)
     ret = hide1_install_named_object_shadows(binding);
     if (ret && ret != -ENOENT)
         goto rollback;
+    if (hide1_mode_has_fop() && binding->hidden_inode &&
+        S_ISDIR(binding->hidden_inode->i_mode) &&
+        hide1_target_has_open_inode(binding, binding->hidden_inode)) {
+        ret = -EBUSY;
+        goto rollback;
+    }
     return 0;
 
 rollback:
@@ -2167,32 +2357,17 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
     ret = hide1_preflight_dentry_restore(binding);
     if (ret)
         return ret;
+    /* Preflight all ingress pointers before STOP_NEW; a foreign vector makes
+     * the transactional restore unsafe and returns -EAGAIN. */
+    ret = hide1_preflight_all_ingress_pointers(binding);
+    if (ret)
+        /* A foreign ingress must make this transaction return -EAGAIN. */
+        return ret;
 
-    /* Preflight all ingress pointers.  If another subsystem replaced one,
-     * leave every shadow and its metadata untouched for an explicit retry. */
-    if (shadow->fop_installed &&
-        (!inode || !shadow->fop_meta ||
-         READ_ONCE(inode->i_fop) != &shadow->fop_meta->ingress))
-        return -EAGAIN;
-    if (shadow->iop_installed &&
-        (!inode || !shadow->iop_meta ||
-         READ_ONCE(inode->i_op) != &shadow->iop_meta->shadow))
-        return -EAGAIN;
-    {
-        struct hide1_iop_meta *hidden_meta;
-        unsigned long flags;
-        spin_lock_irqsave(&binding->hidden_iop_lock, flags);
-        list_for_each_entry(hidden_meta, &binding->hidden_iop_metas,
-                            binding_node) {
-            if (!hidden_meta->inode ||
-                READ_ONCE(hidden_meta->inode->i_op) != &hidden_meta->shadow) {
-                spin_unlock_irqrestore(&binding->hidden_iop_lock, flags);
-                return -EAGAIN;
-            }
-        }
-        spin_unlock_irqrestore(&binding->hidden_iop_lock, flags);
-    }
-
+    /* Ingress ownership is checked per object during RESTORE.  FUSE and
+     * other filesystem code may replace an operation table while the rule
+     * is active.  Such an object is already detached from our ingress and
+     * must not block module teardown or be overwritten. */
     if (!shadow->iop_installed && !shadow->hidden_iop_installed &&
         !shadow->fop_installed &&
         list_empty(&binding->dentry_shadows))
@@ -2203,9 +2378,11 @@ static int hide1_shadow_uninstall_locked(struct hide1_binding *binding)
     WRITE_ONCE(binding->retiring, true);
     WRITE_ONCE(hide1_status.state, PATHGUARD_HIDE1_STATE_INACTIVE);
 
-    if (shadow->fop_installed)
+    if (shadow->fop_installed && shadow->fop_meta && inode &&
+        READ_ONCE(inode->i_fop) == &shadow->fop_meta->ingress)
         smp_store_release(&inode->i_fop, shadow->orig_fop);
-    if (shadow->iop_installed)
+    if (shadow->iop_installed && shadow->iop_meta && inode &&
+        READ_ONCE(inode->i_op) == &shadow->iop_meta->shadow)
         smp_store_release(&inode->i_op, shadow->orig_iop);
     shadow->fop_installed = false;
     shadow->iop_installed = false;
@@ -2637,6 +2814,34 @@ static long hide1_ioctl(struct file *file, unsigned int command,
         hide1_revoke_dead_target_locked();
         status = hide1_status;
         status.lifecycle = hide1_lifecycle;
+        status.observer_state_rejects =
+            atomic64_read(&hide1_observer_state_rejects);
+        status.observer_namespace_rejects =
+            atomic64_read(&hide1_observer_namespace_rejects);
+        status.observer_generation_rejects =
+            atomic64_read(&hide1_observer_generation_rejects);
+        status.observer_task_rejects =
+            atomic64_read(&hide1_observer_task_rejects);
+        status.observer_uid_rejects =
+            atomic64_read(&hide1_observer_uid_rejects);
+        status.observer_matches = atomic64_read(&hide1_observer_matches);
+        {
+            unsigned long flags;
+
+            spin_lock_irqsave(&hide1_observer_diag_lock, flags);
+            status.last_observer_reason = hide1_last_observer_reason;
+            status.last_observer_tgid = hide1_last_observer_tgid;
+            status.last_observer_fsuid = hide1_last_observer_fsuid;
+            status.last_observer_mnt_ns = hide1_last_observer_mnt_ns;
+            status.last_callback_parent_inode =
+                hide1_last_callback_parent_inode;
+            status.last_callback_basename_length =
+                hide1_last_callback_basename_length;
+            memcpy(status.last_callback_basename,
+                   hide1_last_callback_basename,
+                   sizeof(status.last_callback_basename));
+            spin_unlock_irqrestore(&hide1_observer_diag_lock, flags);
+        }
         status.lookup_calls = atomic64_read(&hide1_lookup_calls);
         status.lookup_hidden = atomic64_read(&hide1_lookup_hidden);
         status.atomic_open_calls = atomic64_read(&hide1_atomic_open_calls);
@@ -2778,6 +2983,9 @@ static int hide1_register_diagnostic_probes(void)
 {
     int ret;
 
+    if (!READ_ONCE(hide1_diagnostic_probes))
+        return 0;
+
     ret = register_kprobe(&hide1_symlink_probe);
     if (ret)
         return ret;
@@ -2790,10 +2998,12 @@ static int hide1_register_diagnostic_probes(void)
     if (ret)
         goto rollback;
     WRITE_ONCE(hide1_may_create_stage_registered, true);
-    ret = register_kretprobe(&hide1_inode_security_stage_probe);
-    if (ret)
-        goto rollback;
-    WRITE_ONCE(hide1_inode_security_stage_registered, true);
+    if (READ_ONCE(hide1_symlink_errno_bridge)) {
+        ret = register_kretprobe(&hide1_inode_security_stage_probe);
+        if (ret)
+            goto rollback;
+        WRITE_ONCE(hide1_inode_security_stage_registered, true);
+    }
     return 0;
 
 rollback:
@@ -2824,7 +3034,7 @@ static int __init hide1_init(void)
     hide1_status.last_error = -EOPNOTSUPP;
     ret = hide1_register_diagnostic_probes();
     if (ret)
-        return ret;
+        pr_warn("pathguard_hide1: diagnostic probes unavailable: %d\n", ret);
     ret = misc_register(&hide1_device);
     if (ret)
         hide1_unregister_diagnostic_probes();
@@ -2846,4 +3056,4 @@ module_exit(hide1_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("PathGuard");
 MODULE_DESCRIPTION("PathGuard Hide 1.0 fixed-device VFS shadow prototype");
-MODULE_VERSION("0.8.0-symlink-enoent-bridge");
+MODULE_VERSION("0.9.0-cache-fd-gate");

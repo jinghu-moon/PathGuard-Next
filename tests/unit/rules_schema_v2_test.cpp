@@ -46,6 +46,9 @@ redirect_rules = [
   { select = { root = "Pictures", glob = "IMG_*.jpg", type = "file" }, to = "Download/images", priority = 7, preserve = "relative", collision = "reject" },
   { select = { root = "Download", glob = "literal.txt", type = "any" }, to = "Download/text" },
 ]
+hide_rules = [
+  { parent = "/storage/emulated/0/Pictures", basename = "hidden" },
+]
 )";
     const auto parsed = Parse(valid);
     assert(parsed.ok());
@@ -59,10 +62,16 @@ redirect_rules = [
     assert(app.actions[0].enforcement == RuleEnforcement::kProvider);
     assert(app.actions[1].preserve == PreserveMode::kRelative);
     assert(app.actions[1].collision == CollisionPolicy::kReject);
+    assert(app.hide_rules.size() == 1);
+    assert(app.hide_rules.front().parent == "/storage/emulated/0/Pictures");
+    assert(app.hide_rules.front().basename == "hidden");
 
     const auto built = BuildCanonicalPolicyV2(*parsed.document, RulesLimits{});
     assert(built.ok());
     assert(built.canonical->apps.front().actions.size() == 3);
+    assert(built.canonical->apps.front().hide_rules.size() == 1);
+    assert(built.canonical->apps.front().hide_rules.front().package
+           == "org.localsend.localsend_app");
     const auto& actions = built.canonical->apps.front().actions;
     assert(std::count_if(actions.begin(), actions.end(),
         [](const CanonicalActionV2& action) {
@@ -80,6 +89,12 @@ redirect_rules = [
                "enforcement=\"sometimes\"}]\n", kInvalidValue);
     ExpectCode("format = 2\n[apps.\"com.example.app\"]\n"
                "deny_rules=[{select={root=\"Pictures\",glob=\"*.tmp\"}}]\n",
+               kInvalidValue);
+    ExpectCode("format = 2\n[apps.\"com.example.app\"]\n"
+               "hide_rules=[{parent=\"Pictures\",basename=\"hidden\"}]\n",
+               kInvalidValue);
+    ExpectCode("format = 2\n[apps.\"com.example.app\"]\n"
+               "hide_rules=[{parent=\"/Pictures\",basename=\"a/b\"}]\n",
                kInvalidValue);
     ExpectCode("format = 2\n[apps.\"com.example.app\"]\n"
                "redirect_rules=[{select={root=\"Pictures\",glob=\"*.jpg\"},"

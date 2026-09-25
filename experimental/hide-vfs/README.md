@@ -33,10 +33,10 @@ It remains an experiment and cannot be admitted as Hide 1.0 without HideLab
 cache, namespace, concurrency and lifecycle evidence.
 
 The f_op bridge applies to directory files opened after ENABLE. A directory FD
-that was opened before ENABLE retains the filesystem's original `file->f_op` and
-is therefore an explicit read-only regression case, not an implicit pass. The
-device gate must close or recreate such FDs before claiming readdir coverage;
-otherwise the result is a LEAK and mode 4 remains unsupported.
+that was opened before ENABLE retains the filesystem's original `file->f_op`,
+so ENABLE now returns `-EBUSY` when the target already owns a descriptor for
+the governed parent or hidden directory. The caller must close/recreate those
+FDs and retry; this is fail-closed activation, not an implicit pass.
 
 The install caller must already be in the target mount namespace. This is an
 intentional fail-closed constraint: `kern_path()` resolves in the caller's
@@ -60,7 +60,9 @@ regression requirements remain mandatory.
 `hide1_control` supports `status`, `install`, `enable`, `disable`, and `clear`.
 The status line also exposes read-only mode-4 counters for lookup,
 atomic_open, readdir, dentry revalidation, and dentry shadow installation.
-ABI v5 registers diagnostic-only `do_symlinkat` and `vfs_symlink`
+Diagnostic probes are opt-in (`diagnostic_probes=1`) and are never required for
+the core module to load. With `symlink_errno_bridge=1`, ABI v5 registers
+diagnostic-only `do_symlinkat` and `vfs_symlink`
 kprobes. The former's
 `symlink_probe=registered/calls/target/fd/hidden_fd` counters verify whether a
 target call's `newdfd` resolves to the governed hidden directory inode. The
@@ -73,6 +75,10 @@ after `filename_create()`. Neither probe reads pathname contents, redirects
 execution, changes registers, or changes a syscall result.
 `DISABLE` preserves an inactive binding; `CLEAR` releases it. Failed replacement
 installs are transactional and preserve the previous binding.
+
+The dentry cache is shared across observers. Synthetic-negative metadata is
+cleared when another observer revalidates the dentry and it becomes positive;
+the target-only marker is never allowed to survive a positive cache entry.
 
 This prototype is not part of the production module. It must pass the complete
 HideLab matrix, including warm positive dentries, concurrent access, lifecycle

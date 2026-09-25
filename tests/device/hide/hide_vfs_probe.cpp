@@ -1053,6 +1053,7 @@ int pathguard::hide_probe::RunHideVfsProbe(
     }
     if (scenario != "baseline" && scenario != "cache-order"
         && scenario != "concurrency" && scenario != "reliability"
+        && scenario != "mutation"
         && scenario != "prepare-hidden-fd"
         && scenario != "preopen-hidden-fd"
         && scenario != "symlink-held-fd") {

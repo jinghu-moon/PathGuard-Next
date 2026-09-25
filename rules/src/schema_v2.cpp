@@ -531,11 +531,58 @@ private:
         return valid;
     }
 
+    bool DecodeHideRules(const toml::node& node, const std::string& path,
+                         AppRulesV2* app) {
+        const toml::array* rules = node.as_array();
+        if (rules == nullptr) {
+            Add(kTypeMismatch, "rules.hide_array_required",
+                SourceSpan(source_, node.source()), path);
+            return false;
+        }
+        bool valid = true;
+        std::size_t index = 0;
+        for (const toml::node& rule_node : *rules) {
+            const toml::table* table = rule_node.as_table();
+            const std::string rule_path = path + "/" + std::to_string(index++);
+            if (table == nullptr) {
+                Add(kTypeMismatch, "rules.hide_table_required",
+                    SourceSpan(source_, rule_node.source()), rule_path);
+                valid = false;
+                continue;
+            }
+            valid = CheckFields(*table, {"parent", "basename"}, rule_path) && valid;
+            const toml::node* parent = table->get("parent");
+            const toml::node* basename = table->get("basename");
+            const auto parent_value = parent ? parent->value<std::string>() : std::nullopt;
+            const auto basename_value = basename ? basename->value<std::string>() : std::nullopt;
+            if (!parent_value || parent_value->empty() || parent_value->front() != '/') {
+                Add(kInvalidValue, "rules.hide_parent_absolute_required",
+                    parent ? SourceSpan(source_, parent->source()) : SourceSpan(source_, table->source()),
+                    rule_path + "/parent");
+                valid = false;
+            }
+            if (!basename_value || basename_value->empty() || *basename_value == "."
+                || *basename_value == ".." || basename_value->find('/') != std::string::npos) {
+                Add(kInvalidValue, "rules.hide_basename_required",
+                    basename ? SourceSpan(source_, basename->source()) : SourceSpan(source_, table->source()),
+                    rule_path + "/basename");
+                valid = false;
+            }
+            if (parent_value && basename_value && !parent_value->empty()
+                && parent_value->front() == '/' && !basename_value->empty()
+                && *basename_value != "." && *basename_value != ".."
+                && basename_value->find('/') == std::string::npos) {
+                app->hide_rules.push_back({*parent_value, *basename_value});
+            }
+        }
+        return valid;
+    }
+
     bool DecodeApp(const toml::table& table, const std::string& path,
                    AppRulesV2* app) {
         bool valid = CheckFields(table,
             {"enabled", "users", "processes", "provider", "deny_rules",
-             "redirect_rules", "observe_rules", "export_rules"}, path);
+             "redirect_rules", "observe_rules", "export_rules", "hide_rules"}, path);
         valid = DecodeBool(table, "enabled", path + "/enabled", &app->enabled)
             && valid;
         if (const toml::node* users = table.get("users")) {
@@ -565,7 +612,11 @@ private:
             valid = DecodeActions(*export_rules, RuleActionKind::kExport,
                                   path + "/export_rules", app) && valid;
         }
-        if (app->actions.size() > limits_.max_rules_per_app) {
+        if (const toml::node* hide_rules = table.get("hide_rules")) {
+            valid = DecodeHideRules(*hide_rules, path + "/hide_rules", app) && valid;
+        }
+        if (app->actions.size() > limits_.max_rules_per_app
+            || app->hide_rules.size() > limits_.max_rules_per_app) {
             Add(kResourceLimit, "rules.app_rule_limit",
                 SourceSpan(source_, table.source()), path);
             valid = false;
@@ -617,6 +668,11 @@ RulesV2BuildResult BuildCanonicalPolicyV2(
         canonical_app.users = app.users;
         canonical_app.processes = app.processes;
         canonical_app.provider = app.provider;
+        canonical_app.hide_rules.reserve(app.hide_rules.size());
+        for (const HideRuleInputV2& hide : app.hide_rules) {
+            canonical_app.hide_rules.push_back({
+                app.package, app.users, app.processes, hide.parent, hide.basename});
+        }
         std::size_t token_total = 0;
         std::size_t except_total = 0;
         for (const ActionRuleInputV2& action : app.actions) {

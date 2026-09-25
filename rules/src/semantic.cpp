@@ -148,6 +148,11 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
         app.actions = std::move(unique);
     }
 
+    for (const CanonicalAppPolicyV2& app : built.canonical->apps) {
+        output.hide_rules.insert(output.hide_rules.end(),
+                                 app.hide_rules.begin(), app.hide_rules.end());
+    }
+
     pathguard::PolicyV6 policy;
     policy.allow_legacy_mount = built.canonical->allow_legacy_mount;
     for (const CanonicalAppPolicyV2& source_app : built.canonical->apps) {
@@ -266,7 +271,9 @@ RulesBuildResult CompileRules(const SourceBuffer& source,
             }
             package.actions.push_back(std::move(action));
         }
-        policy.packages.push_back(std::move(package));
+        if (!package.actions.empty()) {
+            policy.packages.push_back(std::move(package));
+        }
     }
     PolicyBlob blob;
     std::string encode_error;

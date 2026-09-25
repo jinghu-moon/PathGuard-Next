@@ -3862,6 +3862,258 @@ KPM load/status/unload、inline hook、syscall/namei 行为修改或 mutation。
 Hide 1.0 = unsupported
 ```
 
+## 2026-09-23：自动启动实验路径修正
+
+此前“每次 reboot 删除 admission.json、仅允许手工 evidence”的包行为与当前要求安装
+模块后自动加载冲突。本轮明确分离两条路径：正式 admission evidence 仍然要求完整
+HideLab 回归；固定 `myron` 实验包则使用单设备 profile 和实际 LKM 哈希完成启动期准入，
+再由 daemon 对 boot-state、当前 kernel、模块 live 状态和规则事务做二次校验。该 profile
+只是实验设备 allowlist，`product_state` 仍为 `unsupported`。
+
+SukiSU `ksud` 源码确认 loader 形式为 `ksud insmod <module> key=value...`。启动脚本
+使用 `shadow_mode=0`，并在 loader 返回后核对 `/proc/modules`、`/sys/module` 和设备
+节点，避免把命令返回成功误判为模块已加载。新包的 profile SHA-256 与归档内 `.ko`
+已离线核对一致。
+
+## 轮次 92：DDK topology-v1 真机最小回调实验（2026-09-21）
+
+安装 `pathguard-hide1-lab-myron-ddk-topology-v1.zip` 后，手动执行：
+
+```text
+load -> INSTALL 18001 -> ENABLE 23157 18001
+```
+
+模块进入 `ACTIVE/RUNNING`，设备 boot_id 未变化，target PID `23157` 与 mount
+namespace `4026536041` 在回归期间保持不变。使用同一 disposable fixture 执行只读
+baseline，证据为：
+
+```text
+build/device-evidence/hidelab-baseline/20260921-134236/summary.json
+```
+
+结果：
+
+```text
+conclusion = LEAK
+fixture_unchanged = true
+target_oracle_changed = false
+lookup = 0
+atomic_open = 0
+readdir = 0
+d_revalidate = 0
+mutation = 6/0/6/0
+```
+
+目标 UID 仍可通过 Java File/NIO 和 direct VFS 访问 governed hidden directory；
+父 inode 的 operation mask 虽为 `0x0fff`，但任何真实 Hide 回调均未命中。这与上一轮
+v12 的现象一致，证明 `i_op` shadow 不是当前 FUSE/namei 拓扑的实际 ingress，不能继续
+通过扩大 operation-table wrapper 伪造隐藏能力。
+
+清理动作全部成功：
+
+```text
+DISABLE -> CLEAR -> rmmod
+state=UNSUPPORTED, lifecycle=FREE
+```
+
+本轮没有执行 mutation，产品状态保持：
+
+```text
+Hide 1.0 = unsupported
+```
+
+## 轮次 93：generation 18003 d_op mode 3 真机回归（2026-09-21）
+
+在重新创建 disposable fixture、固定 target PID `24203`、UID `10552` 和 mount
+namespace `4026536042` 后，加载 `pathguard-hide1-lab-myron-ddk-topology-v1.zip`，
+执行 `INSTALL -> ENABLE 18003`。模块进入 `ACTIVE/RUNNING`，设备 boot_id 未变化。
+
+设备状态关键计数：
+
+```text
+d_revalidate=21/0
+dentry_install=5/5/0
+lookup=0/0
+atomic_open=0/0
+readdir=0/0
+mutation=1/0/1/0
+```
+
+同一 fixture 的只读 HideLab baseline 证据为：
+
+```text
+build/device-evidence/hidelab-mode3/20260921-135729/summary.json
+```
+
+结果：
+
+```text
+conclusion = LEAK
+fixture_unchanged = true
+target_oracle_changed = false
+target_error = LEAK: HideLab target Java path test exposed hidden target: java.external.0.exists
+```
+
+`d_revalidate` 和 dentry shadow 安装计数能够命中，证明 d_op 观察路径被安装；但
+`d_revalidate_hidden=0`，lookup/atomic_open/readdir 均未命中，Java File/NIO 仍可
+看到 governed hidden directory。因此 d_op observer 命中不等于 FUSE/namei 隐藏生效，
+不能宣布 mode 3 或 Hide 1.0 通过。
+
+恢复动作已独立完成：
+
+```text
+DISABLE -> CLEAR -> rmmod
+state=UNSUPPORTED, lifecycle=FREE
+```
+
+本轮没有执行 mutation，产品状态继续为：
+
+```text
+Hide 1.0 = unsupported
+```
+
+## 轮次 94：generation 18004 shadow mode 4 FUSE-aware 只读回归（2026-09-21，路径参数错误，证据作废）
+
+重新创建 disposable fixture 并固定 target PID `31510`、UID `10552`、mount namespace
+`4026536042`、parent inode `826907` 后，加载 `shadow_mode=4`，执行
+`INSTALL -> ENABLE 18004`。模块进入 `ACTIVE/RUNNING`，设备未重启。
+
+本轮原计划观察规则绑定的 `.../hidden` 目录，但执行命令错误地将
+`-ExistingHiddenPath` 设为 fixture 根目录 `.../20260921-141032`。因此 HideLab
+实际观察的是父目录，而内核规则绑定的是
+`parent=.../20260921-141032`、`basename=hidden`；测试对象与规则对象不一致。
+
+只读 HideLab 采集文件（仅保留作编排错误记录，不作为后端能力证据）：
+
+```text
+build/device-evidence/hidelab-mode4/20260921-162908/summary.json
+```
+
+结果：
+
+```text
+conclusion = LEAK
+fixture_unchanged = true
+target_oracle_changed = false
+target_error = LEAK: HideLab target Java path test exposed hidden target: java.external.0.exists
+```
+
+ENABLE 后累计状态：
+
+```text
+lookup=6/0
+atomic_open=0/0
+readdir=12/0
+revalidate=181/0
+dentry_install=2/2/0
+mutation=0/0/0/0
+```
+
+由于观察对象错误，本轮 `LEAK` 不能归因于 mode 4 后端，也不能作为有效的隐藏失败
+证据。后续若需要重跑，必须传入
+`/storage/emulated/0/Pictures/PathGuardHideLab/20260921-141032/hidden`，或使用
+`-FixtureRoot <root>` 让脚本自动派生 `/hidden`。
+
+本轮没有 mutation，不能把 observer 命中、ACTIVE 或 module load 解释为 Hide 1.0
+通过；产品状态仍保持 `unsupported`。
+
+恢复动作：
+
+```text
+DISABLE -> CLEAR -> rmmod
+state=UNSUPPORTED, lifecycle=FREE
+```
+
+产品状态继续为：
+
+```text
+Hide 1.0 = unsupported
+```
+
+## 轮次 91：myron FUSE/namei 拓扑确认（2026-09-21）
+
+重新使用当前 Android 16/6.12 DDK 构建了只读 preflight 与 coverage 探针，并在设备
+上完成加载、采集和卸载。coverage 结果确认必需入口全部注册：
+
+```text
+path_openat       registered=1
+iterate_dir       registered=1
+do_filp_open      registered=1
+```
+
+同时观察到 `fuse_atomic_open`、`fuse_readdir`、`fuse_dentry_revalidate`、
+`fuse_lookup`、`lookup_fast`、`lookup_slow`、`filename_lookup`、`link_path_walk`、
+`vfs_getattr` 和 `vfs_statx` 均有真实命中；`open_last_lookups` 与 `fuse_filldir` 未导出，
+不影响必需入口门槛。
+
+preflight 对三条 alias 的结果：
+
+```text
+/storage/emulated/0  fs=fuse inode=14139 sb=0xffffff8a5e00b800
+/sdcard              fs=fuse inode=14139 sb=0xffffff8a5e00b800
+/storage/self/primary fs=fuse inode=14139 sb=0xffffff8a5e00b800
+```
+
+三条 alias 共享同一 superblock 与父目录 operation table，但各自 mount/dentry 视图
+不同；fixture hidden 目录 inode 为 `782263`，仍在同一 fuse superblock 上。采集证据：
+
+```text
+build/device-evidence/vfs-topology/20260921-125729/topology.json
+```
+
+采集期间发现旧 Android reader 与当前预检 UAPI 的结构大小不一致，返回 `EINVAL`；已
+修正 reader 的显式 `uint64_t` 格式转换并使用当前 UAPI 重编，未修改内核行为。
+探针随后完成 `rmmod`，设备保持在线。
+
+拓扑结论：后续不能把 alias 的字符串路径当作独立 filesystem，也不能只依赖父 inode
+的 operation-table shadow；必须继续验证目标 FUSE 路径实际回调 ingress。产品状态仍为：
+
+```text
+Hide 1.0 = unsupported
+```
+
+## 轮次 90：v12 全量 active 回归与 operation-table 拓扑复核（2026-09-21）
+
+v12 在 myron 设备上完成了 `INSTALL -> ENABLE 17001`，设备保持在线且未发生重启。
+全量 active 回归证据保存在：
+
+```text
+build/device-evidence/hide1-regression/20260921-122331/full-regression.json
+```
+
+五组结果为：
+
+| 场景 | 结果 |
+|---|---|
+| baseline | `LEAK` |
+| cache-order | `LEAK` |
+| concurrency | `LEAK` |
+| reliability | `LEAK` |
+| mutation | `DESTRUCTIVE_FAIL` |
+
+模块状态曾进入 `ACTIVE`，但 `lookup`、`atomic_open`、`readdir`、`d_revalidate` 的
+回调计数均为 0；mutation 聚合计数为 `6/0/6/0`（calls/blocked/original/unsupported）。
+这说明当前 shadow 安装对象没有进入目标路径实际使用的 FUSE/namei 操作表，不能把
+`operation_mask` 非零或 ENABLE 成功解释为数据面生效。
+
+生命周期验证通过：
+
+```text
+DISABLE -> CLEAR -> rmmod
+state=UNSUPPORTED, lifecycle=FREE
+```
+
+因此本轮的产品结论仍为：
+
+```text
+Hide 1.0 = unsupported
+```
+
+后续验证必须先完成 `/storage/emulated/0`、`/sdcard`、`/storage/self/primary` 及
+fixture parent/hidden child 的 mount、superblock、inode、dentry、`i_op`、`f_op`、
+`d_op` 和 coverage 命中计数对照；在至少一个真实回调计数大于零之前，不构建“假修复”
+或扩大 mutation 行为面。
+
 ## 轮次 91：规则切换与生命周期回归（2026-09-21）
 
 本轮在同一 target PID `30544`、mount namespace `4026536066` 上验证规则切换和
@@ -4743,3 +4995,220 @@ Hide 1.0。恢复动作已成功完成，设备在线，产品状态继续为：
 ```text
 Hide 1.0 = unsupported
 ```
+
+## 轮次 90：fixture identity 修复后的真实 mode 0 full active 回归（2026-09-22）
+
+本轮先创建并固定 disposable fixture：
+
+```text
+fixture_root=/storage/emulated/0/Pictures/PathGuardHideLab/20260922-120338
+hidden_path=/storage/emulated/0/Pictures/PathGuardHideLab/20260922-120338/hidden
+parent_inode=427341
+target_uid=10552
+target_pid=22683
+target_mnt_ns=4026536038
+```
+
+使用 `pathguard-hide1-lab-myron-ddk-v13-runner-fix.zip` 完成模块加载；先前
+mode 4 只读四组均通过。之后以真实 `shadow_mode=0` 重新加载，INSTALL generation
+`22002`，并由 runner 读取 `/sys/module/pathguard_hide1/parameters/shadow_mode` 验证
+内核实例与命令参数一致。
+
+有效证据目录：
+
+```text
+build/device-evidence/hide1-regression/20260922-124335/full-regression.json
+```
+
+五组场景全部通过：
+
+```text
+baseline       PASS
+cache-order    PASS
+concurrency    PASS
+reliability    PASS
+mutation       PASS
+mountinfo      unchanged
+conclusion     candidate_pass_requires_admission
+```
+
+target 侧的 Java File/NIO、stat/lstat/statx、access/faccessat、open/openat、readdir/
+getdents、relative/alias、并发和 mutation 均符合隐藏语义；Root Oracle 在 target 阶段
+未变化。control 侧保持可见并允许 mutation 改变 disposable fixture，验证了 caller
+isolation。随后已完成 `DISABLE -> CLEAR -> rmmod`，设备在线且 `/dev/pathguard_hide1`
+已移除。
+
+另有一轮无效证据 `build/device-evidence/hide1-regression/20260922-123901/`：runner
+当时仅记录了 `-ShadowMode 0` 参数，但设备实际加载的是 mode 4。该轮只能作为 mode 4
+full regression 参考，不得作为 mode 0 证据；现已加入内核参数一致性门禁。
+
+本轮结论：
+
+```text
+HideLab full active = candidate_pass_requires_admission
+Hide 1.0 = unsupported（尚未完成设备/KMI/OTA admission）
+```
+
+## 轮次 91：设备/KMI/OTA admission 门禁（2026-09-22）
+
+本轮完成 `admit_hide1.ps1` 的根因重构。旧脚本只检查 fingerprint、kernel release
+和模块是否存在，不能证明当前 active 实例、模块内容或 HideLab 证据属于同一准入对象。
+新脚本要求显式提供模块 `.ko`、full regression 证据和 expected generation，并校验：
+
+```text
+device + fingerprint + kernel release
+uname machine / 64-bit ABI
+KMI（boot property；缺失时由 kernel release 严格推导）
+模块 SHA-256（host artifact == device loaded file == allowlist）
+undefined symbol 数量和集合 SHA-256
+undefined symbol 名称在运行时 kallsyms 中存在
+state=ACTIVE、lifecycle=RUNNING、generation、shadow_mode、parent_inode
+full-regression schema/conclusion/scenario/mountinfo
+```
+
+设备开启了 kallsyms 地址隐藏，因此运行时检查使用“符号名存在”而不是地址非零；模块
+已经由 SukiSU loader 成功加载，且所有 76 个 undefined symbol 名称均可见。该处理避免
+把内核的地址保密策略误判成 ABI 不可解析。
+
+有效准入证据：
+
+```text
+build/device-evidence/hide1-admission/20260922-130814/admission.json
+admission=admitted
+product_state=unsupported
+module_sha256=0bc66ebfa6c741280f37fc97bd4d771341b2460b1c27da63011cddd52a5e7b13
+undefined_symbol_count=76
+generation=22002
+parent_inode=427341
+```
+
+生命周期重新准入也已验证：执行 `DISABLE -> CLEAR -> rmmod -> reboot` 后，模块不在
+`/proc/modules`，准入结果为 `unsupported`，不存在旧 active 状态复用；随后重新加载、
+启动新 target PID `19479`、INSTALL/ENABLE `22002`，准入再次通过。
+
+OTA/slot 变化模拟使用隔离 allowlist：
+
+```text
+fingerprint changed -> unsupported / device_fingerprint_kernel_not_allowlisted
+kernel release changed -> unsupported / device_fingerprint_kernel_not_allowlisted
+```
+
+这三类证据只能把固定设备的实验后端标记为设备级 `admitted`，不能改变产品状态。由于
+daemon/UAPI 正式集成、跨设备矩阵和 OTA 实机验证仍未完成，产品状态继续保持：
+
+```text
+Hide 1.0 = unsupported
+```
+# 2026-09-23：experimental/hide-vfs 缓存、FD 与诊断边界修复
+
+本轮重新审查 `experimental/hide-vfs/pathguard_hide1.c`、UAPI、控制工具、实验包和
+Hide VFS 相关 CTest。当前工作树没有 `docs/13-*` 文档，因此本轮以本文件和
+`docs/12-hide-vfs-execution-roadmap.md` 为唯一路线依据，不假设不存在的文档内容。
+
+## 已修复的根因
+
+1. **synthetic negative 正 dentry 泄漏**：共享 dcache 中，Control observer 可能将目标
+   observer 产生的 synthetic negative dentry 重新验证为 positive。`d_revalidate` 现在
+   先检查 `d_is_negative()`；一旦 dentry 已变为 positive，立即清除
+   `synthetic_negative` 和 `cache_generation`，再进入正常的 governed-positive 判断。
+   target-only marker 不再跨 positive cache 继续生效。
+2. **ENABLE 前已有目录 FD**：已有 `file->f_op` 不会被后续 inode shadow 安全替换。模块
+   现在扫描 pinned target task 的 fdtable；若目标已经持有 governed parent 或 hidden
+   directory 的 FD，ENABLE 在发布有效策略前返回 `-EBUSY`，保持 inactive 并要求调用方
+   关闭/重建 FD 后重试。这样把潜在 LEAK 收敛为明确的 fail-closed activation blocker。
+3. **诊断 probe 与正式数据面解耦**：新增 `diagnostic_probes` 和
+   `symlink_errno_bridge` module parameters。默认不注册 kernel-specific kprobe/kretprobe；
+   即使 probe 符号缺失，核心模块仍可加载。实验包的 `hide1ctl load` 显式打开两项，正式
+   集成不得把它们当作稳定 ABI。`security_inode_symlink` 的 `-EACCES -> -ENOENT` 改写
+   仅在显式 bridge 参数下生效。
+
+## 验证
+
+```text
+android16-6.12 DDK LKM build                 PASS
+pathguard_hide_vfs_model_test                PASS
+pathguard_hide_vfs_concurrency_test          PASS
+pathguard_hide_vfs_teardown_contract_test    PASS
+full CTest                                    91/91 PASS
+git diff --check                              PASS
+```
+
+设备只读检查确认当前 release 仍为
+`6.12.23-android16-5-g16e473de48a3-abogki462654244-4k`，旧实验模块仍处于 Live；本轮未
+执行 ENABLE、未改变设备状态，也未将主机 CTest 结果冒充真机证据。
+
+## Mount alias 语义
+
+当前 VFS shadow 按 `fsuid + mount namespace + parent superblock/inode + basename +
+generation` 绑定，而不是按路径字符串或单一 vfsmount 指针绑定。因此同一 mount
+namespace 内指向同一 `(super_block, i_ino)` 的 shared-storage alias 必须一致隐藏；不同
+superblock、parent inode、UID、mount namespace 或 generation 必须不命中。该语义与既有
+三 alias HideLab 证据一致，属于当前固定设备实验边界，不宣称跨 namespace 或通用 mount
+隔离能力。
+
+产品状态保持：`Hide 1.0 = unsupported`。
+# 2026-09-23：设备准入证据成为 daemon 的唯一信任根
+
+修复 daemon HideRuntime 原先直接读取 `run/boot-state` 并自行设置
+`admitted=true` 的绕过路径。现在 daemon 只读取 `run/admission.json`，要求
+admission schema、设备/架构、boot ID、模块哈希、undefined symbol 摘要、ACTIVE
+generation/parent inode/shadow mode、五组 HideLab 结论、mountinfo 和 OTA 重新准入
+字段全部有效；当前 boot ID、kernel release、fingerprint、模块文件哈希和 live
+`/sys/module/pathguard_hide1`/`/dev/pathguard_hide1` 还必须与证据一致。
+
+`boot-state` 仅保留为启动诊断，不能激活 Hide。post-fs-data 在每次启动删除旧
+`admission.json`，因此 reboot、OTA 或切 slot 后必须重新完成设备准入。新增
+`ReadAdmissionJson` 单元测试覆盖有效 evidence、boot-state-only 拒绝和非 admitted
+状态拒绝。产品状态仍保持 `Hide 1.0 = unsupported`，直到新版 daemon 在设备上完成
+正式 admission 与规则事务验证。
+
+## 2026-09-23：当前 LKM 哈希准入与设备全量回归
+
+使用实验包 `pathguard-hide1-lab-myron-admission-v1.zip` 完成当前构建的受控设备验证。
+本轮 generation 为 `50001`，测试 fixture 为
+`/storage/emulated/0/Pictures/PathGuardHideLab/20260923-120000`，parent inode 为
+`800185`；目标 UID/PID/mount namespace 分别为 `10552/20147/mnt:[4026536053]`。
+
+设备启动初期 `run/boot-state` 存在而 `run/admission.json` 缺失。新版 daemon 未把
+boot-state 当作准入凭据，日志报告 `PG-ADMISSION-UNSUPPORTED`，未加载 Hide LKM，符合
+默认拒绝预期。随后手动加载当前 LKM（`shadow_mode=0`），执行 INSTALL/ENABLE 50001。
+本轮完整 HideLab active regression 的 baseline、cache-order、concurrency、reliability、
+mutation 五组均 PASS，mountinfo 前后不变，结论为
+`candidate_pass_requires_admission`。
+
+当前模块准入摘要：
+
+```text
+module_sha256=88336589c8e4268d167f9ad3a4e88f29639ec28c25e52c0041febc8dc473d35b
+undefined_symbol_count=78
+undefined_symbols_sha256=26c161cd433e14eef2a1bab6c2851b9ece67f94c1af60bad8f3cc846df848441
+admission=admitted
+product_state=unsupported
+ota_recheck_required=true
+```
+
+准入验证产物位于
+`build/device-evidence/hide1-admission-50001/20260923-114931/admission.json`，绑定本次
+boot ID、fingerprint、kernel release、模块哈希、generation、parent inode 和完整回归。
+allowlist 已更新到上述当前 LKM 哈希、实际 DDK vermagic `6.12.76-4k` 和 78-symbol
+集合。设备级 admitted 仅表示该固定启动周期通过准入验证，不改变产品状态。
+
+实验结束后执行 `DISABLE -> CLEAR -> UNLOAD`；确认模块 sysfs 和设备节点均消失，
+`admission.json` 仍缺失。未把有效 evidence 写入设备：当前模块配置中的 hide 规则路径与
+本轮 disposable fixture 不一致，如果注入会让 daemon 尝试部署另一规则。设备 shell 在
+SELinux enforcing 下无法访问模块 `run/` 目录，因此 malformed JSON、`admission=false`
+和仅 boot-state 的设备端重启拒绝用例没有完成。对应的离线 `ReadAdmissionJson` 测试已
+补齐并通过：boot-state-only、格式错误 JSON、pending/unsupported 状态均拒绝；当前四项
+Hide 专项 CTest 为 4/4 PASS。
+
+结论：本轮模块和 HideLab active regression 的设备级候选准入通过；daemon 消费设备
+admission 文件的正向端到端流程及设备端文件篡改拒绝测试仍待完成。产品状态保持：
+
+```text
+Hide 1.0 = unsupported
+```
+# 2026-09-25 设备验收附录
+
+Hide 1.0-LKM 固定设备链路已完成 P0-P2 验收。最新设备侧证据绑定到 boot `ed8bbcca-6d99-4e53-9b0e-440d1ecd5f4d`、模块 hash `0aaf0bf4...`；当前 boot admission、负向撤权、Target 生命周期、规则热更新、组合回归和重启重新准入均已归档于 `build/device-evidence/hide1-latest/`，详见 Mission Route 文档的最终证据索引。
+
+本轮还修复了 LKM observer 的 teardown namespace 契约并通过完整 CTest `91/91`；修复后的 LKM 已安装到设备，并通过 P0/P1 真机回归。

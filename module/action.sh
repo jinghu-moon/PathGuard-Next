@@ -1,7 +1,7 @@
 #!/system/bin/sh
 
 MODDIR=${0%/*}
-echo "PathGuard Next"
+echo "PathGuard-Next"
 echo "module: $MODDIR"
 echo "config: $MODDIR/config/rules.toml"
 echo "status:"

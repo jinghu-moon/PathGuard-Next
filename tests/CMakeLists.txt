@@ -83,7 +83,16 @@ add_executable(pathguard_provider_process_lifecycle_test
 target_link_libraries(pathguard_provider_process_lifecycle_test PRIVATE
     pathguard_provider_process_lifecycle)
 add_test(NAME pathguard_provider_process_lifecycle_test
-    COMMAND pathguard_provider_process_lifecycle_test)
+  COMMAND pathguard_provider_process_lifecycle_test)
+
+add_executable(pathguard_hide1_backend_test
+  unit/hide1_backend_test.cpp)
+target_include_directories(pathguard_hide1_backend_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/daemon/include
+  ${CMAKE_SOURCE_DIR}/experimental/hide-vfs)
+target_link_libraries(pathguard_hide1_backend_test PRIVATE
+  pathguard_hide1_backend)
+add_test(NAME pathguard_hide1_backend_test COMMAND pathguard_hide1_backend_test)
 
 add_executable(pathguard_policy_snapshot_domain_test
     unit/policy_snapshot_domain_test.cpp)

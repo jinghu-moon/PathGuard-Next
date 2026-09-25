@@ -56,6 +56,7 @@ struct RulesBuildResult {
     std::optional<pathguard::PolicyV6> policy_v6;
     PolicyRequirements requirements;
     std::optional<PolicyBlob> blob;
+    std::vector<CanonicalHideRuleV2> hide_rules;
     CompileStatistics statistics;
     std::vector<Diagnostic> diagnostics;
 

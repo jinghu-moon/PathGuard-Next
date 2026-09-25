@@ -18,3 +18,11 @@ redirect_rules = [
     { select = { root = "Pictures", glob = "**", type = "file" }, to = "Download/localsend-redirect" },
     { select = { root = "Pictures", glob = "**", type = "file" }, to = "Download/localsend-redirect", enforcement = "provider", audit = true },
 ]
+
+# Experimental Hide 1.0-LKM rule. It is independently admitted and only
+# activates while this package process is present on the fixed test device.
+[apps."dev.pathguard.hideprobe.target"]
+users = [0]
+hide_rules = [
+    { parent = "/storage/emulated/0/Pictures/PathGuardHideLab/20260925-000308", basename = "hidden" },
+]

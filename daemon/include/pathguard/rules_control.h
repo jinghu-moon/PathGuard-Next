@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -108,6 +109,7 @@ struct ReconcileResult {
     bool compiled = false;
     bool published = false;
     bool unchanged = false;
+    bool hide_updated = false;
 
     bool ok() const { return state.status == ControlStatus::kActive; }
 };
@@ -127,12 +129,15 @@ struct ManagerSaveResult {
 
 class Reconciler {
 public:
+    using HideReconcileCallback =
+        std::function<bool(const rules::RulesBuildResult&, std::string*)>;
     Reconciler(std::filesystem::path config_directory,
                std::filesystem::path run_directory,
                rules::RulesLimits limits,
                rules::DeviceSnapshot snapshot);
 
     void SetDeviceSnapshot(rules::DeviceSnapshot snapshot);
+    void SetHideReconcileCallback(HideReconcileCallback callback);
     ReconcileResult Reconcile(PublishOptions options = {});
     ManagerSaveResult SaveRules(std::string_view expected_source_digest,
                                 std::string replacement,
@@ -146,6 +151,11 @@ private:
     rules::DeviceSnapshot snapshot_;
     ControlState state_;
     bool device_dirty_ = false;
+    HideReconcileCallback hide_reconcile_callback_;
+    std::optional<rules::RulesBuildResult> active_built_;
+    std::optional<rules::RulesBuildResult> desired_built_;
+    bool hide_candidate_ready_ = false;
+    bool activation_pending_ = false;
 };
 
 }  // namespace pathguard::control

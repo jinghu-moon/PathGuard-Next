@@ -6,8 +6,12 @@ param(
     [switch]$GrantReadMediaImages,
     [switch]$KeepTargetProcess,
     [switch]$KeepFixture,
+    [switch]$InitializeFixture,
+    [string]$FixtureRoot,
     [string]$ExistingHiddenPath,
-    [ValidateSet('baseline', 'cache-order', 'concurrency', 'reliability', 'prepare-hidden-fd', 'preopen-hidden-fd', 'symlink-held-fd')]
+    [UInt64]$ExpectedParentInode,
+    [ValidateRange(0, 4)] [int]$ShadowMode,
+    [ValidateSet('baseline', 'cache-order', 'concurrency', 'reliability', 'mutation', 'prepare-hidden-fd', 'preopen-hidden-fd', 'symlink-held-fd')]
     [string]$Scenario = 'baseline',
     [switch]$AttackMutations,
     [switch]$ConfirmMutation,
@@ -23,6 +27,15 @@ if ($AttackMutations -and -not $ConfirmMutation) {
 }
 if ($ExistingHiddenPath -and $AttackMutations -and $Scenario -ne 'preopen-hidden-fd') {
     throw 'AttackMutations is not allowed with ExistingHiddenPath; use a disposable fixture'
+}
+if ($InitializeFixture -and (-not $FixtureRoot -or $ExistingHiddenPath)) {
+    throw 'InitializeFixture requires FixtureRoot and cannot be combined with ExistingHiddenPath'
+}
+if ($FixtureRoot -and $ExistingHiddenPath) {
+    throw 'FixtureRoot and ExistingHiddenPath are mutually exclusive'
+}
+if ($FixtureRoot -and $FixtureRoot -notmatch '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
+    throw "unexpected fixture root: $FixtureRoot"
 }
 if ($Scenario -eq 'prepare-hidden-fd' -and -not $KeepTargetProcess) {
     throw 'prepare-hidden-fd requires -KeepTargetProcess so the held directory FD survives to the post-ENABLE phase'
@@ -44,12 +57,16 @@ if ($devices.Count -ne 1) { throw "HideLab requires exactly one ready device, go
 $targetApkPath = (Resolve-Path -LiteralPath $TargetApk -ErrorAction Stop).Path
 $controlApkPath = (Resolve-Path -LiteralPath $ControlApk -ErrorAction Stop).Path
 $runId = [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')
+$fixtureRootExplicit = $PSBoundParameters.ContainsKey('FixtureRoot')
 if ($ExistingHiddenPath) {
     if ($ExistingHiddenPath -notmatch '^/storage/emulated/0/Pictures/[A-Za-z0-9._/-]+$' -or $ExistingHiddenPath.EndsWith('/')) {
         throw "unexpected existing hidden path: $ExistingHiddenPath"
     }
     $hiddenPath = $ExistingHiddenPath
     $fixtureRoot = $hiddenPath
+} elseif ($FixtureRoot) {
+    $fixtureRoot = $FixtureRoot
+    $hiddenPath = "$fixtureRoot/hidden"
 } else {
     $fixtureRoot = "/storage/emulated/0/Pictures/PathGuardHideLab/$runId"
     $hiddenPath = "$fixtureRoot/hidden"
@@ -74,13 +91,25 @@ function Invoke-Root([string]$Command) {
 }
 
 function Get-OracleSnapshot([string]$Name) {
-    $snapshot = @(Invoke-Root "test -d $fixtureRoot && find $fixtureRoot -exec stat -c '%F|%n|%s|%i' {} \; | sort; if test -f $hiddenPath/canary.txt; then sha256sum $hiddenPath/canary.txt; else printf 'MISSING|%s\n' $hiddenPath/canary.txt; fi") -join "`n"
+    $snapshot = @(Invoke-Root "test -d $fixtureRoot; find $fixtureRoot -exec stat -c '%F|%n|%s|%i' {} \; | sort; test -f $hiddenPath/canary.txt && sha256sum $hiddenPath/canary.txt || printf 'MISSING|%s\n' $hiddenPath/canary.txt") -join "`n"
     Set-Content -LiteralPath (Join-Path $runOutput "$Name.txt") -Value $snapshot -Encoding utf8
     return $snapshot
 }
 
+function Get-ParentInode {
+    $separator = $hiddenPath.LastIndexOf('/')
+    if ($separator -le 0) { throw "cannot derive parent path for $hiddenPath" }
+    $parent = $hiddenPath.Substring(0, $separator)
+    $value = ((Invoke-Root "stat -c '%i' $parent") -join '').Trim()
+    if ($value -notmatch '^\d+$') { throw "cannot read parent inode for $parent" }
+    return [UInt64]$value
+}
+
 function Reset-Fixture {
     if ($ExistingHiddenPath) { return }
+    if ($fixtureRootExplicit -and -not $InitializeFixture) {
+        throw 'refusing to reset an explicitly bound FixtureRoot; use InitializeFixture before INSTALL'
+    }
     if ($fixtureRoot -notmatch '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
         throw "refusing to reset unexpected fixture path: $fixtureRoot"
     }
@@ -90,7 +119,8 @@ function Reset-Fixture {
 function Invoke-Probe([string]$Role, [string]$Package) {
     $pinnedPid = $null
     $pinnedNamespace = $null
-    if ($Role -eq 'target' -and $KeepTargetProcess) {
+    $prepareProcess = $Role -eq 'target' -and $KeepTargetProcess -and $Scenario -eq 'prepare-hidden-fd'
+    if ($Role -eq 'target' -and $KeepTargetProcess -and -not $prepareProcess) {
         $pinnedPid = ((& $adb shell pidof $Package 2>$null) -join '').Trim()
         if (-not $pinnedPid -or $pinnedPid -notmatch '^\d+$') {
             throw 'KeepTargetProcess requires the already-bound target PID to be alive'
@@ -100,7 +130,7 @@ function Invoke-Probe([string]$Role, [string]$Package) {
             throw "cannot read target mount namespace for PID $pinnedPid"
         }
     }
-    if (-not ($KeepTargetProcess -and $Role -eq 'target')) {
+    if (-not ($KeepTargetProcess -and $Role -eq 'target') -or $prepareProcess) {
         Invoke-Adb @('shell', 'am', 'force-stop', $Package)
     }
     $startArguments = @('shell', 'am', 'start', '-W', '-n', "$Package/dev.pathguard.hideprobe.ProbeActivity", '--esa', 'observe_paths', $hiddenPath, '--es', 'scenario', $Scenario, '--es', 'run_id', $runId)
@@ -128,6 +158,16 @@ function Invoke-Probe([string]$Role, [string]$Package) {
              [DateTimeOffset]::Now -lt $deadline)
     if ($status -ne 'complete' -or -not $metadataReady) {
         throw "HideLab $Role did not complete current run: $status"
+    }
+    if ($prepareProcess) {
+        $pinnedPid = ((& $adb shell pidof $Package 2>$null) -join '').Trim()
+        if (-not $pinnedPid -or $pinnedPid -notmatch '^\d+$') {
+            throw 'prepare-hidden-fd could not pin the newly started target PID'
+        }
+        $pinnedNamespace = ((& $adb shell su -W -c "readlink /proc/$pinnedPid/ns/mnt" 2>$null) -join '').Trim()
+        if (-not $pinnedNamespace -or $pinnedNamespace -notmatch '^mnt:\[\d+\]$') {
+            throw "cannot read target mount namespace for PID $pinnedPid"
+        }
     }
     & $adb exec-out run-as $Package cat files/hide-h0/metadata.json |
         Set-Content -LiteralPath (Join-Path $runOutput "$Role-metadata.json") -Encoding utf8
@@ -206,7 +246,10 @@ function Assert-HideDirectVfs([string]$Role) {
     foreach ($test in @('java.external.0.exists', 'java.external.0.isDirectory',
                         'java.external.0.nio_exists', 'java.external.0.nio_isDirectory')) {
         $row = @($rows | Where-Object { $_.test -eq $test -and $_.path -eq $hiddenPath })
-        if ($row.Count -ne 1 -or $row[0].return_value -ne 0) {
+        if ($row.Count -ne 1) {
+            throw "INFRA_ERROR: HideLab $Role did not record exactly one $test row"
+        }
+        if ($row[0].return_value -ne 0) {
             throw "LEAK: HideLab $Role Java path test exposed hidden target: $test"
         }
     }
@@ -217,7 +260,10 @@ function Assert-HideDirectVfs([string]$Role) {
     )
     foreach ($test in $enoentTests) {
         $row = @($rows | Where-Object { $_.test -eq $test -and $_.path -eq $hiddenPath })
-        if ($row.Count -ne 1 -or $row[0].return_value -ne -1) {
+        if ($row.Count -ne 1) {
+            throw "INFRA_ERROR: HideLab $Role did not record exactly one $test row"
+        }
+        if ($row[0].return_value -ne -1) {
             throw "LEAK: HideLab $Role exposed hidden target for $test"
         }
         if ($row[0].errno -ne 2) {
@@ -228,15 +274,37 @@ function Assert-HideDirectVfs([string]$Role) {
                         'external.0.getdents64_4096', 'external.0.getdents64_32768',
                         'external.0.getdents64_65536', 'external.0.getdents64_131072')) {
         $row = @($rows | Where-Object { $_.test -eq $test -and $_.path -eq $hiddenPath })
-        if ($row.Count -ne 1 -or $row[0].return_value -ne 0 -or $row[0].side_effect) {
+        if ($row.Count -ne 1) {
+            throw "INFRA_ERROR: HideLab $Role did not record exactly one $test row"
+        }
+        if ($row[0].return_value -ne 0 -or $row[0].side_effect) {
             throw "LEAK: HideLab $Role did not omit hidden basename for $test"
+        }
+    }
+    foreach ($test in @('external.0.openat2', 'external.0.faccessat2')) {
+        $row = @($rows | Where-Object { $_.test -eq $test -and $_.path -eq $hiddenPath })
+        if ($row.Count -ne 1) {
+            throw "INFRA_ERROR: HideLab $Role did not record $test"
+        }
+        if ($row[0].status -eq 'observed' -and ($row[0].return_value -ne -1 -or $row[0].errno -ne 2)) {
+            throw "LEAK: HideLab $Role exposed hidden target for $test"
         }
     }
     $mutationRows = @($rows | Where-Object {
         $_.test -like 'external.mutation.*' -or
         $_.test -like 'external.fd_mutation.*'
     })
+    if ($Scenario -eq 'mutation' -and $mutationRows.Count -eq 0) {
+        throw "INFRA_ERROR: HideLab $Role mutation probe emitted no mutation rows"
+    }
     foreach ($row in $mutationRows) {
+        if ($row.test -eq 'external.fd_mutation.held_fd' -and
+            $row.status -eq 'setup_error' -and $row.return_value -eq -1 -and
+            $row.errno -eq 9) {
+            # A hidden directory cannot be opened to obtain a held FD.  This is
+            # the expected fail-closed setup result, not a mutation drift.
+            continue
+        }
         if ($row.return_value -ne -1 -or $row.errno -ne 2 -or $row.side_effect) {
             $kind = if ($row.return_value -eq -1 -and $row.errno -ne 2) { 'SEMANTIC_DRIFT' } else { 'LEAK' }
             throw "$kind`: HideLab $Role mutation was not fail-closed: $($row.test)"
@@ -361,12 +429,22 @@ try {
         Invoke-Adb @('shell', 'appops', 'set', $targetPackage, 'MANAGE_EXTERNAL_STORAGE', 'allow')
         Invoke-Adb @('shell', 'appops', 'set', $controlPackage, 'MANAGE_EXTERNAL_STORAGE', 'allow')
     }
-    Reset-Fixture
+    if ($InitializeFixture) {
+        Reset-Fixture
+    } elseif (-not $ExistingHiddenPath -and -not $fixtureRootExplicit) {
+        Reset-Fixture
+    } elseif (((Invoke-Root "test -d $fixtureRoot && test -d $hiddenPath && echo READY || echo MISSING") -join '').Trim() -ne 'READY') {
+        throw "fixture is not prepared: $fixtureRoot"
+    }
+    $parentInode = Get-ParentInode
+    if ($PSBoundParameters.ContainsKey('ExpectedParentInode') -and
+        $parentInode -ne $ExpectedParentInode) {
+        throw "parent inode mismatch before probe: expected $ExpectedParentInode, actual $parentInode"
+    }
     $before = Get-OracleSnapshot 'oracle-before'
     $targetBefore = Get-OracleSnapshot 'oracle-before-target'
     Invoke-Probe 'target' $targetPackage
     $targetAfter = Get-OracleSnapshot 'oracle-after-target'
-    if ($AttackMutations -and $Scenario -ne 'prepare-hidden-fd' -and -not $ExistingHiddenPath) { Reset-Fixture }
     $controlBefore = Get-OracleSnapshot 'oracle-before-control'
     Invoke-Probe 'control' $controlPackage
     $controlAfter = Get-OracleSnapshot 'oracle-after-control'
@@ -381,6 +459,8 @@ try {
             Assert-CacheOrder 'target' $ExpectTargetHidden
         } elseif ($Scenario -eq 'concurrency') {
             Assert-Concurrency 'target' $ExpectTargetHidden
+        } elseif ($Scenario -eq 'mutation') {
+            Assert-HideDirectVfs 'target'
         } elseif ($Scenario -eq 'prepare-hidden-fd') {
             Assert-PrepareHiddenFd 'target'
         } elseif ($Scenario -eq 'preopen-hidden-fd') {
@@ -398,6 +478,7 @@ try {
         if ($Scenario -eq 'baseline') { Assert-BaselineVisible 'control' }
         elseif ($Scenario -eq 'cache-order') { Assert-CacheOrder 'control' $false }
         elseif ($Scenario -eq 'concurrency') { Assert-Concurrency 'control' $false }
+        elseif ($Scenario -eq 'mutation') { Assert-BaselineVisible 'control' }
         elseif ($Scenario -eq 'prepare-hidden-fd') { Assert-BaselineVisible 'control' }
         elseif ($Scenario -eq 'preopen-hidden-fd') { Assert-PreopenHiddenFd 'control' $false }
         elseif ($Scenario -eq 'symlink-held-fd') { Assert-SymlinkHeldFd 'control' $false $false }
@@ -412,7 +493,7 @@ try {
     $after = Get-OracleSnapshot 'oracle-after'
     if (-not $AttackMutations -and $before -ne $after) { throw 'Root Oracle detected fixture mutation during no-backend baseline' }
     $summary = [ordered]@{
-        schema = 2; run_id = $runId; phase = $Scenario; backend = $Backend; attack_mutations = [bool]$AttackMutations; fixture_root = $fixtureRoot
+        schema = 3; run_id = $runId; phase = $Scenario; backend = $Backend; shadow_mode = if ($PSBoundParameters.ContainsKey('ShadowMode')) { $ShadowMode } else { $null }; attack_mutations = [bool]$AttackMutations; fixture_root = $fixtureRoot; hidden_path = $hiddenPath; parent_inode = $parentInode
         target_package = $targetPackage; control_package = $controlPackage
         fixture_unchanged = ($before -eq $after); target_oracle_changed = $targetOracleChanged; control_oracle_changed = $controlOracleChanged
         conclusion = if ($ExpectTargetHidden -and $targetOracleChanged) { 'DESTRUCTIVE_FAIL' } elseif ($ExpectTargetHidden -and $controlError) { 'OVERBLOCK' } elseif ($ExpectTargetHidden -and $targetError -like 'SEMANTIC_DRIFT:*') { 'SEMANTIC_DRIFT' } elseif ($ExpectTargetHidden -and $targetError) { 'LEAK' } elseif ($ExpectTargetHidden) { 'PASS' } elseif ($AttackMutations) { 'BASELINE_MUTATION_VISIBLE' } elseif ($Scenario -eq 'cache-order') { 'BASELINE_CACHE_ORDER_VISIBLE_NOT_HIDE_PASS' } else { 'BASELINE_VISIBLE_NOT_HIDE_PASS' }

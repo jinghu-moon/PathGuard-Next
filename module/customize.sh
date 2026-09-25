@@ -2,7 +2,7 @@
 
 SKIPUNZIP=0
 
-ui_print "- Installing PathGuard Next"
+ui_print "- Installing PathGuard-Next"
 
 if [ -z "$API" ]; then
   API="$(getprop ro.build.version.sdk)"

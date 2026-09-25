@@ -615,6 +615,10 @@ void Reconciler::SetDeviceSnapshot(rules::DeviceSnapshot snapshot) {
     device_dirty_ = true;
 }
 
+void Reconciler::SetHideReconcileCallback(HideReconcileCallback callback) {
+    hide_reconcile_callback_ = std::move(callback);
+}
+
 ReconcileResult Reconciler::Reconcile(PublishOptions options) {
     ReconcileResult output;
     SourceLoadResult loaded = LoadRulesSource(config_directory_, limits_);
@@ -632,6 +636,45 @@ ReconcileResult Reconciler::Reconcile(PublishOptions options) {
         state_.capability_generation = snapshot_.capability_generation;
         state_.topology_generation = snapshot_.topology_generation;
         WriteControlStatus(run_directory_, state_);
+        if (hide_reconcile_callback_ && desired_built_ && hide_candidate_ready_
+            && (state_.status == ControlStatus::kActive
+                || state_.status == ControlStatus::kPublishFailed)) {
+            std::string hide_error;
+            if (!hide_reconcile_callback_(*desired_built_, &hide_error)) {
+                state_.error_code = "PG-HIDE-UPDATE-FAILED";
+                state_.message = hide_error.empty()
+                    ? "hide reconciliation failed; previous hide state remains active"
+                    : hide_error;
+                WriteControlStatus(run_directory_, state_);
+                output.state = state_;
+                return output;
+            }
+            if (activation_pending_) {
+                PublishResult published = Publisher(run_directory_).Publish(
+                    *desired_built_->blob, options);
+                if (!published.ok()) {
+                    state_.status = active_built_.has_value()
+                        ? ControlStatus::kActive : ControlStatus::kPublishFailed;
+                    state_.error_code = "PG-PUBLISH-FAILED";
+                    state_.message = published.message
+                        + "; new configuration was not activated; previous policy remains active";
+                    WriteControlStatus(run_directory_, state_);
+                    output.state = state_;
+                    return output;
+                }
+                state_.status = ControlStatus::kActive;
+                state_.error_code.clear();
+                state_.message = published.published
+                    ? "policy activated" : "source validated; policy content unchanged";
+                state_.active_content_generation = desired_built_->blob->content_generation;
+                active_built_ = desired_built_;
+                activation_pending_ = false;
+                if (published.published) ++state_.deployment_epoch;
+                WriteControlStatus(run_directory_, state_);
+                output.published = published.published;
+                output.unchanged = published.unchanged;
+            }
+        }
         output.state = state_;
         output.unchanged = true;
         return output;
@@ -642,6 +685,7 @@ ReconcileResult Reconciler::Reconcile(PublishOptions options) {
         loaded.snapshot->source, limits_);
     output.compiled = true;
     device_dirty_ = false;
+    hide_candidate_ready_ = false;
     if (!built.ok()) {
         state_.status = ControlStatus::kSourceInvalid;
         if (!built.diagnostics.empty()) {
@@ -658,11 +702,14 @@ ReconcileResult Reconciler::Reconcile(PublishOptions options) {
         output.state = state_;
         return output;
     }
+    desired_built_ = built;
+    activation_pending_ = true;
     const rules::AdmissionResult admission = rules::AdmitPolicy(
         *built.policy_v6, built.requirements, snapshot_);
     state_.capability_generation = snapshot_.capability_generation;
     state_.topology_generation = snapshot_.topology_generation;
     if (!admission.admitted) {
+        hide_candidate_ready_ = false;
         state_.status = ControlStatus::kEnvironmentUnsupported;
         state_.error_code = "PG-ADMISSION-UNSUPPORTED";
         state_.message = "device capabilities or topology do not satisfy policy requirements; new configuration was not activated; previous policy remains active";
@@ -670,10 +717,50 @@ ReconcileResult Reconciler::Reconcile(PublishOptions options) {
         output.state = state_;
         return output;
     }
-    const PublishResult published = Publisher(run_directory_).Publish(
+    hide_candidate_ready_ = true;
+    if (hide_reconcile_callback_) {
+        std::string hide_error;
+        if (!hide_reconcile_callback_(built, &hide_error)) {
+            hide_candidate_ready_ = false;
+            std::string rollback_error;
+            const rules::RulesBuildResult empty_built;
+            const bool restored = active_built_.has_value()
+                ? hide_reconcile_callback_(*active_built_, &rollback_error)
+                : hide_reconcile_callback_(empty_built, &rollback_error);
+            state_.status = active_built_.has_value()
+                ? ControlStatus::kActive : ControlStatus::kPublishFailed;
+            state_.error_code = "PG-HIDE-UPDATE-FAILED";
+            state_.message = hide_error.empty()
+                ? "hide rules were not activated; previous hide state remains active"
+                : hide_error;
+            if (!restored) {
+                state_.message += "; previous hide restore failed: " + rollback_error;
+                hide_candidate_ready_ = false;
+            } else {
+                hide_candidate_ready_ = true;
+            }
+            WriteControlStatus(run_directory_, state_);
+            output.state = state_;
+            return output;
+        }
+        output.hide_updated = true;
+    }
+    PublishResult published = Publisher(run_directory_).Publish(
         *built.blob, options);
     if (!published.ok()) {
-        state_.status = ControlStatus::kPublishFailed;
+        bool hide_restored = true;
+        if (hide_reconcile_callback_) {
+            std::string hide_rollback_error;
+            const rules::RulesBuildResult empty_built;
+            const bool restored = active_built_.has_value()
+                ? hide_reconcile_callback_(*active_built_, &hide_rollback_error)
+                : hide_reconcile_callback_(empty_built, &hide_rollback_error);
+            hide_restored = restored;
+            if (!restored) published.message +=
+                "; hide rollback failed: " + hide_rollback_error;
+        }
+        state_.status = hide_restored && active_built_.has_value()
+            ? ControlStatus::kActive : ControlStatus::kPublishFailed;
         state_.error_code = "PG-PUBLISH-FAILED";
         state_.message = published.message
             + "; new configuration was not activated; previous policy remains active";
@@ -686,6 +773,8 @@ ReconcileResult Reconciler::Reconcile(PublishOptions options) {
     state_.message = published.published
         ? "policy activated" : "source validated; policy content unchanged";
     state_.active_content_generation = built.blob->content_generation;
+    active_built_ = built;
+    activation_pending_ = false;
     if (published.published) ++state_.deployment_epoch;
     WriteControlStatus(run_directory_, state_);
     output.state = state_;

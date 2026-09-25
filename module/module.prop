@@ -1,6 +1,6 @@
 id=pathguard_next
-name=PathGuard Next
-version=0.1.58-dev
-versionCode=59
+name=PathGuard-Next
+version=0.5.0
+versionCode=500
 author=PathGuard contributors
-description=Per-app path redirect with optional Provider visibility adapters
+description=Per-app path redirect with Provider adapters and Hide backend integration

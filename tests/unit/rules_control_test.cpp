@@ -31,6 +31,13 @@ std::string ValidRules(std::string_view target = "B") {
         + std::string(target) + "\"}]\n";
 }
 
+std::string ValidHideRules(std::string_view basename) {
+    return "format = 2\n[apps.\"dev.pathguard.hidelab\"]\n"
+        "users=[0]\nredirect_rules=[{select={root=\"A\",glob=\"item\"},to=\"B\"}]\n"
+        "hide_rules=[{parent=\"/storage/emulated/0/Pictures\",basename=\""
+        + std::string(basename) + "\"}]\n";
+}
+
 }  // namespace
 
 int main() {
@@ -224,10 +231,55 @@ int main() {
     PublishOptions publish_failure;
     publish_failure.fail_at = PublishFault::kWrite;
     const ReconcileResult failed_publish = reconciler.Reconcile(publish_failure);
-    assert(!failed_publish.ok());
-    assert(failed_publish.state.status == ControlStatus::kPublishFailed);
+    assert(failed_publish.ok());
+    assert(failed_publish.state.status == ControlStatus::kActive);
+    assert(failed_publish.state.error_code == "PG-PUBLISH-FAILED");
     assert(failed_publish.state.deployment_epoch
            == readmitted.state.deployment_epoch);
+
+    const fs::path hide_config = root / "hide-config";
+    const fs::path hide_run = root / "hide-run";
+    fs::create_directories(hide_config);
+    fs::create_directories(hide_run);
+    Write(hide_config / kRulesFileName, ValidHideRules("hidden"));
+    Reconciler hide_reconciler(hide_config, hide_run, RulesLimits{}, device);
+    bool fail_hide = true;
+    std::vector<std::string> hide_attempts;
+    hide_reconciler.SetHideReconcileCallback(
+        [&](const RulesBuildResult& built, std::string* error) {
+            hide_attempts.push_back(built.hide_rules.empty()
+                ? "empty" : built.hide_rules.front().basename);
+            const bool first_candidate = built.hide_rules.size() == 1
+                && built.hide_rules.front().basename == "hidden"
+                && hide_attempts.size() == 1;
+            const bool updated_candidate = built.hide_rules.size() == 1
+                && built.hide_rules.front().basename == "hidden2";
+            if (fail_hide && (first_candidate || updated_candidate)) {
+                if (error) *error = "synthetic-hide-failure";
+                return false;
+            }
+            return true;
+        });
+    const ReconcileResult hide_failed = hide_reconciler.Reconcile();
+    assert(!hide_failed.ok());
+    assert(hide_failed.state.status == ControlStatus::kPublishFailed);
+    assert(hide_attempts.size() == 2);
+    assert(hide_attempts[0] == "hidden" && hide_attempts[1] == "empty");
+    fail_hide = false;
+    const ReconcileResult hide_retry = hide_reconciler.Reconcile();
+    assert(hide_retry.ok() && hide_retry.published);
+    assert(hide_reconciler.state().status == ControlStatus::kActive);
+
+    Write(hide_config / kRulesFileName, ValidHideRules("hidden2"));
+    fail_hide = true;
+    const ReconcileResult hide_update_failed = hide_reconciler.Reconcile();
+    assert(hide_update_failed.ok());
+    assert(hide_update_failed.state.status == ControlStatus::kActive);
+    assert(hide_attempts.back() == "empty" || hide_attempts.back() == "hidden");
+    fail_hide = false;
+    const ReconcileResult hide_update_retry = hide_reconciler.Reconcile();
+    assert(hide_update_retry.ok() && hide_update_retry.unchanged);
+    assert(hide_attempts.back() == "hidden2");
 
     Write(config / kRulesFileName, ValidRules("Restart"));
     const ReconcileResult before_restart = reconciler.Reconcile();

@@ -2,7 +2,7 @@
 
 `README-hidelab.md` and `hidelab_acceptance_matrix.json` define the next Phase A
 system. `app-probe/` has been upgraded to a Kotlin Target/Control APK pair;
-`run_hidelab_baseline.ps1` is the only runner that creates the disposable
+`run_hidelab_baseline.ps1` is the only runner that can initialize the disposable
 Target/Control/Root-Oracle fixture. Its no-backend result is a baseline, never
 a hide success. Use `-Scenario cache-order` to exercise cold/ordered/positive
 dentry access, or use `-AttackMutations -ConfirmMutation` for the explicit

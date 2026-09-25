@@ -1,6 +1,6 @@
-# PathGuard Next
+# PathGuard-Next
 
-PathGuard Next is an experimental Android storage-isolation module for Magisk Zygisk / KernelSU + ZygiskNext.
+PathGuard-Next is an experimental Android storage-isolation module for Magisk Zygisk / KernelSU + ZygiskNext.
 
 The current R1 prototype provides per-application selective path redirect through
 namespace-local VFS mounts and Provider path-I/O adapters. It uses rules format 2,

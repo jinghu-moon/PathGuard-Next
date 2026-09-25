@@ -7,8 +7,11 @@
       "product": "Redmi/myron/myron",
       "fingerprint": "Redmi/myron/myron:16/BP2A.250605.031.A3/OS3.0.23.0.WPMCNXM:user/release-keys",
       "kernel_release": "6.12.23-android16-5-g16e473de48a3-abogki462654244-4k",
-      "module_vermagic_release": "6.12.23-android16-5-gf79b0b15da3a-mi-4k",
+      "module_vermagic_release": "6.12.76-4k",
       "kmi": "android16-6.12",
+      "module_sha256": "0aaf0bf4dfca38b36f2d81db07fd47d4124713067d02d2b7ad416193fbe12313",
+      "undefined_symbol_count": 78,
+      "undefined_symbols_sha256": "26c161cd433e14eef2a1bab6c2851b9ece67f94c1af60bad8f3cc846df848441",
       "reference_symbol_crcs": {
         "module_layout": "0xe976b219",
         "misc_register": "0xd9a13df1",

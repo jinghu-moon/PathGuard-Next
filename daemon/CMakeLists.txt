@@ -18,10 +18,22 @@ target_link_libraries(pathguard_provider_process_lifecycle PUBLIC
   pathguard_core
 )
 
+add_library(pathguard_hide1_backend STATIC
+  src/hide1_backend.cpp
+)
+target_include_directories(pathguard_hide1_backend PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/experimental/hide-vfs
+)
+target_link_libraries(pathguard_hide1_backend PUBLIC
+  pathguard_core
+)
+
 add_executable(pathguardd src/main.cpp src/audit_server.cpp)
 target_link_libraries(pathguardd PRIVATE
   pathguard_core
   pathguard_provider_process_lifecycle
+  pathguard_hide1_backend
   pathguard_rules_control
 )
 target_include_directories(pathguardd PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

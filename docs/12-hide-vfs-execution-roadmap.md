@@ -38,6 +38,44 @@
 Hide 1.0 = unsupported
 ```
 
+## 启动链路补充（2026-09-23）
+
+前一节描述的是正式 HideLab evidence 驱动的手工准入流程；实验包现在增加了明确
+隔离的固定设备自动启动路径，以满足安装模块并重启后的自动加载验证。该路径不把
+动态回归结果伪装成产品准入，产品状态仍固定为 `unsupported`。
+
+启动顺序为：
+
+```text
+post-fs-data.sh -> boot-state
+service.sh -> 单设备 profile 精确核对 -> SukiSU ksud insmod(shadow_mode=0)
+           -> 核对 /proc/modules、/sys/module、/dev/pathguard_hide1
+           -> 启动 pathguardd
+pathguardd -> 二次核对 boot-state、boot ID、kernel、模块 live 状态
+           -> 读取 rules.toml 并自动 reconcile
+```
+
+profile 模板位于 `experimental/hide-vfs/package/config/hide1_device_profile.json`，
+由 `scripts/package-hide1-pathguardd-lab.ps1` 在打包时注入实际 `.ko` SHA-256；不能
+复用多设备回归 allowlist。任何 profile、boot、模块或 loader 不匹配均保持 inactive。
+删除有效 hide 规则会撤销部署，非法规则不会覆盖最后一份有效快照。
+
+本轮主机证据：
+
+```text
+pathguard_hide1_backend_test                 PASS
+rules_control / manager_save / content_gen   PASS
+rules_hot_reload_integration                 PASS
+validate_hidelab_offline                     PASS
+NDK r27d arm64-v8a pathguardd                PASS
+```
+
+全量 CTest 未宣称通过：当前 `build/hide-h0` 未构建全部 91 个目标，并保留既有 hide
+probe、规则迁移及 Release baseline 失败证据。实验包
+`pathguard-hide1-lab-myron-auto-boot-v3.zip` 已生成并推送到设备 Download，待安装重启
+后验证自动 load、daemon 自动启动和 rules.toml 热更新；即使设备实验通过，也不改变
+Hide 1.0 正式状态。
+
 ### 规则切换、DISABLE/CLEAR 竞态与生命周期门禁
 
 本阶段已在固定 myron 设备完成以下真机回归：
@@ -1169,3 +1207,227 @@ ksud kpm list 无失败文本
 - SukiSU Tracepoint Hook：<https://github.com/SukiSU-Ultra/SukiSU-Ultra/blob/main/docs/guide/tracepoint-hook.md>
 - SukiSU KPM 文档：<https://github.com/SukiSU-Ultra/SukiSU-Ultra/blob/main/docs/guide/installation.md>
 - SUSFS：<https://gitlab.com/simonpunk/susfs4ksu>
+
+## 22. 2026-09-22：修复全量回归 fixture identity 编排门禁
+
+对 v12 全量 active 证据复核发现，旧版编排器在每个场景启动时都会对传入的
+`FixtureRoot` 执行 `rm -rf` 后重建目录。若 `INSTALL`/`ENABLE` 已经绑定了原 parent
+inode，这会把规则绑定对象替换成新的 inode，导致后续场景全部脱离绑定并表现为
+`LEAK`；mutation 场景还可能把该编排错误误报为 `DESTRUCTIVE_FAIL`。这不是有效的
+后端能力证据，必须归类为测试基础设施错误。
+
+已完成的修复：
+
+- `run_hidelab_baseline.ps1` 新增显式 `-InitializeFixture`；只有初始化阶段允许删除并
+  创建一次性 fixture；
+- 传入 `-FixtureRoot` 的 active 场景只验证 fixture 存在，不再重建 parent 或 hidden
+  目录；
+- 每轮记录 `hidden_path`、`parent_inode` 和 `shadow_mode`；
+- 可选 `-ExpectedParentInode` 在 probe 前强制校验 parent identity，不匹配直接失败；
+- full runner 对每个 summary 强制要求 `parent_inode` 为数值，缺失或类型漂移直接归类为
+  `INFRA_ERROR`，不得将空值隐式转换为 `0`；
+- active full runner 在启动前读取 `/sys/module/pathguard_hide1/parameters/shadow_mode`，
+  强制核对实际已加载模块参数与 runner 参数一致；只在 summary 中记录参数而不核对内核
+  实例的做法无效。
+- mutation 场景中 target 无法打开隐藏目录而产生的 `held_fd` `setup_error/EBADF` 是
+  fail-closed 的预期结果，不得误报为 `SEMANTIC_DRIFT`；control 的可写 mutation
+  只用于验证 caller isolation，允许其改变 disposable fixture，不能据此否定 target。
+- `run_hide1_full_regression.ps1` 的 active 模式强制要求预创建 `-FixtureRoot`、
+  `-KeepTargetProcess`、`-ShadowMode 0` 和 mutation 确认；
+- 离线契约检查覆盖初始化/active 分离、parent inode 校验和 mode 记录。
+
+新的执行顺序冻结为：
+
+```text
+InitializeFixture（无模块）
+-> 记录 fixture_root/hidden_path/parent_inode
+-> INSTALL/ENABLE（不得删除或重建 fixture）
+-> shadow_mode=0 full regression
+-> DISABLE/CLEAR/rmmod
+-> 删除 disposable fixture
+```
+
+修复后的离线验证：
+
+```text
+PowerShell parser（两个 runner） PASS
+validate_hidelab_offline.ps1    PASS
+git diff --check                 PASS
+```
+
+修复前的 v12 全量证据不得直接用于判定当前数据面失败；修复后必须使用同一模块、
+同一 generation、同一 target PID/namespace 和同一 parent inode 重新执行 mode 4 正确
+路径 smoke test，以及 `shadow_mode=0` 的全量 active 回归。产品状态在新证据完成前仍为：
+
+```text
+Hide 1.0 = unsupported
+```
+
+## 23. 2026-09-22：真实 mode 0 full active 回归完成
+
+在 runner 增加实际模块参数一致性校验后，使用 generation `22002`、固定 target
+PID/namespace 和 parent inode `427341` 完成真实 `shadow_mode=0` full active regression。
+五组场景（baseline、cache-order、concurrency、reliability、mutation）全部 PASS，
+mountinfo 未变化，结论为 `candidate_pass_requires_admission`。随后已执行
+`DISABLE -> CLEAR -> rmmod`，设备恢复到无模块状态。
+
+下一步不是继续重复同一套 HideLab，而是执行设备 admission：精确 fingerprint、kernel
+release、KMI/架构、模块哈希和 undefined symbol 可解析性校验，保存本轮 full-regression
+证据，并在重启/OTA/slot 变化后重新拒绝准入。只有 admission 脚本明确消费
+`candidate_pass_requires_admission` 且全量证据有效时，才允许评估 `admitted`；在此之前
+产品状态保持 `Hide 1.0 = unsupported`。
+
+## 24. 2026-09-22：完成设备准入、重启重新准入和 OTA/slot 拒绝模拟
+
+按路线完成 1-4：
+
+1. 重构 `tests/device/hide/admit_hide1.ps1`，从“模块存在”升级为证据驱动门禁，校验
+   fingerprint、kernel release、aarch64、KMI、模块 SHA-256、undefined symbol 集合和
+   kallsyms 名称可解析性，以及 active/generation/shadow mode/parent inode 和完整
+   `candidate_pass_requires_admission` 证据。
+2. 当前 myron 实例通过设备级准入：
+
+   ```text
+   admission=admitted
+   product_state=unsupported
+   generation=22002
+   shadow_mode=0
+   module_sha256=0bc66ebfa6c741280f37fc97bd4d771341b2460b1c27da63011cddd52a5e7b13
+   undefined_symbol_count=76
+   ```
+
+3. 完成 `DISABLE -> CLEAR -> rmmod -> reboot`。重启后模块未加载，admission 明确返回
+   `unsupported`；重新加载、启动新 target、INSTALL/ENABLE 后再次通过，证明 active
+   状态不会跨重启伪复用。
+4. 使用隔离 allowlist 模拟 fingerprint 和 kernel release/slot 变化，两者均返回
+   `unsupported`，未接受旧设备准入。
+
+证据：
+
+```text
+build/device-evidence/hide1-admission/20260922-130814/admission.json  # admitted
+build/device-evidence/hide1-admission/20260922-130653/admission.json  # reboot 后 unsupported
+build/device-evidence/hide1-admission/20260922-130914/               # fingerprint 模拟拒绝
+build/device-evidence/hide1-admission/20260922-130920/               # kernel 模拟拒绝
+```
+
+设备级 admission 已完成，但产品状态仍为 `Hide 1.0 = unsupported`。后续才可进入
+daemon/UAPI 正式集成；任何设备、KMI、模块哈希、slot 或 OTA 变化都必须重新执行本门禁。
+
+## 25. 2026-09-22：阶段 8.1-8.4 完成 daemon Hide adapter 离线实现
+
+在设备 admission 之后，开始执行 daemon 正式集成的前四个子阶段。实现位于：
+
+```text
+daemon/include/pathguard/hide1_backend.h
+daemon/src/hide1_backend.cpp
+tests/unit/hide1_backend_test.cpp
+```
+
+### 25.1 规则转换门禁
+
+`TranslateRule` 只接受当前实验 UAPI 能表达的严格子集：
+
+- 单 package、单 selector、单 action；
+- `deny + complete_vfs`，拒绝 redirect、mount 和其它 domain；
+- literal selector，拒绝 glob、except 和 descendant；
+- selector 必须是绝对路径，并拆分成一个 parent 与一个 basename；
+- target UID、PID、starttime、mount namespace 必须已确认；
+- 不接受多路径、SAF/Provider URI 或无法映射到真实 filesystem path 的规则。
+
+任何不满足条件的规则都返回明确的 `hide-unsupported-rule` 或
+`hide-scope-out-of-range`，不会静默降级为 deny/redirect。
+
+### 25.2 独立 Hide 状态机和事务
+
+`Backend` 不复用 redirect 的 `ControlStatus`，状态为：
+
+```text
+unsupported -> admission_pending -> inactive -> installing -> active
+active -> stopping -> inactive
+```
+
+`Apply` 的固定顺序为：
+
+```text
+admission + identity 校验
+-> INSTALL
+-> STATUS(INACTIVE/READY/generation)
+-> ENABLE
+-> STATUS(ACTIVE/RUNNING/generation)
+```
+
+任意一步失败，都会执行 `DISABLE -> CLEAR`；回滚失败会进入 `failed`，禁止继续
+报告 active。`Stop` 会重新读取身份并联合校验 UID、PID、starttime 和 mount namespace，
+身份过期时拒绝撤销并保持 fail-closed。
+
+### 25.3 generation 与设备 transport
+
+daemon 每次发布 Hide 规则使用单调递增的 deployment generation，并将 generation
+写入 UAPI `expected_generation`。Linux transport 直接使用 `/dev/pathguard_hide1` ioctl；
+主机测试通过注入 transport 验证事务，不通过 shell 拼接命令。
+
+该组件已加入 daemon 构建，但 `pathguardd` 默认不会自动启用 Hide；没有 admission、
+身份快照和明确的 Hide 规则时状态保持 `unsupported/inactive`。
+
+### 25.4 离线验证
+
+```text
+cmake --build build --target pathguard_hide1_backend_test
+ctest --test-dir build -C Debug -R pathguard_hide1_backend_test --output-on-failure
+```
+
+结果：`pathguard_hide1_backend_test` PASS，覆盖规则收缩、admission 缺失、generation
+递增、身份变化拒绝、ENABLE 失败完整回滚。此阶段仍未改变产品状态：
+
+```text
+Hide 1.0 = unsupported
+```
+
+## 26. 2026-09-23：实验实现第 1-5 项修复与验证
+
+按源码审查提出的五项顺序执行：
+
+1. 修复 synthetic-negative 在 Control observer 重新验证后变成 positive 时仍保留
+   target-only 标记的问题；正 dentry 会清除 marker 和 generation，再走正常策略判断。
+2. 补充源码契约和模型并发验证，确认正/负缓存、UID/namespace 隔离、生命周期顺序和
+   新增行为均有断言。
+3. 固定 mount alias 语义：同一 mount namespace 内按 `(super_block, i_ino)` 识别 parent，
+   因此同 inode alias 一致隐藏；不同 superblock/inode/namespace/UID/generation 不命中。
+   这与现有三 alias 真机证据一致，当前不扩展到通用 vfsmount 隔离。
+4. 解决已有 FD 的根因：目标 task 已持有 governed parent 或 hidden directory FD 时，
+   `ENABLE` 返回 `-EBUSY`，不发布半有效 shadow；关闭 FD 后才能重试。该行为优先于把
+   old-FD 泄漏误判为通过。
+5. 将 `do_symlinkat/vfs_symlink/may_create/security_inode_symlink` probe 变为显式实验
+   参数。默认核心模块不依赖这些 kernel-specific 符号；实验包手动加载时才打开诊断和
+   strict errno bridge。
+
+本轮验证：
+
+```text
+android16-6.12 DDK pathguard_hide1.ko       PASS
+full CTest                                    91/91 PASS
+git diff --check                              PASS
+```
+
+设备只读检查通过，未执行新的 ENABLE。由于当前仓库没有 `docs/13-*` 文档，后续仍以本
+路线图和 `docs/11-hide-source-audit-log.md` 为准。下一步必须使用重新构建的实验包，在
+disposable fixture 上验证 `ENABLE -> old-FD -EBUSY -> close FD -> ENABLE`，然后再运行
+cache-order、mutation、并发和完整生命周期矩阵。任何设备证据不足时产品状态仍为：
+
+```text
+Hide 1.0 = unsupported
+```
+# 2026-09-25 P0-P2 验收收口
+
+本轮设备级任务已完成：P0 admission 负向撤权、P1 Target 生命周期、规则热更新、deny/redirect/hide 组合回归、重启重新准入，以及 P2 工程构建收口均有独立 evidence。当前手机 boot `6719e5f1-ccf7-47cb-8baa-5b8950e75a2c` 的 admission 为 `admitted`，daemon 自动 `INSTALL/ENABLE` 已恢复，`product_state=unsupported` 保持不变。
+
+关键证据：
+
+- `build/device-evidence/hide1-admission-revocation/20260925-091536/negative-admission.json`
+- `build/device-evidence/hide1-target-lifecycle/20260925-093043/target-lifecycle.json`
+- `build/device-evidence/hide1-rules-hot-reload/20260925-095113/rules-hot-reload.json`
+- `build/device-evidence/hide1-combination/20260925-095229/full-regression.json`
+- `build/device-evidence/hide1-reboot/admission/20260925-095833/admission.json`
+
+工程验证：最新 Release CTest `91/91`；NDK arm64-v8a、一次性 WSL LKM、ZIP 均通过。随后已安装该 WSL 构建，当前设备 boot `ed8bbcca-6d99-4e53-9b0e-440d1ecd5f4d` 的准入模块 hash 为 `0aaf0bf4...`，并完成 P0/P1 设备回归。

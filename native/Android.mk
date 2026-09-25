@@ -101,14 +101,15 @@ include $(BUILD_EXECUTABLE)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := pathguardd
-LOCAL_SRC_FILES := ../daemon/src/main.cpp $(CORE_SOURCES) \
+LOCAL_SRC_FILES := ../daemon/src/main.cpp ../daemon/src/hide1_backend.cpp $(CORE_SOURCES) \
     ../daemon/src/audit_server.cpp ../daemon/src/rules_control.cpp \
     ../daemon/src/provider_process_lifecycle.cpp \
     $(DIRECTORY_RESOLVER_SOURCE) $(MOUNT_INFO_SNAPSHOT_SOURCE) \
     $(MOUNT_EXECUTOR_SOURCE)
 LOCAL_C_INCLUDES := $(ROOT_PATH)/core/include $(ROOT_PATH)/daemon/include \
     $(ROOT_PATH)/native/include $(ROOT_PATH)/rules/include \
-    $(ROOT_PATH)/third_party/tomlplusplus
+    $(ROOT_PATH)/third_party/tomlplusplus \
+    $(ROOT_PATH)/experimental/hide-vfs
 LOCAL_CPPFLAGS := -DPATHGUARD_ANDROID=1
 LOCAL_STATIC_LIBRARIES := pathguard_rules_compiler
 LOCAL_LDLIBS := -llog

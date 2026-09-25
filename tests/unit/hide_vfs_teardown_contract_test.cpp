@@ -140,6 +140,12 @@ int main() {
            std::string::npos);
     assert(d_revalidate.find("d_is_negative(dentry)") !=
            std::string::npos);
+    RequireOrder(d_revalidate, {
+        "if (!d_is_negative(dentry))",
+        "WRITE_ONCE(meta->synthetic_negative, false)",
+        "WRITE_ONCE(meta->cache_generation, 0)",
+        "if (hide1_dentry_should_hide("
+    });
     assert(d_revalidate.find("ret = 1") != std::string::npos);
     assert(d_revalidate.find("ret = 0") != std::string::npos);
     assert(d_revalidate.find("A synthetic target-only negative") !=
@@ -243,7 +249,9 @@ int main() {
     assert(source.find("get_nsproxy(nsproxy)") != std::string::npos);
     assert(source.find("put_nsproxy(binding->target_nsproxy)") !=
            std::string::npos);
-    assert(source.find("current->nsproxy->mnt_ns != binding->target_mnt_ns") !=
+    // The observer now snapshots current->nsproxy->mnt_ns into a local before
+    // comparing it, preserving the same namespace isolation contract.
+    assert(source.find("mnt_ns != binding->target_mnt_ns") !=
            std::string::npos);
     assert(source.find("binding->target_mnt_ns = nsproxy->mnt_ns") !=
            std::string::npos);
@@ -289,6 +297,11 @@ int main() {
     assert(source.find("atomic_t hide1_iop_active") != std::string::npos);
     assert(source.find("atomic_t hide1_fop_active") != std::string::npos);
     assert(source.find("atomic_t hide1_dop_active") != std::string::npos);
+    assert(source.find("static bool hide1_target_has_open_inode") !=
+           std::string::npos);
+    assert(source.find("files = binding->target_task->files") !=
+           std::string::npos);
+    assert(source.find("put_files_struct(files)") != std::string::npos);
     assert(source.find("atomic_t open_count") != std::string::npos);
     assert(source.find("hide1_mutation_calls") != std::string::npos);
     assert(source.find("hide1_mutation_blocked_calls") != std::string::npos);
@@ -376,6 +389,12 @@ int main() {
         "atomic_dec_and_test(&hide1_symlink_stage_active)",
     });
     assert(source.find("status.inode_security_bridge_enoent") !=
+           std::string::npos);
+    assert(source.find("module_param_named(diagnostic_probes") !=
+           std::string::npos);
+    assert(source.find("module_param_named(symlink_errno_bridge") !=
+           std::string::npos);
+    assert(source.find("if (!READ_ONCE(hide1_diagnostic_probes))") !=
            std::string::npos);
     const std::string stage_register = FunctionBody(
         source, "static int hide1_register_diagnostic_probes",

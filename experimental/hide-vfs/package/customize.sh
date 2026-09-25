@@ -1,7 +1,7 @@
 #!/system/bin/sh
 
 ui_print "- PathGuard Hide 1.0 Lab"
-ui_print "- Experimental package: no automatic load or ENABLE"
+ui_print "- Experimental fixed-device boot admission"
 
 case "$ARCH" in
   arm64) ;;
@@ -21,5 +21,8 @@ set_perm "$MODPATH/uninstall.sh" 0 0 0755
 set_perm "$MODPATH/bin/hide1ctl" 0 0 0755
 set_perm "$MODPATH/bin/pathguard_hide1.ko" 0 0 0644
 set_perm "$MODPATH/bin/hide1_control" 0 0 0755
-ui_print "- Kernel release accepted"
-ui_print "- Module remains inactive until manually controlled"
+set_perm "$MODPATH/bin/pathguardd" 0 0 0755
+set_perm "$MODPATH/config/rules.toml" 0 0 0644
+set_perm "$MODPATH/config/hide1_device_profile.json" 0 0 0644
+ui_print "- Kernel release accepted; profile and module hash are revalidated at boot"
+ui_print "- LKM loads only on exact profile match; daemon applies configured Hide rules"

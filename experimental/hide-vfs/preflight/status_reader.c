@@ -21,6 +21,9 @@ int main(int argc, char **argv)
 		fprintf(stderr, "usage: %s /absolute/parent\n", argv[0]);
 		return 2;
 	}
+	fprintf(stderr, "request_size=%zu path_size=%zu ioctl_scan=0x%lx\n",
+		sizeof(request), sizeof(request.parent),
+		(unsigned long)PATHGUARD_VFS_PREFLIGHT_IOC_SCAN);
 	strcpy(request.parent, argv[1]);
 	fd = open("/dev/pathguard_vfs_preflight", O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
@@ -44,12 +47,13 @@ int main(int argc, char **argv)
 	       " inode=0x%016" PRIx64 " dentry=0x%016" PRIx64
 	       " i_op=0x%016" PRIx64 " f_op=0x%016" PRIx64
 	       " d_op=0x%016" PRIx64 " fs=%s parent=%s release=%s\n", status.abi_version, status.size,
-	       status.state, status.last_error, status.operation_mask,
-	       status.parent_inode, status.parent_mode, status.parent_dev_major,
-	       status.parent_dev_minor, status.mount_address,
-	       status.superblock_address, status.inode_address,
-	       status.dentry_address, status.i_op_address, status.f_op_address,
-	       status.d_op_address, status.filesystem, status.parent,
+	       status.state, status.last_error, (uint64_t)status.operation_mask,
+	       (uint64_t)status.parent_inode, status.parent_mode, status.parent_dev_major,
+	       status.parent_dev_minor, (uint64_t)status.mount_address,
+	       (uint64_t)status.superblock_address, (uint64_t)status.inode_address,
+	       (uint64_t)status.dentry_address, (uint64_t)status.i_op_address,
+	       (uint64_t)status.f_op_address, (uint64_t)status.d_op_address,
+	       status.filesystem, status.parent,
 	       status.kernel_release);
 	close(fd);
 	return 0;

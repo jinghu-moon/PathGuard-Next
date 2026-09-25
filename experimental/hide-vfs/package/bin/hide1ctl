@@ -59,9 +59,10 @@ case "${1:-status}" in
       0|1|2|3|4) ;;
       *) die "shadow mode must be 0(all), 1(i_op), 2(f_op), 3(d_op), or 4(fuse-ro)" ;;
     esac
-    log "loading $KO through $KSU with shadow_mode=$MODE"
-    "$KSU" insmod "$KO" "shadow_mode=$MODE" || die "ksud insmod failed"
-    log "load complete; shadow_mode=$MODE; module is INACTIVE until install/enable"
+    log "loading $KO through $KSU with shadow_mode=$MODE diagnostics=1 symlink_errno_bridge=1"
+    "$KSU" insmod "$KO" "shadow_mode=$MODE" \
+      diagnostic_probes=1 symlink_errno_bridge=1 || die "ksud insmod failed"
+    log "load complete; shadow_mode=$MODE; diagnostics enabled; module is INACTIVE until install/enable"
     ;;
   unload)
     run_control disable >/dev/null 2>&1 || true
@@ -91,7 +92,7 @@ case "${1:-status}" in
     ;;
   *)
     cat >&2 <<EOF
-PathGuard Hide 1.0 Lab: manual controls only
+PathGuard Hide 1.0 Lab controls
   $0 load [mode: 1=i_op, 2=f_op, 3=d_op, 4=fuse-ro, 0=all]
   $0 status
   $0 install <uid> <pid> <generation> <parent> <basename>
@@ -100,8 +101,10 @@ PathGuard Hide 1.0 Lab: manual controls only
   $0 clear
   $0 unload
 
-The package never enables a rule automatically. Keep a second adb/root shell
-open before testing ENABLE and collect /sys/fs/pstore after any reboot.
+Boot service admission and rules-based activation are automatic only when the
+fixed device profile matches. Manual ENABLE remains a high-risk lab operation.
+Keep a second adb/root shell open before manual ENABLE and collect
+/sys/fs/pstore after any reboot.
 EOF
     exit 2
     ;;
