@@ -1,0 +1,121 @@
+name: Build PathGuard Hide 1 KMI matrix
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/pattern-redirect-v6
+    paths:
+      - .github/workflows/build-hide1-kmi.yml
+      - experimental/hide-vfs/**
+
+permissions:
+  contents: read
+
+jobs:
+  build-hide1:
+    name: Hide 1 for ${{ matrix.kmi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kmi: android12-5.10
+            ddk_image: ghcr.io/ylarod/ddk:android12-5.10-20260828
+          - kmi: android13-5.10
+            ddk_image: ghcr.io/ylarod/ddk:android13-5.10-20260828
+          - kmi: android13-5.15
+            ddk_image: ghcr.io/ylarod/ddk:android13-5.15-20260828
+          - kmi: android14-5.15
+            ddk_image: ghcr.io/ylarod/ddk:android14-5.15-20260828
+          - kmi: android14-6.1
+            ddk_image: ghcr.io/ylarod/ddk:android14-6.1-20260828
+          - kmi: android15-6.6
+            ddk_image: ghcr.io/ylarod/ddk:android15-6.6-20260828
+          - kmi: android16-6.12
+            ddk_image: ghcr.io/ylarod/ddk:android16-6.12-20260828
+          - kmi: android17-6.18
+            ddk_image: ghcr.io/ylarod/ddk:android17-6.18-20260828
+
+    container:
+      image: ${{ matrix.ddk_image }}
+      options: --privileged
+
+    env:
+      KMI: ${{ matrix.kmi }}
+      DDK_IMAGE: ${{ matrix.ddk_image }}
+      OUT: ${{ github.workspace }}/out/hide1-${{ matrix.kmi }}
+
+    steps:
+      - name: Check out PathGuard
+        uses: actions/checkout@v6
+
+      - name: Validate DDK and derive target release
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${KDIR:?DDK must export KDIR}"
+          test "$(basename "${KDIR%/}")" = "$KMI"
+          test -f "$KDIR/Makefile"
+          test -f "$KDIR/vmlinux"
+          test -f "$KDIR/Module.symvers"
+          test -f "$KDIR/include/generated/utsrelease.h"
+          release="$(sed -n 's/^#define UTS_RELEASE "\(.*\)"/\1/p' "$KDIR/include/generated/utsrelease.h")"
+          test -n "$release"
+          {
+            echo "KERNEL_RELEASE=$release"
+            echo "KMI=$KMI"
+            echo "DDK_IMAGE=$DDK_IMAGE"
+          } | tee "$GITHUB_WORKSPACE/out-${KMI}-environment.txt"
+          echo "KERNEL_RELEASE=$release" >> "$GITHUB_ENV"
+
+      - name: Build Hide 1 module
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
+          make -C experimental/hide-vfs \
+            KDIR="$KDIR" \
+            DEVICE_KERNEL_RELEASE="$KERNEL_RELEASE" \
+            CC=clang \
+            LLVM=1 \
+            -j"$(nproc --all)"
+          test -s experimental/hide-vfs/pathguard_hide1.ko
+          cp experimental/hide-vfs/pathguard_hide1.ko "$OUT/pathguard_hide1.ko"
+
+      - name: Inspect module and produce capability evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          ko="$OUT/pathguard_hide1.ko"
+          llvm-readelf -hW "$ko" > "$OUT/elf-header.txt"
+          llvm-readelf -SW "$ko" > "$OUT/elf-sections.txt"
+          llvm-readelf -p .modinfo "$ko" > "$OUT/modinfo.txt"
+          llvm-nm -u --format=posix "$ko" | awk '{print $1}' | sort -u > "$OUT/undefined-symbols.txt"
+          llvm-nm --defined-only --format=posix "$KDIR/vmlinux" | awk '{print $1}' | sort -u > "$OUT/vmlinux-defined-symbols.txt"
+          comm -23 "$OUT/undefined-symbols.txt" "$OUT/vmlinux-defined-symbols.txt" > "$OUT/missing-symbols.txt"
+          sha256sum "$ko" > "$OUT/sha256.txt"
+          {
+            echo "status=built"
+            echo "static_verification=passed"
+            echo "kmi=$KMI"
+            echo "kernel_release=$KERNEL_RELEASE"
+            echo "ddk_image=$DDK_IMAGE"
+            echo "commit=$GITHUB_SHA"
+          } > "$OUT/build-manifest.txt"
+
+          grep -Eq 'Machine:[[:space:]]+AArch64' "$OUT/elf-header.txt"
+          grep -q "vermagic=$KERNEL_RELEASE" "$OUT/modinfo.txt"
+          grep -Eq '[[:space:]](__versions|__version_ext_crcs)[[:space:]]' "$OUT/elf-sections.txt"
+          test ! -s "$OUT/missing-symbols.txt"
+
+      - name: Upload KMI module and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pathguard-hide1-${{ matrix.kmi }}
+          path: |
+            ${{ env.OUT }}/
+            out-${{ matrix.kmi }}-environment.txt
+          if-no-files-found: error
+          retention-days: 30

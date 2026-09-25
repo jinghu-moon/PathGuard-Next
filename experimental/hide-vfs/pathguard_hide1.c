@@ -29,6 +29,7 @@
 #include <linux/sched/signal.h>
 #include <linux/string.h>
 #include <linux/utsname.h>
+#include <linux/user_namespace.h>
 #include <linux/version.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
@@ -39,6 +40,19 @@
 #ifndef PATHGUARD_HIDE1_EXPECTED_RELEASE
 #define PATHGUARD_HIDE1_EXPECTED_RELEASE \
     "6.12.23-android16-5-g16e473de48a3-abogki462654244-4k"
+#endif
+
+/* inode_operations gained an idmap argument in the 5.12 idmapped-mount work,
+ * then switched from user_namespace to mnt_idmap in Linux 6.3. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+#define PATHGUARD_HIDE1_IDMAP_PARAM struct mnt_idmap *idmap,
+#define PATHGUARD_HIDE1_IDMAP_FORWARD idmap,
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+#define PATHGUARD_HIDE1_IDMAP_PARAM struct user_namespace *idmap,
+#define PATHGUARD_HIDE1_IDMAP_FORWARD idmap,
+#else
+#define PATHGUARD_HIDE1_IDMAP_PARAM
+#define PATHGUARD_HIDE1_IDMAP_FORWARD
 #endif
 
 static DEFINE_MUTEX(hide1_lock);
@@ -562,17 +576,17 @@ static int hide1_atomic_open(struct inode *, struct dentry *, struct file *,
 static int hide1_fop_open(struct inode *, struct file *);
 static int hide1_fop_release(struct inode *, struct file *);
 static int hide1_iterate_shared(struct file *, struct dir_context *);
-static int hide1_create(struct mnt_idmap *, struct inode *, struct dentry *,
+static int hide1_create(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *,
                         umode_t, bool);
-static int hide1_mkdir(struct mnt_idmap *, struct inode *, struct dentry *, umode_t);
-static int hide1_mknod(struct mnt_idmap *, struct inode *, struct dentry *,
+static int hide1_mkdir(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *, umode_t);
+static int hide1_mknod(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *,
                        umode_t, dev_t);
-static int hide1_symlink(struct mnt_idmap *, struct inode *, struct dentry *,
+static int hide1_symlink(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *,
                          const char *);
 static int hide1_unlink(struct inode *, struct dentry *);
 static int hide1_rmdir(struct inode *, struct dentry *);
 static int hide1_link(struct dentry *, struct inode *, struct dentry *);
-static int hide1_rename(struct mnt_idmap *, struct inode *, struct dentry *,
+static int hide1_rename(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *,
                         struct inode *, struct dentry *, unsigned int);
 static int hide1_d_revalidate(struct dentry *, unsigned int);
 static void hide1_free_dentry_shadows(struct list_head *retired);
@@ -2113,7 +2127,7 @@ static void hide1_record_hidden_inode(struct hide1_binding *binding,
                         &hide1_iop_wait, &(_meta)->wait);              \
     srcu_read_unlock(&hide1_srcu, (_idx))
 
-static int hide1_create(struct mnt_idmap *idmap, struct inode *dir,
+static int hide1_create(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *dir,
                         struct dentry *dentry, umode_t mode, bool excl)
 {
     struct hide1_iop_meta *meta;
@@ -2129,7 +2143,7 @@ static int hide1_create(struct mnt_idmap *idmap, struct inode *dir,
     } else if (meta->orig && meta->orig->create) {
         hide1_mutation_finish(HIDE1_MUTATION_CREATE,
                               HIDE1_MUTATION_ORIGINAL);
-        ret = meta->orig->create(idmap, dir, dentry, mode, excl);
+        ret = meta->orig->create(PATHGUARD_HIDE1_IDMAP_FORWARD dir, dentry, mode, excl);
     } else {
         hide1_mutation_finish(HIDE1_MUTATION_CREATE,
                               HIDE1_MUTATION_UNSUPPORTED);
@@ -2139,7 +2153,7 @@ static int hide1_create(struct mnt_idmap *idmap, struct inode *dir,
     return ret;
 }
 
-static int hide1_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+static int hide1_mkdir(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *dir,
                        struct dentry *dentry, umode_t mode)
 {
     struct hide1_iop_meta *meta;
@@ -2155,7 +2169,7 @@ static int hide1_mkdir(struct mnt_idmap *idmap, struct inode *dir,
     } else if (meta->orig && meta->orig->mkdir) {
         hide1_mutation_finish(HIDE1_MUTATION_MKDIR,
                               HIDE1_MUTATION_ORIGINAL);
-        ret = meta->orig->mkdir(idmap, dir, dentry, mode);
+        ret = meta->orig->mkdir(PATHGUARD_HIDE1_IDMAP_FORWARD dir, dentry, mode);
     } else {
         hide1_mutation_finish(HIDE1_MUTATION_MKDIR,
                               HIDE1_MUTATION_UNSUPPORTED);
@@ -2165,7 +2179,7 @@ static int hide1_mkdir(struct mnt_idmap *idmap, struct inode *dir,
     return ret;
 }
 
-static int hide1_mknod(struct mnt_idmap *idmap, struct inode *dir,
+static int hide1_mknod(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *dir,
                        struct dentry *dentry, umode_t mode, dev_t dev)
 {
     struct hide1_iop_meta *meta;
@@ -2181,7 +2195,7 @@ static int hide1_mknod(struct mnt_idmap *idmap, struct inode *dir,
     } else if (meta->orig && meta->orig->mknod) {
         hide1_mutation_finish(HIDE1_MUTATION_MKNOD,
                               HIDE1_MUTATION_ORIGINAL);
-        ret = meta->orig->mknod(idmap, dir, dentry, mode, dev);
+        ret = meta->orig->mknod(PATHGUARD_HIDE1_IDMAP_FORWARD dir, dentry, mode, dev);
     } else {
         hide1_mutation_finish(HIDE1_MUTATION_MKNOD,
                               HIDE1_MUTATION_UNSUPPORTED);
@@ -2191,7 +2205,7 @@ static int hide1_mknod(struct mnt_idmap *idmap, struct inode *dir,
     return ret;
 }
 
-static int hide1_symlink(struct mnt_idmap *idmap, struct inode *dir,
+static int hide1_symlink(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *dir,
                          struct dentry *dentry, const char *symname)
 {
     struct hide1_iop_meta *meta;
@@ -2207,7 +2221,7 @@ static int hide1_symlink(struct mnt_idmap *idmap, struct inode *dir,
     } else if (meta->orig && meta->orig->symlink) {
         hide1_mutation_finish(HIDE1_MUTATION_SYMLINK,
                               HIDE1_MUTATION_ORIGINAL);
-        ret = meta->orig->symlink(idmap, dir, dentry, symname);
+        ret = meta->orig->symlink(PATHGUARD_HIDE1_IDMAP_FORWARD dir, dentry, symname);
     } else {
         hide1_mutation_finish(HIDE1_MUTATION_SYMLINK,
                               HIDE1_MUTATION_UNSUPPORTED);
@@ -2297,7 +2311,7 @@ static int hide1_link(struct dentry *old_dentry, struct inode *dir,
     return ret;
 }
 
-static int hide1_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+static int hide1_rename(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *old_dir,
                         struct dentry *old_dentry, struct inode *new_dir,
                         struct dentry *new_dentry, unsigned int flags)
 {
@@ -2324,7 +2338,7 @@ static int hide1_rename(struct mnt_idmap *idmap, struct inode *old_dir,
     } else if (meta->orig && meta->orig->rename) {
         hide1_mutation_finish(HIDE1_MUTATION_RENAME,
                               HIDE1_MUTATION_ORIGINAL);
-        ret = meta->orig->rename(idmap, old_dir, old_dentry,
+        ret = meta->orig->rename(PATHGUARD_HIDE1_IDMAP_FORWARD old_dir, old_dentry,
                                                 new_dir, new_dentry, flags);
     } else {
         hide1_mutation_finish(HIDE1_MUTATION_RENAME,

@@ -1,6 +1,7 @@
 KDIR ?=
 MDIR := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
-DEVICE_KERNEL_RELEASE ?= 6.12.23-android16-5-g16e473de48a3-abogki462654244-4k
+KMI := $(notdir $(patsubst %/,%,$(KDIR)))
+DEVICE_KERNEL_RELEASE ?= $(shell sed -n 's/^#define UTS_RELEASE "\(.*\)"/\1/p' "$(KDIR)/include/generated/utsrelease.h" 2>/dev/null)
 
 obj-m += pathguard_hide1.o
 
@@ -10,8 +11,8 @@ ccflags-y += -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
 .PHONY: all clean
 all:
 	@test -n "$(KDIR)" || (echo "KDIR is required" >&2; exit 2)
-	@test "$(notdir $(patsubst %/,%,$(KDIR)))" = "android16-6.12" || \
-		(echo "KDIR must be the android16-6.12 DDK directory" >&2; exit 2)
+	@test -n "$(DEVICE_KERNEL_RELEASE)" || \
+		(echo "DEVICE_KERNEL_RELEASE is required" >&2; exit 2)
 	$(MAKE) -C "$(KDIR)" ARCH=arm64 M="$(MDIR)" src="$(MDIR)" modules
 	@test -s "$(MDIR)/pathguard_hide1.ko" || \
 		(echo "module build did not produce pathguard_hide1.ko" >&2; exit 2)

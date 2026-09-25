@@ -44,11 +44,15 @@ namespace, so a cross-namespace call returns `EXDEV` instead of binding a
 different parent with the same pathname. The binding explicitly holds both
 the path and inode references until `CLEAR` or module unload.
 
-The module is built against the same `android16-6.12` DDK family used by
-SukiSU Ultra:
+The module can be built against any prepared DDK in the candidate KMI matrix.
+The current local target is the `android16-6.12` DDK family used by SukiSU
+Ultra:
 
 ```sh
-CC=clang make -C experimental/hide-vfs KDIR=/opt/ddk/android16-6.12
+CC=clang make -C experimental/hide-vfs \
+  KDIR=/opt/ddk/android16-6.12 \
+  DEVICE_KERNEL_RELEASE="$(sed -n 's/^#define UTS_RELEASE \"\\(.*\\)\"/\\1/p' \
+    /opt/ddk/android16-6.12/include/generated/utsrelease.h)"
 ```
 
 On the admitted device, SukiSU's loader resolves undefined symbols against the
@@ -83,6 +87,16 @@ the target-only marker is never allowed to survive a positive cache entry.
 This prototype is not part of the production module. It must pass the complete
 HideLab matrix, including warm positive dentries, concurrent access, lifecycle
 teardown, and mutation/rename cases, before Hide 1.0 can leave `unsupported`.
+
+## KMI build matrix
+
+`.github/workflows/build-hide1-kmi.yml` builds one candidate module per Android
+KMI (`android12-5.10` through `android17-6.18`). Each job uses the matching
+prepared DDK image and uploads the `.ko` together with its release, vermagic,
+undefined-symbol, CRC-section, SHA-256 and build-manifest evidence. A successful
+job means only `built/static_verified`; it is not runtime capability evidence,
+device admission, or Hide support. Device support still requires a matching
+backend profile, capability probe and real-device regression.
 
 ## Experimental package
 
