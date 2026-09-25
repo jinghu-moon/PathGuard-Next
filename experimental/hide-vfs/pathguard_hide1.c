@@ -55,6 +55,13 @@
 #define PATHGUARD_HIDE1_IDMAP_FORWARD
 #endif
 
+/* dir_context actors returned int before Linux 6.1 and bool afterwards. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#define PATHGUARD_HIDE1_DIR_ACTOR_RET bool
+#else
+#define PATHGUARD_HIDE1_DIR_ACTOR_RET int
+#endif
+
 static DEFINE_MUTEX(hide1_lock);
 DEFINE_STATIC_SRCU(hide1_srcu);
 
@@ -906,8 +913,8 @@ static bool hide1_is_hidden_inode(const struct hide1_binding *binding,
 
 /* Diagnostic only: observe do_symlinkat(newdfd) before filename_create and
  * the LSM path hook. Never parse a userspace pathname or alter pt_regs here.
- * lookup_fdget_rcu() handles the file slab's SLAB_TYPESAFE_BY_RCU lifetime;
- * the stable reference is released before returning from the probe. */
+ * Newer kernels provide lookup_fdget_rcu() for the typesafe-RCU file slab;
+ * old kernels use fget() for this non-authoritative diagnostic path. */
 static int hide1_do_symlinkat_pre(struct kprobe *probe, struct pt_regs *regs)
 {
     struct inode *inode;
@@ -926,9 +933,13 @@ static int hide1_do_symlinkat_pre(struct kprobe *probe, struct pt_regs *regs)
     if (newdfd < 0)
         goto out;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
     rcu_read_lock();
     file = lookup_fdget_rcu((unsigned int)newdfd);
     rcu_read_unlock();
+#else
+    file = fget((unsigned int)newdfd);
+#endif
     if (!file)
         goto out;
     atomic64_inc(&hide1_symlink_probe_fd);
@@ -1475,7 +1486,11 @@ static int hide1_install_cached_descendant_shadows(struct hide1_binding *binding
      * prototype: an overflow leaves admission unsupported rather than
      * claiming full subtree coverage. */
     spin_lock(&parent->d_lock);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
     hlist_for_each_entry(child, &parent->d_children, d_sib) {
+#else
+    list_for_each_entry(child, &parent->d_subdirs, d_child) {
+#endif
         if (count == ARRAY_SIZE(children)) {
             overflow = true;
             break;
@@ -1934,7 +1949,11 @@ static bool hide1_dir_actor(struct dir_context *ctx, const char *name,
         hide1_drop_filtered_child(proxy, name, namelen);
         atomic64_inc(&hide1_readdir_filtered);
         proxy->ctx.pos = offset;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
         return true;
+#else
+        return 0;
+#endif
     }
 
     /* Filesystems, including FUSE, may update ctx->pos while emitting a
@@ -1943,8 +1962,9 @@ static bool hide1_dir_actor(struct dir_context *ctx, const char *name,
      * repeat records or skip entries after filtering. */
     proxy->orig->pos = proxy->ctx.pos;
     {
-        bool ret = proxy->orig->actor(proxy->orig, name, namelen, offset,
-                                      ino, d_type);
+        PATHGUARD_HIDE1_DIR_ACTOR_RET ret =
+            proxy->orig->actor(proxy->orig, name, namelen, offset,
+                               ino, d_type);
         proxy->ctx.pos = proxy->orig->pos;
         return ret;
     }
@@ -2353,11 +2373,12 @@ static int hide1_install_extra_fop_shadows_locked(
     struct hide1_binding *binding)
 {
     unsigned int index;
+    struct hide1_rule_scope *scope;
 
     for (index = 1; index < hide1_scope_count(binding); ++index) {
         if (hide1_scope_is_duplicate(binding, index))
             continue;
-        struct hide1_rule_scope *scope = &binding->scopes[index];
+        scope = &binding->scopes[index];
         struct hide1_fop_meta *meta;
         if (!scope->orig_fop)
             return -EINVAL;
@@ -2813,11 +2834,13 @@ static void hide1_release_binding(struct hide1_binding *binding)
 
 static int hide1_reset_locked(void)
 {
+    int ret;
+
     if (hide1_binding.shadow.fop_meta &&
         atomic_read(&hide1_binding.shadow.fop_meta->open_count) != 0)
         return -EBUSY;
 
-    int ret = hide1_shadow_uninstall_locked(&hide1_binding);
+    ret = hide1_shadow_uninstall_locked(&hide1_binding);
 
     if (ret)
         return ret;
