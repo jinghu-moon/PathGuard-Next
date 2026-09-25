@@ -83,7 +83,7 @@ jobs:
             DEVICE_KERNEL_RELEASE="$KERNEL_RELEASE" \
             CC=clang \
             LLVM=1 \
-            KCFLAGS="$extra_kcflags" \
+            EXTRA_CFLAGS="$extra_kcflags" \
             -j"$(nproc --all)"
           test -s experimental/hide-vfs/pathguard_hide1.ko
           cp experimental/hide-vfs/pathguard_hide1.ko "$OUT/pathguard_hide1.ko"
