@@ -62,6 +62,27 @@
 #define PATHGUARD_HIDE1_DIR_ACTOR_RET int
 #endif
 
+/* dentry_operations gained the inode/name arguments in Linux 6.18. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#define PATHGUARD_HIDE1_D_REVALIDATE_ARGS \
+    struct inode *dir, const struct qstr *name, struct dentry *dentry, \
+    unsigned int flags
+#else
+#define PATHGUARD_HIDE1_D_REVALIDATE_ARGS \
+    struct dentry *dentry, unsigned int flags
+#endif
+
+/* inode_operations::mkdir returns a dentry from Linux 6.18 onwards. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#define PATHGUARD_HIDE1_MKDIR_RET struct dentry *
+#define PATHGUARD_HIDE1_MKDIR_ERROR(_errno) ERR_PTR(_errno)
+#define PATHGUARD_HIDE1_MKDIR_GUARD_ERROR ERR_PTR(-EIO)
+#else
+#define PATHGUARD_HIDE1_MKDIR_RET int
+#define PATHGUARD_HIDE1_MKDIR_ERROR(_errno) (_errno)
+#define PATHGUARD_HIDE1_MKDIR_GUARD_ERROR (-EIO)
+#endif
+
 static DEFINE_MUTEX(hide1_lock);
 DEFINE_STATIC_SRCU(hide1_srcu);
 
@@ -585,7 +606,7 @@ static int hide1_fop_release(struct inode *, struct file *);
 static int hide1_iterate_shared(struct file *, struct dir_context *);
 static int hide1_create(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *,
                         umode_t, bool);
-static int hide1_mkdir(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *, umode_t);
+static PATHGUARD_HIDE1_MKDIR_RET hide1_mkdir(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *, umode_t);
 static int hide1_mknod(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *,
                        umode_t, dev_t);
 static int hide1_symlink(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *,
@@ -595,7 +616,7 @@ static int hide1_rmdir(struct inode *, struct dentry *);
 static int hide1_link(struct dentry *, struct inode *, struct dentry *);
 static int hide1_rename(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *, struct dentry *,
                         struct inode *, struct dentry *, unsigned int);
-static int hide1_d_revalidate(struct dentry *, unsigned int);
+static int hide1_d_revalidate(PATHGUARD_HIDE1_D_REVALIDATE_ARGS);
 static void hide1_free_dentry_shadows(struct list_head *retired);
 static void hide1_record_hidden_inode(struct hide1_binding *binding,
                                       struct inode *inode);
@@ -913,8 +934,8 @@ static bool hide1_is_hidden_inode(const struct hide1_binding *binding,
 
 /* Diagnostic only: observe do_symlinkat(newdfd) before filename_create and
  * the LSM path hook. Never parse a userspace pathname or alter pt_regs here.
- * Newer kernels provide lookup_fdget_rcu() for the typesafe-RCU file slab;
- * old kernels use fget() for this non-authoritative diagnostic path. */
+ * This path is deliberately non-authoritative, so use the stable fget()
+ * interface instead of depending on lookup_fd_rcu() variants. */
 static int hide1_do_symlinkat_pre(struct kprobe *probe, struct pt_regs *regs)
 {
     struct inode *inode;
@@ -933,13 +954,7 @@ static int hide1_do_symlinkat_pre(struct kprobe *probe, struct pt_regs *regs)
     if (newdfd < 0)
         goto out;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
-    rcu_read_lock();
-    file = lookup_fdget_rcu((unsigned int)newdfd);
-    rcu_read_unlock();
-#else
     file = fget((unsigned int)newdfd);
-#endif
     if (!file)
         goto out;
     atomic64_inc(&hide1_symlink_probe_fd);
@@ -2022,7 +2037,7 @@ static int hide1_iterate_shared(struct file *file, struct dir_context *ctx)
     return ret;
 }
 
-static int hide1_d_revalidate(struct dentry *dentry, unsigned int flags)
+static int hide1_d_revalidate(PATHGUARD_HIDE1_D_REVALIDATE_ARGS)
 {
     struct hide1_dentry_shadow *meta;
     struct hide1_binding *binding;
@@ -2086,8 +2101,13 @@ static int hide1_d_revalidate(struct dentry *dentry, unsigned int flags)
         }
         goto out;
     }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+    ret = meta->orig_dop && meta->orig_dop->d_revalidate ?
+          meta->orig_dop->d_revalidate(dir, name, dentry, flags) : 1;
+#else
     ret = meta->orig_dop && meta->orig_dop->d_revalidate ?
           meta->orig_dop->d_revalidate(dentry, flags) : 1;
+#endif
 out:
     hide1_callback_exit(&hide1_dop_active, &meta->active,
                         &hide1_dop_wait, &meta->wait);
@@ -2147,6 +2167,13 @@ static void hide1_record_hidden_inode(struct hide1_binding *binding,
                         &hide1_iop_wait, &(_meta)->wait);              \
     srcu_read_unlock(&hide1_srcu, (_idx))
 
+#define HIDE1_MKDIR_IOP_GUARD(_inode, _meta, _binding, _idx)            \
+    (_meta) = hide1_iop_enter((_inode));                                \
+    (_binding) = (_meta) ? (_meta)->binding : NULL;                     \
+    if (!(_binding))                                                     \
+        return PATHGUARD_HIDE1_MKDIR_GUARD_ERROR;                       \
+    (_idx) = srcu_read_lock(&hide1_srcu)
+
 static int hide1_create(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *dir,
                         struct dentry *dentry, umode_t mode, bool excl)
 {
@@ -2173,19 +2200,20 @@ static int hide1_create(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *dir,
     return ret;
 }
 
-static int hide1_mkdir(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *dir,
-                       struct dentry *dentry, umode_t mode)
+static PATHGUARD_HIDE1_MKDIR_RET hide1_mkdir(
+    PATHGUARD_HIDE1_IDMAP_PARAM struct inode *dir,
+    struct dentry *dentry, umode_t mode)
 {
     struct hide1_iop_meta *meta;
     struct hide1_binding *binding;
     int idx;
-    int ret;
+    PATHGUARD_HIDE1_MKDIR_RET ret;
     hide1_mutation_begin(HIDE1_MUTATION_MKDIR);
-    HIDE1_IOP_GUARD(dir, meta, binding, idx);
+    HIDE1_MKDIR_IOP_GUARD(dir, meta, binding, idx);
     if (hide1_mutation_blocked(binding, dir, dentry)) {
         hide1_mutation_finish(HIDE1_MUTATION_MKDIR,
                               HIDE1_MUTATION_BLOCKED);
-        ret = -ENOENT;
+        ret = PATHGUARD_HIDE1_MKDIR_ERROR(-ENOENT);
     } else if (meta->orig && meta->orig->mkdir) {
         hide1_mutation_finish(HIDE1_MUTATION_MKDIR,
                               HIDE1_MUTATION_ORIGINAL);
@@ -2193,7 +2221,7 @@ static int hide1_mkdir(PATHGUARD_HIDE1_IDMAP_PARAM struct inode *dir,
     } else {
         hide1_mutation_finish(HIDE1_MUTATION_MKDIR,
                               HIDE1_MUTATION_UNSUPPORTED);
-        ret = -EOPNOTSUPP;
+        ret = PATHGUARD_HIDE1_MKDIR_ERROR(-EOPNOTSUPP);
     }
     HIDE1_IOP_UNGUARD(meta, idx);
     return ret;

@@ -6,6 +6,7 @@ DEVICE_KERNEL_RELEASE ?= $(shell sed -n 's/^#define UTS_RELEASE "\(.*\)"/\1/p' "
 obj-m += pathguard_hide1.o
 
 ccflags-y += -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
+	-Wno-error=unused-but-set-variable \
 	-DPATHGUARD_HIDE1_EXPECTED_RELEASE=\"$(DEVICE_KERNEL_RELEASE)\"
 
 .PHONY: all clean
