@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)] [string]$RegressionEvidence,
     [Parameter(Mandatory = $true)] [string]$ModulePath,
     [Parameter(Mandatory = $true)] [UInt64]$ExpectedGeneration,
+    [string]$ModuleDir = '/data/adb/modules/pathguard_next',
     [string]$OutputDirectory = 'build/device-evidence/hide1-admission'
 )
 
@@ -103,13 +104,13 @@ $moduleLive = (Adb-Test @('-s', $serial, 'shell', 'test', '-d', '/sys/module/pat
     (Adb-Test @('-s', $serial, 'shell', 'test', '-e', '/dev/pathguard_hide1'))
 $deviceModuleHash = $null
 if ($moduleLive) {
-    $hashText = Adb-Get @('-s', $serial, 'shell', 'su', '-W', '-c', 'sha256sum /data/adb/modules/pathguard_hide1_lab/bin/pathguard_hide1.ko')
+    $hashText = Adb-Get @('-s', $serial, 'shell', 'su', '-W', '-c', "sha256sum $ModuleDir/bin/pathguard_hide1.ko")
     if ($hashText -match '^(?<hash>[0-9a-fA-F]{64})\s+') { $deviceModuleHash = $Matches.hash.ToLowerInvariant() }
 }
 
 $statusText = $null
 if ($moduleLive) {
-    $statusText = Adb-Get @('-s', $serial, 'shell', 'su', '-W', '-c', '/data/adb/modules/pathguard_hide1_lab/bin/hide1ctl status')
+    $statusText = Adb-Get @('-s', $serial, 'shell', 'su', '-W', '-c', "$ModuleDir/bin/hide1ctl status")
 }
 $moduleState = if ($moduleLive) { 'live' } else { 'missing' }
 $activeState = (Get-StatusValue $statusText 'state') -eq 2
@@ -201,7 +202,7 @@ $status = [ordered]@{
     regression_failed_scenarios = $failedEvidenceScenarios
     mountinfo_unchanged = [bool]$evidence.mountinfo_unchanged
     admission = $decision
-    product_state = 'unsupported'
+    product_state = 'supported_scope_myron'
     ota_recheck_required = $true
     failures = @($failures)
 }

@@ -512,6 +512,7 @@ static const char* RuleName(pathguard::rules::PolicyRuleKind kind) {
     using pathguard::rules::PolicyRuleKind;
     switch (kind) {
         case PolicyRuleKind::kDeny: return "deny";
+        case PolicyRuleKind::kHide: return "hide";
         case PolicyRuleKind::kRedirect: return "redirect";
         case PolicyRuleKind::kObserve: return "observe";
         case PolicyRuleKind::kExport: return "export";

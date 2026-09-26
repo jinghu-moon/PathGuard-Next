@@ -233,7 +233,7 @@ void AdmissionEvidenceContract() {
       "regression_conclusion": "candidate_pass_requires_admission",
       "mountinfo_unchanged": true,
       "admission": "admitted",
-      "product_state": "unsupported",
+      "product_state": "supported_scope_myron",
       "ota_recheck_required": true
     })json";
     std::string error;
@@ -263,6 +263,12 @@ void AdmissionEvidenceContract() {
     invalid = valid;
     invalid.replace(marker_pos, marker.size(),
                     "\"admission\": \"unsupported\"");
+    assert(!ReadAdmissionJson(invalid, &error).has_value());
+
+    invalid = valid;
+    invalid.replace(invalid.find("supported_scope_myron"),
+                    std::string("supported_scope_myron").size(),
+                    "unsupported");
     assert(!ReadAdmissionJson(invalid, &error).has_value());
 }
 

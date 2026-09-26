@@ -4,6 +4,18 @@ SKIPUNZIP=0
 
 ui_print "- Installing PathGuard-Next"
 
+DEVICE="$(getprop ro.product.device 2>/dev/null)"
+if [ -f "$MODPATH/bin/pathguard_hide1.ko" ]; then
+  if [ "$DEVICE" = "myron" ]; then
+    ui_print "- Hide backend: Redmi K90 Pro Max (myron) only"
+  else
+    ui_print "! Hide backend unsupported on $DEVICE"
+    ui_print "! deny/redirect may remain available; Hide will stay disabled"
+  fi
+else
+  ui_print "- Hide backend: not included"
+fi
+
 if [ -z "$API" ]; then
   API="$(getprop ro.build.version.sdk)"
 fi
@@ -20,6 +32,11 @@ mkdir -p "$MODPATH/run"
 set_perm_recursive "$MODPATH/run" 0 0 0755 0644
 mkdir -p "$MODPATH/run/deny-anchor"
 set_perm "$MODPATH/run/deny-anchor" 0 0 0000
+
+[ ! -f "$MODPATH/bin/pathguard_hide1.ko" ] || set_perm "$MODPATH/bin/pathguard_hide1.ko" 0 0 0644
+[ ! -f "$MODPATH/bin/hide1_control" ] || set_perm "$MODPATH/bin/hide1_control" 0 0 0755
+[ ! -f "$MODPATH/bin/hide1ctl" ] || set_perm "$MODPATH/bin/hide1ctl" 0 0 0755
+[ ! -f "$MODPATH/config/hide1_device_profile.json" ] || set_perm "$MODPATH/config/hide1_device_profile.json" 0 0 0644
 
 for script in post-fs-data.sh service.sh boot-completed.sh action.sh uninstall.sh; do
   [ -f "$MODPATH/$script" ] && set_perm "$MODPATH/$script" 0 0 0755

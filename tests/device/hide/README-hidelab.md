@@ -3,6 +3,11 @@
 HideLab is the Phase A acceptance system for `hide`. It is a test instrument,
 not a production backend and not proof that `hide` is active.
 
+PathGuard-Next Hide 1.0 的最终支持范围锁定为 Redmi K90 Pro Max（`myron`）、
+Android 16 `android16-6.12` 的精确设备 profile。非 `myron` 安装合并包时会在
+安装界面明确提示 Hide unsupported；模块保持 fail-closed，deny/redirect 仍按
+各自 Provider 能力独立判断。
+
 ## Contract
 
 `hidelab_acceptance_matrix.json` is the frozen Hide 1.0 direct-VFS matrix.
@@ -138,6 +143,15 @@ mountinfo 变化都会得到 `blocked`，不会生成可准入结论：
 
 `-BaselineOnly` 仍可用于只读基线，但 active 模式不允许省略
 `-RunMutations -ConfirmMutation`。
+
+文件 Hide 规则使用 `-HiddenObjectType file`，fixture 为父目录下的单独文件
+`hidden-file`。Target 必须在 Java/native 的 stat、open、readdir 中得到
+`ENOENT` 或不包含该 basename，Control 仍可见，Root Oracle 不变；mutation
+覆盖 rename、unlink、link。目录规则保持默认的 `-HiddenObjectType directory`。
+
+全量证据如设备模块目录不是默认的 `pathguard_next`，使用
+`run_hide1_full_regression.ps1 -ModuleDir /data/adb/modules/<module>`；模块路径会
+写入 `full-regression.json`，避免哈希和状态读取旧模块。
 
 active 回归必须在 INSTALL 绑定的同一 disposable fixture 上运行。fixture 必须在
 `INSTALL` 之前创建，并且从 `INSTALL` 到整轮结束不得删除或重建 parent inode。先用

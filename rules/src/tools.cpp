@@ -78,12 +78,21 @@ std::string VisualSkeleton(std::string_view input) {
 PolicyRuleKind ToRuleKind(RuleActionKind kind) {
     switch (kind) {
         case RuleActionKind::kDeny: return PolicyRuleKind::kDeny;
+        case RuleActionKind::kHide: return PolicyRuleKind::kHide;
         case RuleActionKind::kRedirect: return PolicyRuleKind::kRedirect;
         case RuleActionKind::kObserve: return PolicyRuleKind::kObserve;
         case RuleActionKind::kExport: return PolicyRuleKind::kExport;
-        case RuleActionKind::kHide: return PolicyRuleKind::kDeny;
     }
     return PolicyRuleKind::kDeny;
+}
+
+int ActionPrecedence(RuleActionKind kind) {
+    switch (kind) {
+        case RuleActionKind::kDeny: return 3;
+        case RuleActionKind::kHide: return 2;
+        case RuleActionKind::kRedirect: return 1;
+        default: return 0;
+    }
 }
 
 std::string SelectorText(const CanonicalSelectorV2& selector) {
@@ -247,9 +256,11 @@ PathExplanation ExplainPath(const CanonicalPolicyV2& policy,
         if (!MatchesSelector(action.selector, path)) continue;
         matches.push_back(&action);
         if (winner == nullptr
-            || std::tie(action.priority, action.selector.specificity, action.id)
-                > std::tie(winner->priority, winner->selector.specificity,
-                           winner->id)) {
+            || std::make_tuple(ActionPrecedence(action.action), action.priority,
+                               action.selector.specificity, action.id)
+                > std::make_tuple(ActionPrecedence(winner->action),
+                                  winner->priority,
+                                  winner->selector.specificity, winner->id)) {
             winner = &action;
         }
     }

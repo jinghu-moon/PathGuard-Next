@@ -34,6 +34,10 @@ foreach ($id in $requiredIds) {
 if ($actualIds.Count -ne $requiredIds.Count) {
     throw "acceptance matrix has unexpected case count: $($actualIds.Count)"
 }
+if (-not $matrixObject.file_rule_fixture -or
+    $matrixObject.file_rule_fixture.object_type -ne 'file') {
+    throw 'acceptance matrix missing single-file hide fixture contract'
+}
 
 Require-Text $Runner @(
     'active full regression requires',
@@ -43,6 +47,7 @@ Require-Text $Runner @(
     'mountinfo-before.txt', 'mountinfo-after.txt',
     'candidate_pass_requires_admission', "`$FixtureRoot", "@('-FixtureRoot', `$FixtureRoot)",
     'ShadowMode', 'shadow_mode=0', 'Get-KernelShadowMode',
+    'ModuleDir', 'module_dir = $ModuleDir', 'HiddenObjectType',
     'actualShadowMode', 'numeric parent_inode',
     '$expectedParentInodeProvided',
     'if ($expectedParentInodeProvided -and'
@@ -50,8 +55,9 @@ Require-Text $Runner @(
 $baselineRunner = Join-Path (Split-Path -Parent $Runner) 'run_hidelab_baseline.ps1'
 Require-Text $baselineRunner @(
     'InitializeFixture', 'ExpectedParentInode',
+    'HiddenObjectType', 'hidden-file', 'hidden_object_type',
     'refusing to reset an explicitly bound FixtureRoot',
-    'test -d $fixtureRoot && test -d $hiddenPath && echo READY || echo MISSING',
+    '$hiddenObjectTest && echo READY || echo MISSING',
     'fixture is not prepared', 'parent_inode = $parentInode', 'shadow_mode = if'
 )
 Require-Text $Probe @(
@@ -64,6 +70,8 @@ Require-Text $Probe @(
     'external.mutation.rename_destination',
     'external.mutation.linkat',
     'external.mutation.symlinkat',
+    'external.mutation.unlink', 'external.mutation.rename',
+    'external.mutation.link',
     'external.fd_mutation.mknod',
     'sandbox.hidden.openat_dot',
     'sandbox.hidden.openat_parent',

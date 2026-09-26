@@ -1420,7 +1420,7 @@ Hide 1.0 = unsupported
 ```
 # 2026-09-25 P0-P2 验收收口
 
-本轮设备级任务已完成：P0 admission 负向撤权、P1 Target 生命周期、规则热更新、deny/redirect/hide 组合回归、重启重新准入，以及 P2 工程构建收口均有独立 evidence。当前手机 boot `6719e5f1-ccf7-47cb-8baa-5b8950e75a2c` 的 admission 为 `admitted`，daemon 自动 `INSTALL/ENABLE` 已恢复，`product_state=unsupported` 保持不变。
+本轮设备级任务已完成：P0 admission 负向撤权、P1 Target 生命周期、规则热更新、deny/redirect/hide 组合回归、重启重新准入，以及 P2 工程构建收口均有独立 evidence。当前手机 boot 的 admission 为 `admitted`，daemon 自动 `INSTALL/ENABLE` 已恢复；Hide 最终状态为 `product_state=supported_scope_myron`，仅支持 Redmi K90 Pro Max（myron）。
 
 关键证据：
 

@@ -159,8 +159,9 @@ std::optional<Admission> ReadAdmissionJsonInternal(const std::string& json,
     if (!require(ReadJsonUnsignedField(json, "schema", &schema) && schema >= 2,
                  "schema")
         || !require(ReadJsonStringField(json, "product_state", &product_state)
-                    && product_state == "unsupported", "product-state")
-        || !require(ReadJsonStringField(json, "device", &admission.device), "device")
+                    && product_state == "supported_scope_myron", "product-state")
+        || !require(ReadJsonStringField(json, "device", &admission.device)
+                    && admission.device == "myron", "device")
         || !require(ReadJsonStringField(json, "arch", &admission.arch)
                     && admission.arch == "aarch64", "arch")
         || !require(ReadJsonStringField(json, "fingerprint", &admission.fingerprint), "fingerprint")
@@ -499,6 +500,9 @@ std::optional<Admission> ReadDeviceAdmissionConfig(
     admission.regression_conclusion = "device-profile-allowlisted";
     admission.mountinfo_unchanged = true;
     admission.ota_recheck_required = true;
+    admission.status_generation = 1;
+    admission.status_parent_inode = 1;
+    admission.status_shadow_mode = 0;
     return admission;
 }
 

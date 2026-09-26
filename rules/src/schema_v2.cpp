@@ -4,6 +4,7 @@
 #include <array>
 #include <limits>
 #include <string_view>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 
@@ -721,6 +722,30 @@ void AddBuildDiagnostic(RulesV2BuildResult* result, std::string_view code,
     result->diagnostics.push_back(std::move(diagnostic));
 }
 
+bool SelectorsMayOverlap(const CanonicalSelectorV2& lhs,
+                         const CanonicalSelectorV2& rhs) {
+    if (lhs.source_kind == SelectorSourceKind::kLiteral
+        && rhs.source_kind == SelectorSourceKind::kLiteral) {
+        const std::string left = lhs.root + "/" + lhs.glob;
+        const std::string right = rhs.root + "/" + rhs.glob;
+        // A strict ancestor is ordered by selector specificity, so it is
+        // deterministic. Only the same literal selector is ambiguous.
+        return left == right;
+    }
+    // A glob is intentionally treated as potentially overlapping.  The
+    // compiler must not silently pick one of two equal-priority redirects.
+    return lhs.root == rhs.root;
+}
+
+bool IsRedirectConflict(const CanonicalActionV2& lhs,
+                        const CanonicalActionV2& rhs) {
+    return lhs.action == RuleActionKind::kRedirect
+        && rhs.action == RuleActionKind::kRedirect
+        && lhs.priority == rhs.priority
+        && lhs.target != rhs.target
+        && SelectorsMayOverlap(lhs.selector, rhs.selector);
+}
+
 bool ValidateStoragePath(std::string_view path, const RulesLimits& limits) {
     return NormalizeRulePath(path, limits).has_value();
 }
@@ -900,6 +925,16 @@ RulesV2BuildResult BuildCanonicalPolicyV2(
                     < std::tie(rhs.selector.root, rhs.selector.glob, rhs.action,
                                rhs.priority, rhs.target, rhs.id);
             });
+        for (std::size_t i = 0; i < canonical_app.actions.size(); ++i) {
+            for (std::size_t j = i + 1; j < canonical_app.actions.size(); ++j) {
+                if (IsRedirectConflict(canonical_app.actions[i],
+                                       canonical_app.actions[j])) {
+                    AddBuildDiagnostic(&result, kRuleConflict,
+                                       "rules.redirect_conflict",
+                                       canonical_app.actions[j].id);
+                }
+            }
+        }
         policy.apps.push_back(std::move(canonical_app));
     }
     std::sort(policy.apps.begin(), policy.apps.end(),

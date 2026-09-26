@@ -9,6 +9,8 @@ param(
     [switch]$InitializeFixture,
     [string]$FixtureRoot,
     [string]$ExistingHiddenPath,
+    [ValidateSet('directory', 'file')] [string]$HiddenObjectType = 'directory',
+    [ValidatePattern('^[A-Za-z0-9._-]+$')] [string]$HiddenBasename,
     [UInt64]$ExpectedParentInode,
     [ValidateRange(0, 4)] [int]$ShadowMode,
     [ValidateSet('baseline', 'cache-order', 'concurrency', 'reliability', 'mutation', 'prepare-hidden-fd', 'preopen-hidden-fd', 'symlink-held-fd')]
@@ -66,14 +68,17 @@ if ($ExistingHiddenPath) {
     $fixtureRoot = $hiddenPath
 } elseif ($FixtureRoot) {
     $fixtureRoot = $FixtureRoot
-    $hiddenPath = "$fixtureRoot/hidden"
+    $basename = if ($HiddenBasename) { $HiddenBasename } elseif ($HiddenObjectType -eq 'file') { 'hidden-file' } else { 'hidden' }
+    $hiddenPath = "$fixtureRoot/$basename"
 } else {
     $fixtureRoot = "/storage/emulated/0/Pictures/PathGuardHideLab/$runId"
-    $hiddenPath = "$fixtureRoot/hidden"
+    $basename = if ($HiddenBasename) { $HiddenBasename } elseif ($HiddenObjectType -eq 'file') { 'hidden-file' } else { 'hidden' }
+    $hiddenPath = "$fixtureRoot/$basename"
     if ($fixtureRoot -notmatch '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
         throw "unexpected fixture path: $fixtureRoot"
     }
 }
+$hiddenObjectTest = if ($HiddenObjectType -eq 'file') { "test -f $hiddenPath" } else { "test -d $hiddenPath" }
 $runOutput = Join-Path (Join-Path $root $OutputDirectory) $runId
 New-Item -ItemType Directory -Force -Path $runOutput | Out-Null
 
@@ -91,7 +96,8 @@ function Invoke-Root([string]$Command) {
 }
 
 function Get-OracleSnapshot([string]$Name) {
-    $snapshot = @(Invoke-Root "test -d $fixtureRoot; find $fixtureRoot -exec stat -c '%F|%n|%s|%i' {} \; | sort; test -f $hiddenPath/canary.txt && sha256sum $hiddenPath/canary.txt || printf 'MISSING|%s\n' $hiddenPath/canary.txt") -join "`n"
+    $canary = if ($HiddenObjectType -eq 'file') { $hiddenPath } else { "$hiddenPath/canary.txt" }
+    $snapshot = @(Invoke-Root "test -d $fixtureRoot; find $fixtureRoot -exec stat -c '%F|%n|%s|%i' {} \; | sort; test -f $canary && sha256sum $canary || printf 'MISSING|%s\n' $canary") -join "`n"
     Set-Content -LiteralPath (Join-Path $runOutput "$Name.txt") -Value $snapshot -Encoding utf8
     return $snapshot
 }
@@ -113,7 +119,11 @@ function Reset-Fixture {
     if ($fixtureRoot -notmatch '^/storage/emulated/0/Pictures/PathGuardHideLab/\d{8}-\d{6}$') {
         throw "refusing to reset unexpected fixture path: $fixtureRoot"
     }
-    Invoke-Root "rm -rf $fixtureRoot; mkdir -p $hiddenPath; printf 'PathGuard HideLab canary $runId' > $hiddenPath/canary.txt; mkdir -p $hiddenPath/nested; printf 'nested $runId' > $hiddenPath/nested/nested.txt; printf 'visible $runId' > $fixtureRoot/visible.txt; printf 'visible-link $runId' > $fixtureRoot/visible-link.txt"
+    if ($HiddenObjectType -eq 'file') {
+        Invoke-Root "rm -rf $fixtureRoot; mkdir -p $fixtureRoot; printf 'PathGuard HideLab hidden file $runId' > $hiddenPath; printf 'visible $runId' > $fixtureRoot/visible.txt; printf 'visible-link $runId' > $fixtureRoot/visible-link.txt"
+    } else {
+        Invoke-Root "rm -rf $fixtureRoot; mkdir -p $hiddenPath; printf 'PathGuard HideLab canary $runId' > $hiddenPath/canary.txt; mkdir -p $hiddenPath/nested; printf 'nested $runId' > $hiddenPath/nested/nested.txt; printf 'visible $runId' > $fixtureRoot/visible.txt; printf 'visible-link $runId' > $fixtureRoot/visible-link.txt"
+    }
 }
 
 function Invoke-Probe([string]$Role, [string]$Package) {
@@ -229,7 +239,14 @@ function Assert-CacheOrder([string]$Role, [bool]$ExpectHidden) {
             $kind = if ($row[0].return_value -eq -1) { 'SEMANTIC_DRIFT' } else { 'LEAK' }
             throw "$kind`: HideLab $Role cache-order failed $test"
         }
-        if (-not $ExpectHidden -and $row[0].return_value -ne 0) {
+        $fileOpendir = $HiddenObjectType -eq 'file' -and
+            $test -eq 'external.0.cache.cold_opendir'
+        if (-not $ExpectHidden -and $fileOpendir -and
+            ($row[0].return_value -ne -1 -or $row[0].errno -ne 20)) {
+            throw "SEMANTIC_DRIFT: HideLab $Role file cache-order expected ENOTDIR for $test"
+        }
+        if (-not $ExpectHidden -and -not $fileOpendir -and
+            $row[0].return_value -ne 0) {
             throw "OVERBLOCK: HideLab $Role cache-order failed $test"
         }
     }
@@ -433,7 +450,7 @@ try {
         Reset-Fixture
     } elseif (-not $ExistingHiddenPath -and -not $fixtureRootExplicit) {
         Reset-Fixture
-    } elseif (((Invoke-Root "test -d $fixtureRoot && test -d $hiddenPath && echo READY || echo MISSING") -join '').Trim() -ne 'READY') {
+    } elseif (((Invoke-Root "test -d $fixtureRoot && $hiddenObjectTest && echo READY || echo MISSING") -join '').Trim() -ne 'READY') {
         throw "fixture is not prepared: $fixtureRoot"
     }
     $parentInode = Get-ParentInode
@@ -493,7 +510,7 @@ try {
     $after = Get-OracleSnapshot 'oracle-after'
     if (-not $AttackMutations -and $before -ne $after) { throw 'Root Oracle detected fixture mutation during no-backend baseline' }
     $summary = [ordered]@{
-        schema = 3; run_id = $runId; phase = $Scenario; backend = $Backend; shadow_mode = if ($PSBoundParameters.ContainsKey('ShadowMode')) { $ShadowMode } else { $null }; attack_mutations = [bool]$AttackMutations; fixture_root = $fixtureRoot; hidden_path = $hiddenPath; parent_inode = $parentInode
+        schema = 3; run_id = $runId; phase = $Scenario; backend = $Backend; shadow_mode = if ($PSBoundParameters.ContainsKey('ShadowMode')) { $ShadowMode } else { $null }; attack_mutations = [bool]$AttackMutations; fixture_root = $fixtureRoot; hidden_path = $hiddenPath; hidden_object_type = $HiddenObjectType; parent_inode = $parentInode
         target_package = $targetPackage; control_package = $controlPackage
         fixture_unchanged = ($before -eq $after); target_oracle_changed = $targetOracleChanged; control_oracle_changed = $controlOracleChanged
         conclusion = if ($ExpectTargetHidden -and $targetOracleChanged) { 'DESTRUCTIVE_FAIL' } elseif ($ExpectTargetHidden -and $controlError) { 'OVERBLOCK' } elseif ($ExpectTargetHidden -and $targetError -like 'SEMANTIC_DRIFT:*') { 'SEMANTIC_DRIFT' } elseif ($ExpectTargetHidden -and $targetError) { 'LEAK' } elseif ($ExpectTargetHidden) { 'PASS' } elseif ($AttackMutations) { 'BASELINE_MUTATION_VISIBLE' } elseif ($Scenario -eq 'cache-order') { 'BASELINE_CACHE_ORDER_VISIBLE_NOT_HIDE_PASS' } else { 'BASELINE_VISIBLE_NOT_HIDE_PASS' }

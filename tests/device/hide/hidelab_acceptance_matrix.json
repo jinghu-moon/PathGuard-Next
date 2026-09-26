@@ -8,6 +8,15 @@
     "descendant": "hidden/nested.txt",
     "canary": "hidden/canary.txt"
   },
+  "file_rule_fixture": {
+    "parent": "Pictures/PathGuardHideLab",
+    "hidden_basename": "hidden-file",
+    "object_type": "file",
+    "target_stat_open_readdir": "ENOENT/OMITTED",
+    "control_visible": true,
+    "root_oracle": "UNCHANGED",
+    "mutation": ["rename", "unlink", "link"]
+  },
   "observers": {
     "target": "dev.pathguard.hideprobe.target",
     "control": "dev.pathguard.hideprobe.control",

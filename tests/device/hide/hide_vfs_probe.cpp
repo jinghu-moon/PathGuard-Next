@@ -730,6 +730,41 @@ void ObserveExternalMutations(const std::string& hidden_path) {
         return;
     }
 
+    struct stat hidden_metadata {};
+    const bool hidden_is_directory =
+        stat(hidden_path.c_str(), &hidden_metadata) == 0
+        && S_ISDIR(hidden_metadata.st_mode);
+    if (!hidden_is_directory) {
+        errno = 0;
+        const int unlink_result = unlinkat(parent_fd, name.c_str(), 0);
+        Emit("external.mutation.unlink", "mutation", hidden_path,
+             unlink_result, unlink_result == 0 ? 0 : errno,
+             unlink_result == 0);
+
+        errno = 0;
+        const int rename_result = renameat(
+            parent_fd, name.c_str(), parent_fd, "hidelab-hidden-moved");
+        Emit("external.mutation.rename", "mutation", hidden_path,
+             rename_result, rename_result == 0 ? 0 : errno,
+             rename_result == 0);
+
+        errno = 0;
+        const int link_result = linkat(
+            parent_fd, name.c_str(), parent_fd, "hidelab-hidden-link", 0);
+        Emit("external.mutation.link", "mutation", hidden_path,
+             link_result, link_result == 0 ? 0 : errno,
+             link_result == 0);
+
+        errno = 0;
+        const int symlink_result = symlinkat(
+            "visible.txt", parent_fd, name.c_str());
+        Emit("external.mutation.symlink", "mutation", hidden_path,
+             symlink_result, symlink_result == 0 ? 0 : errno,
+             symlink_result == 0);
+        close(parent_fd);
+        return;
+    }
+
     const std::string created_path = name + "/hidelab-created";
     const std::string canary_path = name + "/canary.txt";
     const std::string created_directory_path = name + "/hidelab-created-dir";

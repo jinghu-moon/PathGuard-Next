@@ -255,10 +255,35 @@ private:
             return std::nullopt;
         }
 
-        // A fixed-device profile proves only that the package was built for
-        // this device.  It is not a completed Hide admission.  The daemon
-        // must consume the evidence artifact produced by admit_hide1.ps1;
-        // after reboot the boot_id check below invalidates stale evidence.
+        // The production-shaped module requires a boot-bound evidence file.
+        // A fixed-device package may explicitly opt into automatic admission
+        // after the same runtime identity checks, so installation is usable
+        // without a host-side import step.  The marker is package-owned and
+        // is never accepted from the ordinary universal package.
+        if (fs::exists(module_dir_ / "config/hide1_auto_admit")) {
+            std::ifstream profile_input(
+                module_dir_ / "config/hide1_device_profile.json",
+                std::ios::binary);
+            if (!profile_input) {
+                if (error) *error = "hide-device-profile-unavailable";
+                return std::nullopt;
+            }
+            const std::string profile_json{
+                std::istreambuf_iterator<char>(profile_input),
+                std::istreambuf_iterator<char>()};
+            std::string profile_error;
+            auto profile_admission = pathguard::hide1::ReadDeviceAdmissionConfig(
+                profile_json, runtime, &profile_error);
+            if (!profile_admission.has_value()) {
+                if (error) *error = profile_error.empty()
+                    ? "hide-device-profile-invalid" : profile_error;
+                return std::nullopt;
+            }
+            return profile_admission;
+        }
+
+        // Otherwise consume the boot-bound evidence artifact.  After reboot
+        // its boot_id check invalidates stale evidence.
         std::ifstream admission_input(module_dir_ / "run/admission.json",
                                       std::ios::binary);
         if (!admission_input) {

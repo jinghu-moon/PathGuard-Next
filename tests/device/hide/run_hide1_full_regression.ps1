@@ -13,7 +13,10 @@ param(
     [switch]$BaselineOnly,
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
     [string]$Backend = 'pathguard-hide1',
-    [string]$OutputDirectory = 'build/device-evidence/hide1-regression'
+    [string]$OutputDirectory = 'build/device-evidence/hide1-regression',
+    [string]$ModuleDir = '/data/adb/modules/pathguard_next'
+    ,[ValidateSet('directory', 'file')] [string]$HiddenObjectType = 'directory',
+    [ValidatePattern('^[A-Za-z0-9._-]+$')] [string]$HiddenBasename
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,11 +74,13 @@ $device = ((& $adb shell getprop ro.product.device 2>$null) -join '').Trim()
 $fingerprint = ((& $adb shell getprop ro.build.fingerprint 2>$null) -join '').Trim()
 $kernelRelease = ((& $adb shell uname -r 2>$null) -join '').Trim()
 $bootId = ((& $adb shell su -W -c 'cat /proc/sys/kernel/random/boot_id' 2>$null) -join '').Trim()
-$moduleHashText = ((& $adb shell su -W -c 'sha256sum /data/adb/modules/pathguard_hide1_lab/bin/pathguard_hide1.ko' 2>$null) -join '').Trim()
+$moduleHashText = ((& $adb shell su -W -c "sha256sum $ModuleDir/bin/pathguard_hide1.ko" 2>$null) -join '').Trim()
 $moduleHash = if ($moduleHashText -match '^(?<hash>[0-9a-fA-F]{64})\s+') { $Matches.hash.ToLowerInvariant() } else { '' }
 $common = @('-TargetApk', $TargetApk, '-ControlApk', $ControlApk,
             '-OutputDirectory', "$OutputDirectory/$runId",
-            '-Backend', $(if ($BaselineOnly) { 'none' } else { $Backend }))
+            '-Backend', $(if ($BaselineOnly) { 'none' } else { $Backend }),
+            '-HiddenObjectType', $HiddenObjectType)
+if ($HiddenBasename) { $common += @('-HiddenBasename', $HiddenBasename) }
 if ($GrantAllFilesAccess) { $common += '-GrantAllFilesAccess' }
 if ($GrantReadMediaImages) { $common += '-GrantReadMediaImages' }
 if ($KeepTargetProcess) { $common += '-KeepTargetProcess' }
@@ -89,13 +94,14 @@ if ($FixtureRoot) { $common += '-KeepFixture' }
 if (-not $BaselineOnly) { $common += '-ExpectTargetHidden' }
 $scenarios = @('baseline', 'cache-order', 'concurrency', 'reliability')
 $results = [System.Collections.Generic.List[object]]::new()
-$boundHiddenPath = "$FixtureRoot/hidden"
+$boundBasename = if ($HiddenBasename) { $HiddenBasename } elseif ($HiddenObjectType -eq 'file') { 'hidden-file' } else { 'hidden' }
+$boundHiddenPath = "$FixtureRoot/$boundBasename"
 $observedParentInode = $null
 $expectedParentInodeProvided = $PSBoundParameters.ContainsKey('ExpectedParentInode')
 function Add-ScenarioEvidence([string]$Path) {
     $summary = Get-Content -Raw -LiteralPath (Join-Path $Path 'summary.json') | ConvertFrom-Json
-    if ($FixtureRoot -and ($summary.fixture_root -ne $FixtureRoot -or $summary.hidden_path -ne $boundHiddenPath)) {
-        throw "INFRA_ERROR: scenario identity mismatch: expected $FixtureRoot / $boundHiddenPath, got $($summary.fixture_root) / $($summary.hidden_path)"
+    if ($FixtureRoot -and ($summary.fixture_root -ne $FixtureRoot -or $summary.hidden_path -ne $boundHiddenPath -or $summary.hidden_object_type -ne $HiddenObjectType)) {
+        throw "INFRA_ERROR: scenario identity mismatch: expected $FixtureRoot / $boundHiddenPath / $HiddenObjectType, got $($summary.fixture_root) / $($summary.hidden_path) / $($summary.hidden_object_type)"
     }
     if ($summary.shadow_mode -ne $ShadowMode) {
         throw "INFRA_ERROR: shadow mode mismatch: expected $ShadowMode, got $($summary.shadow_mode)"
@@ -145,7 +151,7 @@ $conclusion = if ($failures.Count -gt 0 -or $mountFailure -or $missingScenarios.
 } else {
     'baseline_or_unsupported'
 }
-$statusText = ((& $adb shell su -W -c '/data/adb/modules/pathguard_hide1_lab/bin/hide1ctl status' 2>$null) -join '').Trim()
+$statusText = ((& $adb shell su -W -c "$ModuleDir/bin/hide1ctl status" 2>$null) -join '').Trim()
 $statusGeneration = if ($statusText -match '(?:^|\s)generation=(\d+)(?:\s|$)') { [UInt64]$Matches[1] } else { 0 }
 $statusParentInode = if ($statusText -match '(?:^|\s)parent_inode=(\d+)(?:\s|$)') { [UInt64]$Matches[1] } else { 0 }
 $statusShadowMode = ((& $adb shell su -W -c 'cat /sys/module/pathguard_hide1/parameters/shadow_mode' 2>$null) -join '').Trim()
@@ -165,6 +171,7 @@ $statusShadowMode = ((& $adb shell su -W -c 'cat /sys/module/pathguard_hide1/par
     kernel_release = $kernelRelease
     boot_id = $bootId
     module_sha256 = $moduleHash
+    module_dir = $ModuleDir
     status_generation = $statusGeneration
     status_parent_inode = $statusParentInode
     status_shadow_mode = $statusShadowMode

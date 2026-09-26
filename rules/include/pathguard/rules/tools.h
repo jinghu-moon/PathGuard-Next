@@ -20,6 +20,7 @@ enum class PolicyChangeKind {
 
 enum class PolicyRuleKind {
     kDeny,
+    kHide,
     kRedirect,
     kObserve,
     kExport,

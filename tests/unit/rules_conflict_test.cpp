@@ -44,6 +44,18 @@ int main() {
     assert(distinct.canonical_v2->apps.front().actions.front().selector.root
            == "Root");
 
+    const RulesBuildResult redirect_conflict = Compile(
+        "redirect_rules=[{select={root=\"Root\",glob=\"A\",type=\"any\"},to=\"B\",priority=7},"
+        "{select={root=\"Root\",glob=\"A\",type=\"any\"},to=\"C\",priority=7}]\n");
+    assert(!redirect_conflict.ok());
+    assert(HasCode(redirect_conflict, kRuleConflict));
+
+    const RulesBuildResult ordered = Compile(
+        "deny_rules=[{select={root=\"Root\",glob=\"A\",type=\"any\"},priority=0}]\n"
+        "redirect_rules=[{select={root=\"Root\",glob=\"A\",type=\"any\"},to=\"B\",priority=99}]\n"
+        "actions=[{kind=\"hide\",parent=\"/Root\",basename=\"A\"}]\n");
+    assert(ordered.ok());
+
     const RulesBuildResult invalid_target = Compile(
         "redirect_rules=[{select={root=\"Root\",glob=\"A\"},to=\"../bad\"}]\n");
     assert(!invalid_target.ok());

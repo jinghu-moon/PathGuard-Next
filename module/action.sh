@@ -10,3 +10,7 @@ if [ -f "$MODDIR/run/pathguardd.pid" ]; then
 else
   echo "inactive"
 fi
+if [ -x "$MODDIR/bin/hide1ctl" ]; then
+  echo "hide:"
+  "$MODDIR/bin/hide1ctl" status 2>/dev/null || true
+fi

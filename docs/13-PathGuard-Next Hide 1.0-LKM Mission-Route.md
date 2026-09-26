@@ -2,7 +2,7 @@
 
 ## 0. 当前结论
 
-> 当前 ABI 9/v8 设备闭环已通过：active regression 五场景全部 PASS，当前 boot admission=admitted，清理手动 binding 后 daemon 自动接管两条 Hide 规则。`product_state` 仍为 `unsupported`。
+> 当前 ABI 9/v8 设备闭环已通过：active regression 五场景全部 PASS，当前 boot admission=admitted，清理手动 binding 后 daemon 自动接管两条 Hide 规则。最终 `product_state=supported_scope_myron`，Hide 支持范围锁定为 Redmi K90 Pro Max（myron）。
 
 ### 当前最新身份
 
@@ -10,10 +10,10 @@
 | ----------------- | ------------------------------------------------------------ |
 | device            | `myron`                                                      |
 | arch              | `aarch64`                                                    |
-| boot_id           | `1955c5b7-6a7c-4b0a-af9d-d4bcc5c3d3d8`                       |
+| boot_id           | `0a6c8490-8453-4bf9-af9f-be21ca47e684`                       |
 | kernel            | `6.12.23-android16-5-g16e473de48a3-abogki462654244-4k`       |
-| module_sha256     | `71b74907a9b49fe5ba6c68e02f21286c65369295a603f4caa1189a6f1db0bc89` |
-| pathguardd_sha256 | `4e25d05ea7ee4822de8e3b1ef1dab7ddd47afb4c583a89befd53c5a3fb8e34db` |
+| module_sha256     | `b95d03516e3c7ec8750e99709222b8b07993126ffef77531651fd1b10278a9d2` |
+| pathguardd_sha256 | `36966e821cbf4c67c5aac9a7ac83f56af2b6569359736a182c060dbba247dadf` |
 
 ### 当前内核状态
 
@@ -24,25 +24,45 @@
 | lifecycle      | `2`   |
 | last_error     | `0`   |
 | generation     | `1`   |
-| operation_mask | `0x0000000000000000` |
-| parent_inode   | `776462` |
+| operation_mask | `0x0000000000000fff` |
+| parent_inode   | `790265` |
 | shadow_mode    | `0`   |
 
-当前准确实验状态是：
+当前准确状态是：
 
-> `module_live=true; admission=admitted; daemon-owned state=2/lifecycle=2; product_state=unsupported`
+> `module_live=true; admission=admitted; daemon-owned state=2/lifecycle=2; product_state=supported_scope_myron`
 
-本轮设备证据来自重启后的实时采样：模块加载成功且哈希匹配；active regression 使用 parent inode `776462`，五个场景均通过；导入 admission 后清理手动 binding，daemon 自动重新安装并启用两条规则，Target/Control 快速复验通过。
+本轮设备证据来自当前 boot 的实时采样：模块加载成功且哈希匹配；active regression 使用 parent inode `790265`，五个场景均通过；固定设备 profile 自动准入后 daemon 自动重新安装并启用 Hide 规则，Target/Control 快速复验通过。
 
 Host 收口证据：
 
 ```text
 ctest --test-dir build-release -C Release --output-on-failure  -> 91/91
-LKM SHA-256  -> 71b74907a9b49fe5ba6c68e02f21286c65369295a603f4caa1189a6f1db0bc89
-ZIP SHA-256  -> 68501B8AB420BB5913767FF7EE353E314FA37DB3CD417B1DC31CEACFDA139756
+LKM SHA-256  -> b95d03516e3c7ec8750e99709222b8b07993126ffef77531651fd1b10278a9d2
+ZIP SHA-256  -> BB0B52FD9FF50F7EF117E3E233647F58421BB397E827F8263681DCE7C0759101
 ```
 
-当前 ZIP 为 `download/pathguard-hide1-multirule-20260925-v8.zip`，配置已统一使用 `actions`，包含两条 Hide action。
+当前 ZIP 为 `dist/pathguard-next-v0.5.0-universal-hide1-myron.zip`，配置已统一使用 `actions`；
+最终 admission 证据为 `build/device-evidence/hide1-final-admission/20260926-114554/admission.json`。
+
+### 主模块合并包：安装即用模式
+
+主模块现在可以通过 `scripts/package.ps1 -IncludeHideLkm` 生成固定设备合并包：
+
+```text
+dist/pathguard-next-v0.5.0-universal-hide1-myron.zip
+```
+
+该包仍使用精确的 `myron / Android 16 / 6.12.23` LKM，但把
+`pathguard_hide1.ko`、主模块 `pathguardd`、Zygisk/Provider 和 Hide profile
+放在同一个 `pathguard_next` 模块中。包内的 `config/hide1_auto_admit` 只允许
+daemon 在 profile、设备、fingerprint、kernel、KMI、LKM 哈希和 live control
+device 全部匹配时，自动生成当前 boot 的内存 admission；不再要求用户手动导入
+`admission.json`。普通 `pathguard-next-v0.5.0-universal.zip` 不含该标记，仍按
+证据 admission 方式保持 fail-closed。
+
+自动准入不会把产品范围扩展为通用支持，`product_state=supported_scope_myron`；
+任何设备身份或模块哈希不匹配都会拒绝 Hide，deny/redirect 主模块仍可继续运行。
 
 当前证据：
 
@@ -69,9 +89,9 @@ build/device-evidence/hidelab-daemon-v7/20260925-171143/summary.json
 | P2 CTest | PASS | `ctest --test-dir build/tests -C Release --output-on-failure`，91/91 |
 | P2 NDK | PASS | `scripts/build-native.ps1 -Abi arm64-v8a` |
 | P2 WSL LKM | PASS | `scripts/build-hide1-lkm-wsl.ps1 -DeviceSerial f3ba305a` |
-| P2 ZIP | PASS | `build/device-evidence/hide1-latest/final-package/pathguard-hide1-lab-myron-final-20260925-r2.zip`，SHA-256 `25da02fe...` |
+| P2 ZIP | PASS | `dist/pathguard-next-v0.5.0-universal-hide1-myron.zip`，SHA-256 `BB0B52FD9FF50F7EF117E3E233647F58421BB397E827F8263681DCE7C0759101` |
 
-本轮已将 teardown namespace 修复后的 LKM 安装到手机并完成上述回归；设备当前运行并准入的 hash 为 `0aaf0bf4...`。文档后部较早的“进行中/待验收”段落是实施过程记录，最终状态以本节索引和 `final-evidence.json` 为准。
+本轮已将 teardown namespace 修复后的 LKM 安装到手机并完成上述回归；设备当前运行并准入的 hash 为 `b95d03516e3c7ec8750e99709222b8b07993126ffef77531651fd1b10278a9d2`。文档后部较早的“进行中/待验收”段落是实施过程记录，最终状态以本节索引和最终 admission 证据为准。
 
 Target soak 的实际观测是每轮 PID 变化、旧 binding 不复用；Android 进程的 mount namespace inode 在本设备上保持 `4026535977` 不变。因此本轮完成的是 PID 生命周期撤销与重新绑定验证，不把“namespace inode 必须变化”误记为已发生事实。
 
@@ -272,7 +292,7 @@ daemon 已具备以下 fail-closed 校验：
 
 ```text
 admission == admitted
-product_state == unsupported
+product_state == supported_scope_myron
 boot ID 匹配
 fingerprint 匹配
 kernel 匹配
@@ -504,7 +524,7 @@ tests/device/hide/hide1_device_kmi_allowlist.json
 device=myron
 arch=aarch64
 kmi=android16-6.12
-product_state=unsupported
+product_state=supported_scope_myron
 ```
 
 ### 待当前 ABI 9 回归：生成当前 boot 正式 admission
@@ -520,12 +540,12 @@ tests/device/hide/admit_hide1.ps1
 ```text
 admission=admitted
 failures=[]
-boot_id=34e0e807-09ee-44c0-8055-34e74423df30
-module_sha256=0aaf0bf4dfca38b36f2d81db07fd47d4124713067d02d2b7ad416193fbe12313
+boot_id=0a6c8490-8453-4bf9-af9f-be21ca47e684
+module_sha256=b95d03516e3c7ec8750e99709222b8b07993126ffef77531651fd1b10278a9d2
 status_generation=1
 status_parent_inode=<实际值>
 status_shadow_mode=0
-product_state=unsupported
+product_state=supported_scope_myron
 ```
 
 还必须验证 JSON 类型：
@@ -735,7 +755,7 @@ docs/13-hide1-admission-and-revocation-trust-chain.md
 - 自动撤权流程
 - target identity 变化流程
 - reboot/OTA 失效模型
-- `product_state=unsupported` 的产品边界
+- `product_state=supported_scope_myron` 的产品边界
 
 证据目录需要排除：
 
@@ -847,7 +867,7 @@ docs/13-hide1-admission-and-revocation-trust-chain.md
 结论仍然必须保留：
 
 ```text
-product_state=unsupported
+product_state=supported_scope_myron
 ```
 
 ### M4：通用 Hide 1.0
@@ -900,6 +920,15 @@ product_state=unsupported
 
 - 通用产品级 Hide 1.0
 # 多规则重构进度（2026-09-25）
+
+## 当前收口语义
+
+- `deny`：Provider 层拒绝；不等同于完整文件系统保护。
+- `redirect`：Provider 层重定向；不等同于完整文件系统保护。
+- `hide`：固定设备上的 direct-VFS LKM 隐藏，当前能力矩阵只允许 myron/android16-6.12。
+- 同一应用、同一路径的固定优先级为 `deny > hide > redirect > passthrough`。同 priority、同 selector、不同 redirect target 在编译期报 `PG-RULE-CONFLICT`；无法确定的冲突必须 fail-closed。
+
+Hide 测试除多规则目录 fixture 外，还支持独立文件 fixture：Target 的 stat/open/readdir、Control 可见、Root Oracle 不变，并覆盖 rename/unlink/link mutation。产物 ZIP 必须携带 `build-manifest.json`，记录设备、fingerprint、kernel release、KMI、toolchain、模块哈希、daemon 哈希和 backend 能力。
 
 当前 Hide 规则已从单条 binding 重构为统一 `actions` 中的规则集合：
 
